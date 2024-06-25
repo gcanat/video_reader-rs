@@ -10,7 +10,6 @@ crate-type = ["cdylib"]
 [dependencies]
 pyo3 = { version = "0.21", features = ["extension-module"] }
 numpy = "0.21"
-mp4 = "0.14.0"
 ndarray = "0.15.6"
 video-rs = { version = "0.8.1", features = ["ndarray"]}
 ffmpeg-next = "7.0.0"
