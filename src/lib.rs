@@ -103,10 +103,10 @@ fn video_reader<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()>
     // wrapper of `decode_video`
     /// Decode video and return a 4D ndarray representing RGB frames with the shape (N, H, W, C)
     /// * `filename` - Path to the video file
-    /// * `resize_shorter_side` - Resize the shorter side of the video to this value.  If video is
+    /// * `resize_shorter_side` - Resize the shorter side of the video to this value. If video is
     /// already smaller than this value, then no resizing is done.
-    /// * `compression_factor` - Factor to compress the video by.  If 1.0, then no compression is done.
-    /// * `threads` - Number of threads to use for decoding. If 0, let ffmpeg decide the optimal
+    /// * `compression_factor` - Factor for temporal compression. If None, then no compression.
+    /// * `threads` - Number of threads to use for decoding. If None, let ffmpeg decide the optimal
     /// number.
     /// * Returns a 4D ndarray with shape (N, H, W, C)
     #[pyfn(m)]
@@ -134,10 +134,10 @@ fn video_reader<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()>
     // wrapper of `decode_video_gray`
     /// Decode video and return a 3D ndarray representing gray frames with the shape (N, H, W)
     /// * `filename` - Path to the video file
-    /// * `resize_shorter_side` - Resize the shorter side of the video to this value.  If video is
+    /// * `resize_shorter_side` - Resize the shorter side of the video to this value. If video is
     /// already smaller than this value, then no resizing is done.
-    /// * `compression_factor` - Factor to compress the video by.  If 1.0, then no compression is done.
-    /// * `threads` - Number of threads to use for decoding. If 0, let ffmpeg decide the optimal
+    /// * `compression_factor` - Factor for temporal compression. If None, then no compression.
+    /// * `threads` - Number of threads to use for decoding. If None, let ffmpeg decide the optimal
     /// number.
     /// * Returns a 3D ndarray with shape (N, H, W)
     #[pyfn(m)]
@@ -166,9 +166,9 @@ fn video_reader<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()>
     /// Might be inaccurate when the frames metadata is messed up (wrong pts, dts, or duration...).
     /// * `filename` - Path to the video file
     /// * `indices` - Indices of frames to retrieve
-    /// * `resize_shorter_side` - Resize the shorter side of the video to this value.  If video is
+    /// * `resize_shorter_side` - Resize the shorter side of the video to this value. If video is
     /// already smaller than this value, then no resizing is done.
-    /// * `threads` - Number of threads to use for decoding. If 0, let ffmpeg decide the optimal
+    /// * `threads` - Number of threads to use for decoding. If None, let ffmpeg decide the optimal
     /// number.
     /// * Returns a 4D ndarray with shape (N, H, W, C)
     #[pyfn(m)]
@@ -193,9 +193,9 @@ fn video_reader<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()>
     /// * `indices` - Indices of frames to retrieve
     /// * `threads` - Number of threads to use (only usefull when falling back to safe frame
     /// iterating).
-    /// * `resize_shorter_side` - Resize the shorter side of the video to this value.  If video is
+    /// * `resize_shorter_side` - Resize the shorter side of the video to this value. If video is
     /// already smaller than this value, then no resizing is done.
-    /// * `threads` - Number of threads to use for decoding. If 0, let ffmpeg decide the optimal
+    /// * `threads` - Number of threads to use for decoding. If None, let ffmpeg decide the optimal
     /// number.
     /// * Returns a 4D ndarray with shape (N, H, W, C)
     #[pyfn(m)]

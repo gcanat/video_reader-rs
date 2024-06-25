@@ -192,8 +192,7 @@ impl VideoReader {
             Flags::BILINEAR,
         )?;
 
-        // if a compression_factor is passed as argument it means we will want to decode the whole
-        // video (as opposed to get a batch of frames for example)
+        // setup the VideoReducer if needed
         let reducer = if with_reducer {
             // which frames we want to gather ?
             let n_frames_compressed =
@@ -328,6 +327,11 @@ pub fn get_resized_dim(
     }
 }
 
+/// Encode frames to a video file with h264 codec.
+/// * `frames` - Video frames to encode.
+/// * `destination_path` - Path to save the video.
+/// * `fps` - Frames per second of the video.
+/// * `codec` - Codec to use for encoding the video, eg "h264".
 pub fn save_video(
     frames: Array4<u8>,
     destination_path: &str,
@@ -348,7 +352,7 @@ pub fn save_video(
         }
         _ => {
             // encode with mpeg4 format, ie XviD
-            // FIXME: doesnt seem to be working, video is still encoded as h264
+            // FIXME: does not work, video is still encoded as h264
             let mut opts = HashMap::new();
             opts.insert("vcodec".to_string(), "libxvid".to_string());
             opts.insert("vtag".to_string(), "xvid".to_string());
@@ -374,6 +378,10 @@ pub fn save_video(
     Ok(())
 }
 
+/// Converts an RGB24 video `AVFrame` produced by ffmpeg to an `ndarray`.
+/// Copied from https://github.com/oddity-ai/video-rs
+/// * `frame` - Video frame to convert.
+/// * returns a three-dimensional `ndarray` with dimensions `(H, W, C)` and type byte.
 pub fn convert_frame_to_ndarray_rgb24(frame: &mut Video) -> Result<FrameArray, ffmpeg::Error> {
     unsafe {
         let frame_ptr = frame.as_mut_ptr();
@@ -405,6 +413,7 @@ pub fn convert_frame_to_ndarray_rgb24(frame: &mut Video) -> Result<FrameArray, f
     }
 }
 
+/// Convert all frames in the video from RGB to grayscale.
 pub fn rgb2gray(frames: Array4<u8>) -> Array3<u8> {
     frames.map_axis(Axis(3), |pix| {
         (0.2125 * pix[0] as f32 + 0.7154 * pix[1] as f32 + 0.0721 * pix[2] as f32)
@@ -414,6 +423,9 @@ pub fn rgb2gray(frames: Array4<u8>) -> Array3<u8> {
 }
 
 impl VideoReader {
+    /// Safely get the batch of frames from the video by iterating over all frames and decoding
+    /// only the ones we need. This is of course slower than seeking to closest keyframe, but
+    /// can be more accurate when the video's metadata is not reliable.
     pub fn get_batch_safe(mut self, indices: Vec<usize>) -> Result<VideoArray, ffmpeg::Error> {
         let mut frame_map: HashMap<usize, FrameArray> = HashMap::new();
         match self.reducer {
@@ -455,6 +467,10 @@ impl VideoReader {
             None => panic!("No Reducer to get the frames"),
         }
     }
+
+    /// Get the batch of frames from the video by seeking to the closest keyframe and skipping
+    /// the frames until we reach the desired frame index. Heavily inspired by the implementation
+    /// from decord library: https://github.com/dmlc/decord
     pub fn get_batch(&mut self, indices: Vec<usize>) -> Result<VideoArray, ffmpeg::Error> {
         let mut video_frames: VideoArray = Array::zeros((
             indices.len(),

@@ -38,10 +38,10 @@ the `--release` flag ensures the Rust part of the code is compiled in release mo
 import video_reader
 frames = video_reader.decode(filename, resize, compression_factor, threads)
 ```
-* filename: path to the video file to decode
-* resize: optional resizing for the video. If the value is bigger than the actual video size, no resizing will be done
-* compression_factor: temporal sampling, eg if 0.25, take 25% of the frames, evenly spaced.
-* threads: number of CPU cores to use for ffmpeg decoding, 0 means auto (let ffmpeg pick the optimal number).
+* **filename**: path to the video file to decode
+* **resize**: optional resizing for the video. If the value is bigger than the actual video size, no resizing will be done
+* **compression_factor**: temporal sampling, eg if 0.25, take 25% of the frames, evenly spaced.
+* **threads**: number of CPU cores to use for ffmpeg decoding, 0 means auto (let ffmpeg pick the optimal number).
 
 Returns a numpy array of shape (N, H, W, C).
 
@@ -136,4 +136,3 @@ vr = VideoReader("sample.mp4")
 - [decord](https://github.com/dmlc/decord) for showing how to `get_batch` efficiently.
 - [ffmpeg-next](https://github.com/zmwangx/rust-ffmpeg) for the Rust bindings to ffmpeg.
 - [video-rs](https://github.com/oddity-ai/video-rs) for the nice high level api which makes it easy to encode videos.
-- [mp4](https://github.com/alfg/mp4-rust) to easily grab metadata from the video file.
