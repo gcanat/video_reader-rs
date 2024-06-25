@@ -2,9 +2,9 @@ name: ci
 
 on:
   push:
-    branches: [ master ]
+    branches: [ main ]
   pull_request:
-    branches: [ master ]
+    branches: [ main ]
 
 jobs:
   lints:
@@ -29,8 +29,6 @@ jobs:
 
       - name: Cache
         uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: "build"
 
       - name: Rustfmt
         run: cargo fmt --all -- --check
