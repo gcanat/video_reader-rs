@@ -34,6 +34,7 @@ maturin develop --release
 the `--release` flag ensures the Rust part of the code is compiled in release mode, which enables compiler optimizations.
 
 ## Usage
+Decoding a video is as simple as:
 ```python
 import video_reader
 frames = video_reader.decode(filename, resize, compression_factor, threads)
@@ -49,6 +50,15 @@ We can do the same thing if we want grayscale frames, and it will retun an array
 ```python
 frames = video_reader.decode_gray(filename, resize, compression_factor, threads)
 ```
+
+If we only need a sub-clip of the video we can use the `get_batch` function:
+```python
+frames = video_reader.get_batch(filename, indices, threads, resize)
+```
+* **filename**: path to the video file to decode
+* **indices**: list of indices of the frames to get
+* **threads**: number of CPU cores to use for ffmpeg decoding, currently has no effect as `get_batch` does not support multithreading. (NOTE: it is still as fast as decord from our benchmarking)
+* **resize**: optional resizing for the video. If the value is bigger than the actual video size, no resizing will be done
 
 We can also get the shape of the raw video
 ```python

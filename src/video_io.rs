@@ -111,6 +111,18 @@ impl VideoDecoder {
 }
 
 impl VideoReader {
+    /// Create a new VideoReader instance
+    /// * `filename` - Path to the video file.
+    /// * `compression_factor` - Factor to reduce the number of frames in the video.
+    /// * `resize_shorter_side` - Resize the shorter side of the video to this value. If the
+    /// value is bigger than the shorter side of the video, the video will not be resized.
+    /// * `threads` - Number of threads to use for decoding. This will be ignored when using
+    /// the `get_batch` method, as it does not work with multithreading at the moment.
+    /// * `with_reducer` - Whether to use the VideoReducer to reduce the number of frames.
+    /// should be set to true to be able to use `decode_video` method. Set to false when using
+    /// the `get_batch` method.
+    ///
+    /// Returns: a VideoReader instance.
     pub fn new(
         filename: String,
         compression_factor: Option<f64>,
