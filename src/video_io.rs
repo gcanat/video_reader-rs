@@ -177,6 +177,7 @@ impl VideoReader {
             kind: threading::Type::Frame,
             count: threads,
             // FIXME: beware this does not exist in ffmpeg 6.0 ?
+            #[cfg(not(feature = "ffmpeg_6_0"))]
             safe: true,
         });
         let decoder = context_decoder.decoder().video()?;

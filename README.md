@@ -33,6 +33,11 @@ maturin develop --release
 `maturin develop` builds the crate and installs it as a python module directly in the current virtualenv.
 the `--release` flag ensures the Rust part of the code is compiled in release mode, which enables compiler optimizations.
 
+:warning: If you are using a version of **ffmpeg >= 6.0** you need to enabled the `ffmpeg_6_0` feature:
+```bash
+maturin develop --release --features ffmpeg_6_0
+```
+
 ## Usage
 Decoding a video is as simple as:
 ```python
