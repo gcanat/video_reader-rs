@@ -54,22 +54,12 @@ fn video_reader<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()>
         Ok(gray_vid)
     }
 
-    fn get_batch_nofb(
-        filename: &String,
-        indices: Vec<usize>,
-        resize_shorter_side: Option<f64>,
-        // threads: Option<usize>,
-    ) -> Result<Array4<u8>, ffmpeg::Error> {
-        // we must force single thread mode here
-        let mut vr = VideoReader::new(filename.to_owned(), None, resize_shorter_side, 1, false)?;
-        vr.get_batch(indices)
-    }
-
     fn get_batch(
         filename: &String,
         indices: Vec<usize>,
         resize_shorter_side: Option<f64>,
         threads: Option<usize>,
+        with_fallback: bool,
     ) -> Result<Array4<u8>, ffmpeg::Error> {
         let video: Array4<u8>;
         // video reader that will use Seeking, only works in single thread mode for now
@@ -82,8 +72,8 @@ fn video_reader<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()>
             .collect::<Vec<_>>()
             .len();
         let first_key = vr.stream_info.frame_times.get(&0).unwrap();
-        // try to detect weird cases and if so switch to decoding without seeking
-        if (num_zero_pts > 1) || (first_key.dur <= 0) || (first_key.dts < 0) {
+        // if fallback is enabled, try to detect weird cases and if so switch to decoding without seeking
+        if with_fallback && ((num_zero_pts > 1) || (first_key.dur <= 0) || (first_key.dts < 0)) {
             debug!("Warning: video has weird timestamps, decoding without seeking");
             // switch to video reader that will iterate on all frames, we can use threading here
             vr = VideoReader::new(
@@ -162,30 +152,6 @@ fn video_reader<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()>
         }
     }
 
-    /// Get a batch of frames from a video file, without fallback method when metadata is corrupted.
-    /// Might be inaccurate when the frames metadata is messed up (wrong pts, dts, or duration...).
-    /// * `filename` - Path to the video file
-    /// * `indices` - Indices of frames to retrieve
-    /// * `resize_shorter_side` - Resize the shorter side of the video to this value. If video is
-    /// already smaller than this value, then no resizing is done.
-    /// * `threads` - Number of threads to use for decoding. If None, let ffmpeg decide the optimal
-    /// number.
-    /// * Returns a 4D ndarray with shape (N, H, W, C)
-    #[pyfn(m)]
-    #[pyo3(name = "get_batch_nofb")]
-    fn get_batch_nofb_py<'py>(
-        py: Python<'py>,
-        filename: &str,
-        indices: Vec<usize>,
-        resize_shorter_side: Option<f64>,
-    ) -> PyResult<Bound<'py, PyArray<u8, Dim<[usize; 4]>>>> {
-        let vid = get_batch_nofb(&filename.to_string(), indices, resize_shorter_side);
-        match vid {
-            Ok(vid) => Ok(vid.into_pyarray_bound(py)),
-            Err(e) => Err(PyRuntimeError::new_err(format!("Error: {}", e))),
-        }
-    }
-
     /// Get a batch of frames from a video file, trying to use Seek when possible, and falling back
     /// to iterating over all frames when bad metadata is detected (eg. several frames with pts=0,
     /// frame with dts < 0, etc).
@@ -196,6 +162,8 @@ fn video_reader<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()>
     /// * `resize_shorter_side` - Resize the shorter side of the video to this value. If video is
     /// already smaller than this value, then no resizing is done.
     /// * `threads` - Number of threads to use for decoding. If None, let ffmpeg decide the optimal
+    /// * `with_fallback` - If True, will try to detect wrong metadata in video and if so fallback
+    /// to decoding without seeking. If False (or None), will always use seeking. Default is None.
     /// number.
     /// * Returns a 4D ndarray with shape (N, H, W, C)
     #[pyfn(m)]
@@ -206,8 +174,15 @@ fn video_reader<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()>
         indices: Vec<usize>,
         threads: Option<usize>,
         resize_shorter_side: Option<f64>,
+        with_fallback: Option<bool>,
     ) -> PyResult<Bound<'py, PyArray<u8, Dim<[usize; 4]>>>> {
-        let vid = get_batch(&filename.to_string(), indices, resize_shorter_side, threads);
+        let vid = get_batch(
+            &filename.to_string(),
+            indices,
+            resize_shorter_side,
+            threads,
+            with_fallback.unwrap_or(false),
+        );
         match vid {
             Ok(vid) => Ok(vid.into_pyarray_bound(py)),
             Err(e) => Err(PyRuntimeError::new_err(format!("Error: {}", e))),
