@@ -33,7 +33,7 @@ maturin develop --release
 `maturin develop` builds the crate and installs it as a python module directly in the current virtualenv.
 the `--release` flag ensures the Rust part of the code is compiled in release mode, which enables compiler optimizations.
 
-:warning: If you are using a version of **ffmpeg >= 6.0** you need to enabled the `ffmpeg_6_0` feature:
+:warning: If you are using a version of **ffmpeg >= 6.0** you need to enable the `ffmpeg_6_0` feature:
 ```bash
 maturin develop --release --features ffmpeg_6_0
 ```
@@ -58,12 +58,13 @@ frames = video_reader.decode_gray(filename, resize, compression_factor, threads)
 
 If we only need a sub-clip of the video we can use the `get_batch` function:
 ```python
-frames = video_reader.get_batch(filename, indices, threads, resize)
+frames = video_reader.get_batch(filename, indices, threads=0, resize_shorter_side=None, with_fallback=False)
 ```
 * **filename**: path to the video file to decode
 * **indices**: list of indices of the frames to get
 * **threads**: number of CPU cores to use for ffmpeg decoding, currently has no effect as `get_batch` does not support multithreading. (NOTE: it is still as fast as decord from our benchmarking)
-* **resize**: optional resizing for the video. If the value is bigger than the actual video size, no resizing will be done
+* **resize_shorter_side**: optional resizing for the video. If the value is bigger than the actual video size, no resizing will be done
+* **with_fallback**: False by default, if True will fallback to decoding without seeking (ie slower) if suspicious metadata is detected in the video, eg multiple key frames have pts <= 0, first key frames duration <= 0, etc. This might be usefull if your application requires you to be 100% sure you get the exact frames you asked for.
 
 We can also get the shape of the raw video
 ```python
