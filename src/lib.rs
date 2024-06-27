@@ -91,7 +91,7 @@ fn video_reader<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()>
                 Some(1.0),
                 resize_shorter_side,
                 threads.unwrap_or(0),
-                false,
+                true,
             )?;
             video = vr.get_batch_safe(indices)?;
         } else {
