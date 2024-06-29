@@ -19,9 +19,18 @@ added.
 NOTE: other functionalities of `decord` are not implemented (yet?).
 
 Benchmark indicates that `video_reader-rs` is performing equally or better than `decord`, while using less memory.
+At least on the intended ML uses cases where video resolution remains reasonable, eg not 4K videos.
 
 ## Installation
-Install maturin on your machine
+### Install via pip
+```bash
+pip install video-reader-rs
+```
+Should work with python >= 3.8 on recent linux x86_64, macos and windows.
+
+### Manual installation
+You need to have ffmpeg installed on your system.
+Install maturin:
 ```bash
 pip install maturin
 ```
@@ -144,9 +153,6 @@ vr = VideoReader("sample.mp4")
 #  what():  std::bad_alloc
 # [1]    9636 IOT instruction (core dumped)
 ```
-
-## TODO
-- [ ] publish on pypi for easy install
 
 ## Credits
 - [decord](https://github.com/dmlc/decord) for showing how to `get_batch` efficiently.
