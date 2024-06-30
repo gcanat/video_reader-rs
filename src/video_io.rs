@@ -188,9 +188,7 @@ impl VideoReader {
         // do we need to resize the video ?
         let (h, w) = match resize_shorter_side {
             None => (orig_h, orig_w),
-            Some(resize) => {
-                get_resized_dim(orig_h as f64, orig_w as f64, resize)
-            }
+            Some(resize) => get_resized_dim(orig_h as f64, orig_w as f64, resize),
         };
 
         let scaler = Context::get(
@@ -315,11 +313,7 @@ pub fn get_frame_count(
 /// * width (f64): Width of the frame
 /// * resize_shorter_side_to (f64): Resize the shorter side of the frame to this value.
 /// Returns: Option<(f64, f64)>: Option of the resized height and width
-pub fn get_resized_dim(
-    mut height: f64,
-    mut width: f64,
-    resize_shorter_side_to: f64,
-) -> (u32, u32) {
+pub fn get_resized_dim(mut height: f64, mut width: f64, resize_shorter_side_to: f64) -> (u32, u32) {
     let mut short_side_res = height;
     if width < height {
         short_side_res = width;
