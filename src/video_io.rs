@@ -186,13 +186,11 @@ impl VideoReader {
         let orig_w = decoder.width();
 
         // do we need to resize the video ?
-        let (h, w) = match get_resized_dim(
-            orig_h as f64,
-            orig_w as f64,
-            resize_shorter_side.unwrap_or(orig_h as f64),
-        ) {
-            Some((h, w)) => (h as u32, w as u32),
+        let (h, w) = match resize_shorter_side {
             None => (orig_h, orig_w),
+            Some(resize) => {
+                get_resized_dim(orig_h as f64, orig_w as f64, resize)
+            }
         };
 
         let scaler = Context::get(
@@ -321,23 +319,19 @@ pub fn get_resized_dim(
     mut height: f64,
     mut width: f64,
     resize_shorter_side_to: f64,
-) -> Option<(f64, f64)> {
+) -> (u32, u32) {
     let mut short_side_res = height;
     if width < height {
         short_side_res = width;
     }
-    if short_side_res > resize_shorter_side_to {
-        if height == short_side_res {
-            width = (width * resize_shorter_side_to / height).round();
-            height = resize_shorter_side_to;
-        } else {
-            height = (height * resize_shorter_side_to / width).round();
-            width = resize_shorter_side_to;
-        }
-        Some((height, width))
+    if height == short_side_res {
+        width = (width * resize_shorter_side_to / height).round();
+        height = resize_shorter_side_to;
     } else {
-        None
+        height = (height * resize_shorter_side_to / width).round();
+        width = resize_shorter_side_to;
     }
+    (height as u32, width as u32)
 }
 
 /// Encode frames to a video file with h264 codec.
