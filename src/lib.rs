@@ -93,8 +93,7 @@ fn video_reader<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()>
     // wrapper of `decode_video`
     /// Decode video and return a 4D ndarray representing RGB frames with the shape (N, H, W, C)
     /// * `filename` - Path to the video file
-    /// * `resize_shorter_side` - Resize the shorter side of the video to this value. If video is
-    /// already smaller than this value, then no resizing is done.
+    /// * `resize_shorter_side` - Resize the shorter side of the video to this value.
     /// * `compression_factor` - Factor for temporal compression. If None, then no compression.
     /// * `threads` - Number of threads to use for decoding. If None, let ffmpeg decide the optimal
     /// number.
@@ -124,8 +123,7 @@ fn video_reader<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()>
     // wrapper of `decode_video_gray`
     /// Decode video and return a 3D ndarray representing gray frames with the shape (N, H, W)
     /// * `filename` - Path to the video file
-    /// * `resize_shorter_side` - Resize the shorter side of the video to this value. If video is
-    /// already smaller than this value, then no resizing is done.
+    /// * `resize_shorter_side` - Resize the shorter side of the video to this value.
     /// * `compression_factor` - Factor for temporal compression. If None, then no compression.
     /// * `threads` - Number of threads to use for decoding. If None, let ffmpeg decide the optimal
     /// number.
@@ -159,8 +157,7 @@ fn video_reader<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()>
     /// * `indices` - Indices of frames to retrieve
     /// * `threads` - Number of threads to use (only usefull when falling back to safe frame
     /// iterating).
-    /// * `resize_shorter_side` - Resize the shorter side of the video to this value. If video is
-    /// already smaller than this value, then no resizing is done.
+    /// * `resize_shorter_side` - Resize the shorter side of the video to this value.
     /// * `threads` - Number of threads to use for decoding. If None, let ffmpeg decide the optimal
     /// * `with_fallback` - If True, will try to detect wrong metadata in video and if so fallback
     /// to decoding without seeking. If False (or None), will always use seeking. Default is None.

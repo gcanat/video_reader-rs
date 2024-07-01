@@ -114,8 +114,7 @@ impl VideoReader {
     /// Create a new VideoReader instance
     /// * `filename` - Path to the video file.
     /// * `compression_factor` - Factor to reduce the number of frames in the video.
-    /// * `resize_shorter_side` - Resize the shorter side of the video to this value. If the
-    /// value is bigger than the shorter side of the video, the video will not be resized.
+    /// * `resize_shorter_side` - Resize the shorter side of the video to this value.
     /// * `threads` - Number of threads to use for decoding. This will be ignored when using
     /// the `get_batch` method, as it does not work with multithreading at the moment.
     /// * `with_reducer` - Whether to use the VideoReducer to reduce the number of frames.
