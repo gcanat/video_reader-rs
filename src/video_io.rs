@@ -128,6 +128,8 @@ impl VideoReader {
         resize_shorter_side: Option<f64>,
         threads: usize,
         with_reducer: bool,
+        start_frame: Option<usize>,
+        end_frame: Option<usize>,
     ) -> Result<VideoReader, ffmpeg::Error> {
         let (mut ictx, stream_index) = get_init_context(&filename)?;
         let stream_info = get_frame_count(&mut ictx, &stream_index)?;
@@ -138,6 +140,8 @@ impl VideoReader {
             compression_factor,
             stream_info.frame_count,
             with_reducer,
+            start_frame,
+            end_frame,
         )?;
         debug!("frame_count: {}", stream_info.frame_count);
         debug!("key frames: {:?}", stream_info.key_frames);
@@ -149,6 +153,7 @@ impl VideoReader {
             n_fails: 0,
             decoder,
             reducer,
+
         })
     }
 
@@ -159,6 +164,8 @@ impl VideoReader {
         compression_factor: Option<f64>,
         frame_count: usize,
         with_reducer: bool,
+        start_frame: Option<usize>,
+        end_frame: Option<usize>,
     ) -> Result<(VideoDecoder, Option<VideoReducer>), ffmpeg::Error> {
         let input = ictx
             .streams()
@@ -203,12 +210,17 @@ impl VideoReader {
         // setup the VideoReducer if needed
         let reducer = if with_reducer {
             // which frames we want to gather ?
+            // we may want to start or end from a specific frame
+            let start_frame = start_frame.unwrap_or(0);
+            let end_frame = end_frame.unwrap_or(frame_count).min(frame_count);
             let n_frames_compressed =
-                (frame_count as f64 * compression_factor.unwrap_or(1.)).round() as usize;
-            let indices = Array::linspace(0.0, frame_count as f64 - 1., n_frames_compressed)
+                ((end_frame - start_frame) as f64 * compression_factor.unwrap_or(1.)).round() as usize;
+            println!("start_frame: {}, end_frame: {}", start_frame, end_frame);
+            let indices = Array::linspace(start_frame as f64, end_frame as f64 - 1., n_frames_compressed)
                 .iter_mut()
                 .map(|x| x.round() as usize)
                 .collect::<Vec<_>>();
+            println!("Num indices: {:?}", indices.len());
 
             let frame_index = 0;
             let full_video: VideoArray = Array::zeros((indices.len(), h as usize, w as usize, 3));
