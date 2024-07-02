@@ -154,11 +154,11 @@ impl VideoReader {
             n_fails: 0,
             decoder,
             reducer,
-            first_frame
-
+            first_frame,
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn get_decoder(
         ictx: &ffmpeg::format::context::Input,
         threads: usize,
@@ -215,22 +215,30 @@ impl VideoReader {
             // we may want to start or end from a specific frame
             let start_frame = start_frame.unwrap_or(0);
             let end_frame = end_frame.unwrap_or(frame_count).min(frame_count);
-            let n_frames_compressed =
-                ((end_frame - start_frame) as f64 * compression_factor.unwrap_or(1.)).round() as usize;
-            let indices = Array::linspace(start_frame as f64, end_frame as f64 - 1., n_frames_compressed)
-                .iter_mut()
-                .map(|x| x.round() as usize)
-                .collect::<Vec<_>>();
+            let n_frames_compressed = ((end_frame - start_frame) as f64
+                * compression_factor.unwrap_or(1.))
+            .round() as usize;
+            let indices = Array::linspace(
+                start_frame as f64,
+                end_frame as f64 - 1.,
+                n_frames_compressed,
+            )
+            .iter_mut()
+            .map(|x| x.round() as usize)
+            .collect::<Vec<_>>();
 
             let frame_index = 0;
             let full_video: VideoArray = Array::zeros((indices.len(), h as usize, w as usize, 3));
             // counter to keep track of how many frames already added to the video
-            (Some(VideoReducer {
-                indices,
-                frame_index,
-                full_video,
-                idx_counter: 0,
-            }), Some(start_frame))
+            (
+                Some(VideoReducer {
+                    indices,
+                    frame_index,
+                    full_video,
+                    idx_counter: 0,
+                }),
+                Some(start_frame),
+            )
         } else {
             (None, None)
         };

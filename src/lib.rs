@@ -71,7 +71,15 @@ fn video_reader<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()>
     ) -> Result<Array4<u8>, ffmpeg::Error> {
         let video: Array4<u8>;
         // video reader that will use Seeking, only works in single thread mode for now
-        let mut vr = VideoReader::new(filename.to_owned(), None, resize_shorter_side, 1, false, None, None)?;
+        let mut vr = VideoReader::new(
+            filename.to_owned(),
+            None,
+            resize_shorter_side,
+            1,
+            false,
+            None,
+            None,
+        )?;
         let num_zero_pts = vr
             .stream_info
             .frame_times
