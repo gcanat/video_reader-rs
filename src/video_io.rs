@@ -257,14 +257,35 @@ impl VideoReader {
         ))
     }
 
-    pub fn decode_video(mut self) -> Result<VideoArray, ffmpeg::Error> {
+    pub fn decode_video<'a>(mut self) -> Result<VideoArray, ffmpeg::Error> {
         let first_index = self.first_frame.unwrap_or(0);
-        if first_index > 0 {
+        let mut seeked = false;
+        let mut first_frame: FrameArray =
+            Array::zeros((self.decoder.height as usize, self.decoder.width as usize, 3));
+        // check if first_index is after the first keyframe, if so we can seek
+        if self
+            .stream_info
+            .key_frames
+            .iter()
+            .any(|k| &first_index >= k)
+            && (first_index > 0)
+        {
             let frame_duration = (1. / self.decoder.fps * 1_000.0).round() as usize;
-            self.seek_accurate(first_index, &frame_duration)?;
+            first_frame = self.seek_accurate(first_index, &frame_duration)?;
+            seeked = true;
         }
         match self.reducer {
             Some(mut reducer) => {
+                reducer.frame_index = self.curr_frame;
+                if seeked {
+                    // first frame was seeked and decoded, so we increment the counter
+                    // and assign the frame to the full video
+                    reducer
+                        .full_video
+                        .slice_mut(s![reducer.idx_counter, .., .., ..])
+                        .assign(&first_frame);
+                    reducer.idx_counter += 1;
+                }
                 for (stream, packet) in self.ictx.packets() {
                     if &reducer.frame_index > reducer.indices.iter().max().unwrap() {
                         break;
@@ -278,8 +299,10 @@ impl VideoReader {
                     }
                 }
                 self.decoder.decoder.send_eof()?;
-                self.decoder
-                    .receive_and_process_decoded_frames(&mut reducer)?;
+                if &reducer.frame_index <= reducer.indices.iter().max().unwrap() {
+                    self.decoder
+                        .receive_and_process_decoded_frames(&mut reducer)?;
+                }
                 Ok(reducer.full_video)
             }
             None => panic!("No Reducer to get the frames"),
