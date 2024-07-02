@@ -299,6 +299,7 @@ impl VideoReader {
                     }
                 }
                 self.decoder.decoder.send_eof()?;
+                // only process the remaining frames if we haven't reached the last frame
                 if &reducer.frame_index <= reducer.indices.iter().max().unwrap() {
                     self.decoder
                         .receive_and_process_decoded_frames(&mut reducer)?;
