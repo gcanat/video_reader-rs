@@ -51,18 +51,20 @@ maturin develop --release --features ffmpeg_6_0
 Decoding a video is as simple as:
 ```python
 import video_reader
-frames = video_reader.decode(filename, resize, compression_factor, threads)
+frames = video_reader.decode(filename, resize, compression_factor, threads, start_frame, end_frame)
 ```
 * **filename**: path to the video file to decode
 * **resize**: optional resizing for the video.
 * **compression_factor**: temporal sampling, eg if 0.25, take 25% of the frames, evenly spaced.
 * **threads**: number of CPU cores to use for ffmpeg decoding, 0 means auto (let ffmpeg pick the optimal number).
+* **start_frame** - Start decoding from this frame index
+* **end_frame** - Stop decoding at this frame index
 
 Returns a numpy array of shape (N, H, W, C).
 
 We can do the same thing if we want grayscale frames, and it will retun an array of shape (N, H, W).
 ```python
-frames = video_reader.decode_gray(filename, resize, compression_factor, threads)
+frames = video_reader.decode_gray(filename, resize, compression_factor, threads, start_frame, end_frame)
 ```
 
 If we only need a sub-clip of the video we can use the `get_batch` function:

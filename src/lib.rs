@@ -11,7 +11,7 @@ fn video_reader<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()>
     env_logger::init();
     /// Get shape of the video: number of frames, height and width
     fn get_shape(filename: &String) -> Result<(usize, usize, usize), ffmpeg::Error> {
-        let vr = VideoReader::new(filename.to_owned(), None, None, 0, false)?;
+        let vr = VideoReader::new(filename.to_owned(), None, None, 0, false, None, None)?;
         let width = vr.decoder.decoder.width() as usize;
         let height = vr.decoder.decoder.height() as usize;
         let num_frames = vr.stream_info.frame_count;
@@ -24,6 +24,8 @@ fn video_reader<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()>
         resize_shorter_side: Option<f64>,
         compression_factor: Option<f64>,
         threads: usize,
+        start_frame: Option<usize>,
+        end_frame: Option<usize>,
     ) -> Result<Array4<u8>, ffmpeg::Error> {
         let vr = VideoReader::new(
             filename.to_owned(),
@@ -31,6 +33,8 @@ fn video_reader<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()>
             resize_shorter_side,
             threads,
             true,
+            start_frame,
+            end_frame,
         )?;
         vr.decode_video()
     }
@@ -41,6 +45,8 @@ fn video_reader<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()>
         resize_shorter_side: Option<f64>,
         compression_factor: Option<f64>,
         threads: usize,
+        start_frame: Option<usize>,
+        end_frame: Option<usize>,
     ) -> Result<Array3<u8>, ffmpeg::Error> {
         let vr = VideoReader::new(
             filename.to_owned(),
@@ -48,6 +54,8 @@ fn video_reader<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()>
             resize_shorter_side,
             threads,
             true,
+            start_frame,
+            end_frame,
         )?;
         let vid = vr.decode_video()?;
         let gray_vid = rgb2gray(vid);
@@ -63,7 +71,7 @@ fn video_reader<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()>
     ) -> Result<Array4<u8>, ffmpeg::Error> {
         let video: Array4<u8>;
         // video reader that will use Seeking, only works in single thread mode for now
-        let mut vr = VideoReader::new(filename.to_owned(), None, resize_shorter_side, 1, false)?;
+        let mut vr = VideoReader::new(filename.to_owned(), None, resize_shorter_side, 1, false, None, None)?;
         let num_zero_pts = vr
             .stream_info
             .frame_times
@@ -82,6 +90,8 @@ fn video_reader<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()>
                 resize_shorter_side,
                 threads.unwrap_or(0),
                 true,
+                None,
+                None,
             )?;
             video = vr.get_batch_safe(indices)?;
         } else {
@@ -96,6 +106,8 @@ fn video_reader<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()>
     /// * `resize_shorter_side` - Resize the shorter side of the video to this value.
     /// * `compression_factor` - Factor for temporal compression. If None, then no compression.
     /// * `threads` - Number of threads to use for decoding. If None, let ffmpeg decide the optimal
+    /// * `start_frame` - Start decoding from this frame index
+    /// * `end_frame` - Stop decoding at this frame index
     /// number.
     /// * Returns a 4D ndarray with shape (N, H, W, C)
     #[pyfn(m)]
@@ -106,6 +118,8 @@ fn video_reader<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()>
         resize_shorter_side: Option<f64>,
         compression_factor: Option<f64>,
         threads: Option<usize>,
+        start_frame: Option<usize>,
+        end_frame: Option<usize>,
     ) -> PyResult<Bound<'py, PyArray<u8, Dim<[usize; 4]>>>> {
         let threads = threads.unwrap_or(0);
         let res_decode = decode_video(
@@ -113,6 +127,8 @@ fn video_reader<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()>
             resize_shorter_side,
             compression_factor,
             threads,
+            start_frame,
+            end_frame,
         );
         match res_decode {
             Ok(vid) => Ok(vid.into_pyarray_bound(py)),
@@ -126,6 +142,8 @@ fn video_reader<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()>
     /// * `resize_shorter_side` - Resize the shorter side of the video to this value.
     /// * `compression_factor` - Factor for temporal compression. If None, then no compression.
     /// * `threads` - Number of threads to use for decoding. If None, let ffmpeg decide the optimal
+    /// * `start_frame` - Start decoding from this frame index
+    /// * `end_frame` - Stop decoding at this frame index
     /// number.
     /// * Returns a 3D ndarray with shape (N, H, W)
     #[pyfn(m)]
@@ -136,6 +154,8 @@ fn video_reader<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()>
         resize_shorter_side: Option<f64>,
         compression_factor: Option<f64>,
         threads: Option<usize>,
+        start_frame: Option<usize>,
+        end_frame: Option<usize>,
     ) -> PyResult<Bound<'py, PyArray<u8, Dim<[usize; 3]>>>> {
         let threads = threads.unwrap_or(0);
         let res_decode = decode_video_gray(
@@ -143,6 +163,8 @@ fn video_reader<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()>
             resize_shorter_side,
             compression_factor,
             threads,
+            start_frame,
+            end_frame,
         );
         match res_decode {
             Ok(vid) => Ok(vid.into_pyarray_bound(py)),
