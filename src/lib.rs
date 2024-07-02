@@ -106,6 +106,8 @@ fn video_reader<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()>
     /// * `resize_shorter_side` - Resize the shorter side of the video to this value.
     /// * `compression_factor` - Factor for temporal compression. If None, then no compression.
     /// * `threads` - Number of threads to use for decoding. If None, let ffmpeg decide the optimal
+    /// * `start_frame` - Start decoding from this frame index
+    /// * `end_frame` - Stop decoding at this frame index
     /// number.
     /// * Returns a 4D ndarray with shape (N, H, W, C)
     #[pyfn(m)]
@@ -140,6 +142,8 @@ fn video_reader<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()>
     /// * `resize_shorter_side` - Resize the shorter side of the video to this value.
     /// * `compression_factor` - Factor for temporal compression. If None, then no compression.
     /// * `threads` - Number of threads to use for decoding. If None, let ffmpeg decide the optimal
+    /// * `start_frame` - Start decoding from this frame index
+    /// * `end_frame` - Stop decoding at this frame index
     /// number.
     /// * Returns a 3D ndarray with shape (N, H, W)
     #[pyfn(m)]
