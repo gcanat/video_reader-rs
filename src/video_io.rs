@@ -306,7 +306,7 @@ impl VideoReader {
                 }
                 self.decoder.decoder.send_eof()?;
                 // only process the remaining frames if we haven't reached the last frame
-                if reducer.indices.is_empty()
+                if !reducer.indices.is_empty()
                     && (&reducer.frame_index <= reducer.indices.iter().max().unwrap_or(&0))
                 {
                     self.decoder
