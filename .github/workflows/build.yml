@@ -2,7 +2,7 @@ name: Build
 
 on:
   push:
-    branches: [main]
+    branches: [main, gc/add_more_build_arch]
     tags:
       - '*'
   pull_request:
@@ -19,12 +19,12 @@ jobs:
         platform:
           - runner: ubuntu-latest
             target: x86_64
-          # - runner: ubuntu-latest
-          #   target: x86
-          # - runner: ubuntu-latest
-          #   target: aarch64
-          # - runner: ubuntu-latest
-          #   target: armv7
+          - runner: ubuntu-latest
+            target: x86
+          - runner: ubuntu-latest
+            target: aarch64
+          - runner: ubuntu-latest
+            target: armv7
           # - runner: ubuntu-latest
           #   target: s390x
           # - runner: ubuntu-latest
