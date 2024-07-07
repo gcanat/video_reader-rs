@@ -93,33 +93,33 @@ Decoding a video with shape (2004, 1472, 1472), using a compression factor of 0.
 ### Without resizing
 using OpenCV
 ```
-Video shape after loading: (501, 1472, 1472), took 52.05 sec.
+Video shape after loading: (501, 1472, 1472, 3), took 7.16 sec.
 ```
 
 Using decord
 ```
-Video shape after loading: (501, 1472, 1472), took 17.20 sec.
+Video shape after loading: (501, 1472, 1472, 3), took 14.03 sec.
 ```
 
 video_reader `decode`
 ```
-Video shape after loading: (501, 1472, 1472), took 9.32 sec.
+Video shape after loading: (501, 1472, 1472, 3), took 6.73 sec.
 ```
 
 ### With resizing to 512 while decoding
 using OpenCV
 ```
-Video shape after loading: (501, 512, 512), took 52.49 sec.
+Video shape after loading: (501, 512, 512, 3), took 6.49 sec.
 ```
 
 using decord
 ```
-Video shape after loading: (501, 512, 512), took 13.91 sec.
+Video shape after loading: (501, 512, 512, 3), took 13.33 sec.
 ```
 
 using video_reader `decode`
 ```
-Video shape after loading: (501, 512, 512), took 5.13 sec.
+Video shape after loading: (501, 512, 512), took 3.92 sec.
 ```
 
 ## Crash test
