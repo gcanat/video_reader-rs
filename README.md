@@ -1,7 +1,9 @@
-# Video Reader RS
-A python module to decode videos based on rust ffmpeg-next, with a focus on ML use cases.
+<h1 align="center">
+  <code>video_reader-rs</code>
+</h1>
+<p align="center">A python module to decode videos based on rust ffmpeg-next, with a focus on ML use cases.</p>
 
-## Why yet another library based on ffmpeg ?
+## :bulb: Why yet another library based on ffmpeg ?
 
 When training ML models on videos, it is usefull to load small sub-clips of videos. So decoding the
 entire video is not necessary.
@@ -21,7 +23,7 @@ NOTE: other functionalities of `decord` are not implemented (yet?).
 Benchmark indicates that `video_reader-rs` is performing equally or better than `decord`, while using less memory.
 At least on the intended ML uses cases where video resolution remains reasonable, eg not 4K videos.
 
-## Installation
+## :hammer_and_wrench: Installation
 ### Install via pip
 ```bash
 pip install video-reader-rs
@@ -47,7 +49,7 @@ the `--release` flag ensures the Rust part of the code is compiled in release mo
 maturin develop --release --features ffmpeg_6_0
 ```
 
-## Usage
+## :computer: Usage
 Decoding a video is as simple as:
 ```python
 import video_reader
@@ -87,7 +89,7 @@ We can encode the video with h264 codec
 video_reader.save_video(frames, "video.mp4", fps=15, codec="h264")
 ```
 
-## Performance comparison
+## :rocket: Performance comparison
 Decoding a video with shape (2004, 1472, 1472, 3). Tested on a laptop (12 cores Intel i7-9750H CPU @ 2.60GHz), 15Gb of RAM with Ubuntu 22.04.
 
 Options: 
@@ -104,7 +106,7 @@ Options:
 
 \* decord was tested on a machine with more RAM and CPU cores because it was crashing on the laptop with only 15Gb. See below.
 
-## Crash test
+## :boom: Crash test
 Tested on a laptop with 15Gb of RAM, with ubuntu 22.04 and python 3.10.
 Run this script:
 ```python
@@ -138,7 +140,7 @@ vr = VideoReader("sample.mp4")
 # [1]    9636 IOT instruction (core dumped)
 ```
 
-## Credits
+## :stars: Credits
 - [decord](https://github.com/dmlc/decord) for showing how to `get_batch` efficiently.
 - [ffmpeg-next](https://github.com/zmwangx/rust-ffmpeg) for the Rust bindings to ffmpeg.
-- [video-rs](https://github.com/oddity-ai/video-rs) for the nice high level api which makes it easy to encode videos.
+- [video-rs](https://github.com/oddity-ai/video-rs) for the nice high level api which makes it easy to encode videos and for the code snippet to convert ffmpeg frames to ndarray ;-)
