@@ -88,39 +88,21 @@ video_reader.save_video(frames, "video.mp4", fps=15, codec="h264")
 ```
 
 ## Performance comparison
-Decoding a video with shape (2004, 1472, 1472), using a compression factor of 0.25
+Decoding a video with shape (2004, 1472, 1472, 3). Tested on a laptop (12 cores Intel i7-9750H CPU @ 2.60GHz), 15Gb of RAM with Ubuntu 22.04.
 
-### Without resizing
-using OpenCV
-```
-Video shape after loading: (501, 1472, 1472, 3), took 7.16 sec.
-```
+Options: 
+- f: compression factor
+- r: resize shorter side
+- g: grayscale
 
-Using decord
-```
-Video shape after loading: (501, 1472, 1472, 3), took 14.03 sec.
-```
+| Options | OpenCV | decord* | video_reader |
+|:---:|:---:|:---:|:---:|
+| f 0.5 | 33.96s | **14.6s** | 26.76s | 
+|f 0.25 | 7.16s | 14.03s | **6.73s** |
+|f 0.25, r 512| 6.49s | 13.33s | **3.92s** |
+| f 0.25, g | 20.24s | 25.67s | **14.11s** |
 
-video_reader `decode`
-```
-Video shape after loading: (501, 1472, 1472, 3), took 6.73 sec.
-```
-
-### With resizing to 512 while decoding
-using OpenCV
-```
-Video shape after loading: (501, 512, 512, 3), took 6.49 sec.
-```
-
-using decord
-```
-Video shape after loading: (501, 512, 512, 3), took 13.33 sec.
-```
-
-using video_reader `decode`
-```
-Video shape after loading: (501, 512, 512), took 3.92 sec.
-```
+\* decord was tested on a machine with more RAM and CPU cores because it was crashing on the laptop with only 15Gb. See below.
 
 ## Crash test
 Tested on a laptop with 15Gb of RAM, with ubuntu 22.04 and python 3.10.
@@ -136,7 +118,7 @@ def bench_video_decode(filename, compress_factor, resize):
     print(f"Duration {duration:.2f}sec")
     return vid
 
-vid = bench_video_decode("sample.mp4", 0.25, 1500)
+vid = bench_video_decode("sample.mp4", 0.25)
 print("video shape:", vid.shape)
 
 # Terminal output:
