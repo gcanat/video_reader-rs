@@ -26,7 +26,7 @@ fn video_reader<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()>
         threads: usize,
         start_frame: Option<usize>,
         end_frame: Option<usize>,
-    ) -> Result<Array4<u8>, ffmpeg::Error> {
+    ) -> Result<Array3<u8>, ffmpeg::Error> {
         let vr = VideoReader::new(
             filename.to_owned(),
             compression_factor,
@@ -40,27 +40,27 @@ fn video_reader<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()>
     }
 
     /// Decode video and return ndarray representing grayscale frames
-    fn decode_video_gray(
-        filename: &String,
-        resize_shorter_side: Option<f64>,
-        compression_factor: Option<f64>,
-        threads: usize,
-        start_frame: Option<usize>,
-        end_frame: Option<usize>,
-    ) -> Result<Array3<u8>, ffmpeg::Error> {
-        let vr = VideoReader::new(
-            filename.to_owned(),
-            compression_factor,
-            resize_shorter_side,
-            threads,
-            true,
-            start_frame,
-            end_frame,
-        )?;
-        let vid = vr.decode_video()?;
-        let gray_vid = rgb2gray(vid);
-        Ok(gray_vid)
-    }
+    // fn decode_video_gray(
+    //     filename: &String,
+    //     resize_shorter_side: Option<f64>,
+    //     compression_factor: Option<f64>,
+    //     threads: usize,
+    //     start_frame: Option<usize>,
+    //     end_frame: Option<usize>,
+    // ) -> Result<Array3<u8>, ffmpeg::Error> {
+    //     let vr = VideoReader::new(
+    //         filename.to_owned(),
+    //         compression_factor,
+    //         resize_shorter_side,
+    //         threads,
+    //         true,
+    //         start_frame,
+    //         end_frame,
+    //     )?;
+    //     let vid = vr.decode_video()?;
+    //     let gray_vid = rgb2gray(vid);
+    //     Ok(gray_vid)
+    // }
 
     fn get_batch(
         filename: &String,
@@ -128,7 +128,7 @@ fn video_reader<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()>
         threads: Option<usize>,
         start_frame: Option<usize>,
         end_frame: Option<usize>,
-    ) -> PyResult<Bound<'py, PyArray<u8, Dim<[usize; 4]>>>> {
+    ) -> PyResult<Bound<'py, PyArray<u8, Dim<[usize; 3]>>>> {
         let threads = threads.unwrap_or(0);
         let res_decode = decode_video(
             &filename.to_string(),
@@ -154,31 +154,31 @@ fn video_reader<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()>
     /// * `end_frame` - Stop decoding at this frame index
     /// number.
     /// * Returns a 3D ndarray with shape (N, H, W)
-    #[pyfn(m)]
-    #[pyo3(name = "decode_gray")]
-    fn decode_gray_py<'py>(
-        py: Python<'py>,
-        filename: &str,
-        resize_shorter_side: Option<f64>,
-        compression_factor: Option<f64>,
-        threads: Option<usize>,
-        start_frame: Option<usize>,
-        end_frame: Option<usize>,
-    ) -> PyResult<Bound<'py, PyArray<u8, Dim<[usize; 3]>>>> {
-        let threads = threads.unwrap_or(0);
-        let res_decode = decode_video_gray(
-            &filename.to_string(),
-            resize_shorter_side,
-            compression_factor,
-            threads,
-            start_frame,
-            end_frame,
-        );
-        match res_decode {
-            Ok(vid) => Ok(vid.into_pyarray_bound(py)),
-            Err(e) => Err(PyRuntimeError::new_err(format!("Error: {}", e))),
-        }
-    }
+    // #[pyfn(m)]
+    // #[pyo3(name = "decode_gray")]
+    // fn decode_gray_py<'py>(
+    //     py: Python<'py>,
+    //     filename: &str,
+    //     resize_shorter_side: Option<f64>,
+    //     compression_factor: Option<f64>,
+    //     threads: Option<usize>,
+    //     start_frame: Option<usize>,
+    //     end_frame: Option<usize>,
+    // ) -> PyResult<Bound<'py, PyArray<u8, Dim<[usize; 3]>>>> {
+    //     let threads = threads.unwrap_or(0);
+    //     let res_decode = decode_video_gray(
+    //         &filename.to_string(),
+    //         resize_shorter_side,
+    //         compression_factor,
+    //         threads,
+    //         start_frame,
+    //         end_frame,
+    //     );
+    //     match res_decode {
+    //         Ok(vid) => Ok(vid.into_pyarray_bound(py)),
+    //         Err(e) => Err(PyRuntimeError::new_err(format!("Error: {}", e))),
+    //     }
+    // }
 
     /// Get a batch of frames from a video file, trying to use Seek when possible, and falling back
     /// to iterating over all frames when bad metadata is detected (eg. several frames with pts=0,

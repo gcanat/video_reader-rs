@@ -8,11 +8,12 @@ use ffmpeg_next as ffmpeg;
 use log::{debug, error};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+// use std::time::Instant;
 use video_rs::encode::{Encoder, Settings};
 use video_rs::location::Location;
 use video_rs::time::Time;
 
-use ndarray::{s, Array, Array3, Array4, Axis, Dim};
+use ndarray::{s, Array, Array2, Array3, Array4, Axis, Dim};
 
 pub type FrameArray = Array3<u8>;
 pub type VideoArray = Array4<u8>;
@@ -45,7 +46,7 @@ pub struct VideoReducer {
     pub indices: Vec<usize>,
     pub frame_index: usize,
     pub idx_counter: usize,
-    pub full_video: VideoArray,
+    pub full_video: Array3<u8>,
 }
 
 /// Timing info for key frames
@@ -77,14 +78,22 @@ impl VideoDecoder {
             if match_index.is_some() {
                 reducer.indices.remove(match_index.unwrap());
                 let mut rgb_frame = Video::empty();
+                // let now = Instant::now();
                 self.scaler.run(&decoded, &mut rgb_frame)?;
-                let nd_frame = convert_frame_to_ndarray_rgb24(&mut rgb_frame);
+                // let scaler_time = now.elapsed().as_millis();
+                // let now = Instant::now();
+                // let nd_frame = convert_frame_to_ndarray_rgb24(&mut rgb_frame);
+                let nd_frame = convert_yuv_to_ndarray_rgb24(&mut rgb_frame);
+                // let conv_time = now.elapsed().as_millis();
                 match nd_frame {
                     Ok(frame) => {
+                        // let now = Instant::now();
                         reducer
                             .full_video
-                            .slice_mut(s![reducer.idx_counter, .., .., ..])
+                            .slice_mut(s![reducer.idx_counter, .., ..])
                             .assign(&frame);
+                        // let assign_time = now.elapsed().as_millis();
+                        // println!("Durations: {}, {}, {}", scaler_time, conv_time, assign_time);
                     }
                     Err(_) => println!("Couldnt decode frame"),
                 }
@@ -208,10 +217,13 @@ impl VideoReader {
             decoder.format(),
             orig_w,
             orig_h,
-            AvPixel::RGB24,
+            AvPixel::YUV420P,
+            // AvPixel::RGB24,
             w,
             h,
             Flags::BILINEAR,
+            // Flags::FAST_BILINEAR,
+            // Flags::FULL_CHR_H_INT | Flags::ACCURATE_RND,
         )?;
 
         // setup the VideoReducer if needed
@@ -233,7 +245,7 @@ impl VideoReader {
             .collect::<Vec<_>>();
 
             let frame_index = 0;
-            let full_video: VideoArray = Array::zeros((indices.len(), h as usize, w as usize, 3));
+            let full_video: Array3<u8> = Array::zeros((indices.len(), (h + h /2) as usize, w as usize));
             // counter to keep track of how many frames already added to the video
             (
                 Some(VideoReducer {
@@ -262,7 +274,7 @@ impl VideoReader {
         ))
     }
 
-    pub fn decode_video(mut self) -> Result<VideoArray, ffmpeg::Error> {
+    pub fn decode_video(mut self) -> Result<Array3<u8>, ffmpeg::Error> {
         let first_index = self.first_frame.unwrap_or(0);
         let mut seeked = false;
         let mut first_frame: FrameArray =
@@ -287,7 +299,7 @@ impl VideoReader {
                     // and assign the frame to the full video
                     reducer
                         .full_video
-                        .slice_mut(s![reducer.idx_counter, .., .., ..])
+                        .slice_mut(s![reducer.idx_counter, .., ..])
                         .assign(&first_frame);
                     reducer.indices.remove(0);
                     reducer.idx_counter += 1;
@@ -439,6 +451,8 @@ pub fn save_video(
     Ok(())
 }
 
+
+
 /// Converts an RGB24 video `AVFrame` produced by ffmpeg to an `ndarray`.
 /// Copied from https://github.com/oddity-ai/video-rs
 /// * `frame` - Video frame to convert.
@@ -454,6 +468,42 @@ pub fn convert_frame_to_ndarray_rgb24(frame: &mut Video) -> Result<FrameArray, f
 
         let mut frame_array =
             FrameArray::default((frame_height as usize, frame_width as usize, 3_usize));
+
+        let bytes_copied = av_image_copy_to_buffer(
+            frame_array.as_mut_ptr(),
+            frame_array.len() as i32,
+            (*frame_ptr).data.as_ptr() as *const *const u8,
+            (*frame_ptr).linesize.as_ptr(),
+            frame_format,
+            frame_width,
+            frame_height,
+            1,
+        );
+
+        if bytes_copied == frame_array.len() as i32 {
+            Ok(frame_array)
+        } else {
+            Err(ffmpeg::Error::InvalidData)
+        }
+    }
+}
+
+
+/// Converts an YUV420 video `AVFrame` produced by ffmpeg to an `ndarray`.
+/// * `frame` - Video frame to convert.
+/// * returns a three-dimensional `ndarray` with dimensions `(H, W, C)` and type byte.
+pub fn convert_yuv_to_ndarray_rgb24(frame: &mut Video) -> Result<Array2<u8>, ffmpeg::Error> {
+    unsafe {
+        let frame_ptr = frame.as_mut_ptr();
+        let frame_width: i32 = (*frame_ptr).width;
+        let frame_height: i32 = (*frame_ptr).height;
+        let frame_format =
+            std::mem::transmute::<std::ffi::c_int, AVPixelFormat>((*frame_ptr).format);
+        assert_eq!(frame_format, AVPixelFormat::AV_PIX_FMT_YUV420P);
+
+        let mut frame_array =
+            Array2::default(((frame_height + frame_height / 2) as usize, frame_width as usize));
+
 
         let bytes_copied = av_image_copy_to_buffer(
             frame_array.as_mut_ptr(),
