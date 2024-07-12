@@ -26,7 +26,7 @@ fn video_reader<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()>
         threads: usize,
         start_frame: Option<usize>,
         end_frame: Option<usize>,
-    ) -> Result<Array3<u8>, ffmpeg::Error> {
+    ) -> Result<Array4<u8>, ffmpeg::Error> {
         let vr = VideoReader::new(
             filename.to_owned(),
             compression_factor,
@@ -128,7 +128,7 @@ fn video_reader<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()>
         threads: Option<usize>,
         start_frame: Option<usize>,
         end_frame: Option<usize>,
-    ) -> PyResult<Bound<'py, PyArray<u8, Dim<[usize; 3]>>>> {
+    ) -> PyResult<Bound<'py, PyArray<u8, Dim<[usize; 4]>>>> {
         let threads = threads.unwrap_or(0);
         let res_decode = decode_video(
             &filename.to_string(),

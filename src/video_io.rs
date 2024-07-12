@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use video_rs::encode::{Encoder, Settings};
 use video_rs::location::Location;
 use video_rs::time::Time;
+use yuvutils_rs::{yuv420_to_rgb, YuvRange, YuvStandardMatrix};
 
 use ndarray::{s, Array, Array2, Array3, Array4, Axis, Dim};
 
@@ -46,7 +47,7 @@ pub struct VideoReducer {
     pub indices: Vec<usize>,
     pub frame_index: usize,
     pub idx_counter: usize,
-    pub full_video: Array3<u8>,
+    pub full_video: Array4<u8>,
 }
 
 /// Timing info for key frames
@@ -90,12 +91,12 @@ impl VideoDecoder {
                         // let now = Instant::now();
                         reducer
                             .full_video
-                            .slice_mut(s![reducer.idx_counter, .., ..])
+                            .slice_mut(s![reducer.idx_counter, .., .., ..])
                             .assign(&frame);
                         // let assign_time = now.elapsed().as_millis();
                         // println!("Durations: {}, {}, {}", scaler_time, conv_time, assign_time);
                     }
-                    Err(_) => println!("Couldnt decode frame"),
+                    Err(e) => println!("Couldnt decode frame: {e}"),
                 }
                 reducer.idx_counter += 1;
             }
@@ -245,7 +246,8 @@ impl VideoReader {
             .collect::<Vec<_>>();
 
             let frame_index = 0;
-            let full_video: Array3<u8> = Array::zeros((indices.len(), (h + h /2) as usize, w as usize));
+            let full_video: Array4<u8> =
+                Array::zeros((indices.len(), h as usize, w as usize, 3));
             // counter to keep track of how many frames already added to the video
             (
                 Some(VideoReducer {
@@ -274,7 +276,7 @@ impl VideoReader {
         ))
     }
 
-    pub fn decode_video(mut self) -> Result<Array3<u8>, ffmpeg::Error> {
+    pub fn decode_video(mut self) -> Result<Array4<u8>, ffmpeg::Error> {
         let first_index = self.first_frame.unwrap_or(0);
         let mut seeked = false;
         let mut first_frame: FrameArray =
@@ -299,7 +301,7 @@ impl VideoReader {
                     // and assign the frame to the full video
                     reducer
                         .full_video
-                        .slice_mut(s![reducer.idx_counter, .., ..])
+                        .slice_mut(s![reducer.idx_counter, .., .., ..])
                         .assign(&first_frame);
                     reducer.indices.remove(0);
                     reducer.idx_counter += 1;
@@ -451,8 +453,6 @@ pub fn save_video(
     Ok(())
 }
 
-
-
 /// Converts an RGB24 video `AVFrame` produced by ffmpeg to an `ndarray`.
 /// Copied from https://github.com/oddity-ai/video-rs
 /// * `frame` - Video frame to convert.
@@ -488,11 +488,10 @@ pub fn convert_frame_to_ndarray_rgb24(frame: &mut Video) -> Result<FrameArray, f
     }
 }
 
-
 /// Converts an YUV420 video `AVFrame` produced by ffmpeg to an `ndarray`.
 /// * `frame` - Video frame to convert.
 /// * returns a three-dimensional `ndarray` with dimensions `(H, W, C)` and type byte.
-pub fn convert_yuv_to_ndarray_rgb24(frame: &mut Video) -> Result<Array2<u8>, ffmpeg::Error> {
+pub fn convert_yuv_to_ndarray_rgb24(frame: &mut Video) -> Result<Array3<u8>, ffmpeg::Error> {
     unsafe {
         let frame_ptr = frame.as_mut_ptr();
         let frame_width: i32 = (*frame_ptr).width;
@@ -501,13 +500,11 @@ pub fn convert_yuv_to_ndarray_rgb24(frame: &mut Video) -> Result<Array2<u8>, ffm
             std::mem::transmute::<std::ffi::c_int, AVPixelFormat>((*frame_ptr).format);
         assert_eq!(frame_format, AVPixelFormat::AV_PIX_FMT_YUV420P);
 
-        let mut frame_array =
-            Array2::default(((frame_height + frame_height / 2) as usize, frame_width as usize));
-
+        let mut buf_vec = vec![0_u8; (frame_width * (frame_height + frame_height / 2)) as usize];
 
         let bytes_copied = av_image_copy_to_buffer(
-            frame_array.as_mut_ptr(),
-            frame_array.len() as i32,
+            buf_vec.as_mut_ptr(),
+            buf_vec.len() as i32,
             (*frame_ptr).data.as_ptr() as *const *const u8,
             (*frame_ptr).linesize.as_ptr(),
             frame_format,
@@ -516,8 +513,29 @@ pub fn convert_yuv_to_ndarray_rgb24(frame: &mut Video) -> Result<Array2<u8>, ffm
             1,
         );
 
-        if bytes_copied == frame_array.len() as i32 {
-            Ok(frame_array)
+        if bytes_copied == buf_vec.len() as i32 {
+            let mut rgb = vec![0_u8; (frame_width * frame_height * 3) as usize];
+            let cut_point1 = (frame_width * frame_height) as usize;
+            let cut_point2 = (cut_point1 + cut_point1 / 4) as usize;
+            yuv420_to_rgb(
+                &buf_vec[..cut_point1],
+                0,
+                &buf_vec[cut_point1..cut_point2],
+                0,
+                &buf_vec[cut_point2..],
+                0,
+                &mut rgb,
+                0,
+                frame_width as u32,
+                frame_height as u32,
+                YuvRange::TV,
+                YuvStandardMatrix::Bt601,
+            );
+            Ok(Array3::from_shape_vec(
+                (frame_height as usize, frame_width as usize, 3_usize),
+                rgb,
+            )
+            .unwrap())
         } else {
             Err(ffmpeg::Error::InvalidData)
         }
