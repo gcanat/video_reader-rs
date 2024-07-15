@@ -519,17 +519,17 @@ pub fn convert_yuv_to_ndarray_rgb24(frame: &mut Video) -> Result<Array3<u8>, ffm
             let cut_point2 = (cut_point1 + cut_point1 / 4) as usize;
             yuv420_to_rgb(
                 &buf_vec[..cut_point1],
-                0,
+                frame_width as u32,
                 &buf_vec[cut_point1..cut_point2],
-                0,
+                (frame_width / 2) as u32,
                 &buf_vec[cut_point2..],
-                0,
+                (frame_width /2) as u32,
                 &mut rgb,
-                0,
+                (frame_width *3) as u32,
                 frame_width as u32,
                 frame_height as u32,
-                YuvRange::TV,
-                YuvStandardMatrix::Bt601,
+                YuvRange::Full,
+                YuvStandardMatrix::Bt2020,
             );
             Ok(Array3::from_shape_vec(
                 (frame_height as usize, frame_width as usize, 3_usize),
