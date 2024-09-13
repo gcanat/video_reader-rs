@@ -52,8 +52,8 @@ maturin develop --release --features ffmpeg_6_0
 ## :computer: Usage
 Decoding a video is as simple as:
 ```python
-import video_reader
-frames = video_reader.decode(filename, resize, compression_factor, threads, start_frame, end_frame)
+import video_reader as vr
+frames = vr.decode(filename, resize, compression_factor, threads, start_frame, end_frame)
 ```
 * **filename**: path to the video file to decode
 * **resize**: optional resizing for the video.
@@ -66,12 +66,12 @@ Returns a numpy array of shape (N, H, W, C).
 
 We can do the same thing if we want grayscale frames, and it will retun an array of shape (N, H, W).
 ```python
-frames = video_reader.decode_gray(filename, resize, compression_factor, threads, start_frame, end_frame)
+frames = vr.decode_gray(filename, resize, compression_factor, threads, start_frame, end_frame)
 ```
 
 If we only need a sub-clip of the video we can use the `get_batch` function:
 ```python
-frames = video_reader.get_batch(filename, indices, threads=0, resize_shorter_side=None, with_fallback=False)
+frames = vr.get_batch(filename, indices, threads=0, resize_shorter_side=None, with_fallback=False)
 ```
 * **filename**: path to the video file to decode
 * **indices**: list of indices of the frames to get
@@ -81,12 +81,18 @@ frames = video_reader.get_batch(filename, indices, threads=0, resize_shorter_sid
 
 We can also get the shape of the raw video
 ```python
-(n, h, w) = video_reader.get_shape(filename)
+(n, h, w) = vr.get_shape(filename)
+```
+
+Or get a dict with information about the video (shape and fps at the moment)
+```python
+info_dict = vr.get_info(filename)
+print(info_dict["fps"])
 ```
 
 We can encode the video with h264 codec
 ```python
-video_reader.save_video(frames, "video.mp4", fps=15, codec="h264")
+vr.save_video(frames, "video.mp4", fps=15, codec="h264")
 ```
 
 ## :rocket: Performance comparison
@@ -110,12 +116,12 @@ Options:
 Tested on a laptop with 15Gb of RAM, with ubuntu 22.04 and python 3.10.
 Run this script:
 ```python
-import video_reader
+import video_reader as vr
 from time import time
 
 def bench_video_decode(filename, compress_factor, resize):
     start =  time()
-    vid = video_reader.decode(filename, resize_shorter_side=resize, compression_factor=compress_factor, threads=0)
+    vid = vr.decode(filename, resize_shorter_side=resize, compression_factor=compress_factor, threads=0)
     duration = time() - start
     print(f"Duration {duration:.2f}sec")
     return vid

@@ -3,7 +3,13 @@ use numpy::{IntoPyArray, PyArray, PyReadonlyArray4};
 mod video_io;
 use ffmpeg_next as ffmpeg;
 use log::debug;
-use pyo3::{exceptions::PyRuntimeError, pymodule, types::PyModule, Bound, PyResult, Python};
+use pyo3::{
+    exceptions::PyRuntimeError,
+    pymodule,
+    types::{IntoPyDict, PyDict, PyModule},
+    Bound, PyResult, Python,
+};
+use std::collections::HashMap;
 use video_io::{rgb2gray, save_video, VideoReader};
 
 #[pymodule]
@@ -16,6 +22,17 @@ fn video_reader<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()>
         let height = vr.decoder.decoder.height() as usize;
         let num_frames = vr.stream_info.frame_count;
         Ok((num_frames, height, width))
+    }
+
+    /// Get video information: width, height, number of frames and fps
+    fn get_info(filename: &String) -> Result<HashMap<&str, f32>, ffmpeg::Error> {
+        let vr = VideoReader::new(filename.to_owned(), None, None, 0, false, None, None)?;
+        let mut video_info: HashMap<&str, f32> = HashMap::new();
+        video_info.insert("width", vr.decoder.decoder.width() as f32);
+        video_info.insert("height", vr.decoder.decoder.height() as f32);
+        video_info.insert("num_frames", vr.stream_info.frame_count as f32);
+        video_info.insert("fps", vr.decoder.fps as f32);
+        Ok(video_info)
     }
 
     /// Decode video and return ndarray representing RGB frames
@@ -231,6 +248,21 @@ fn video_reader<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()>
                 let shape = vec![num_frames, height, width];
                 Ok(shape.into_pyarray_bound(py))
             }
+            Err(e) => Err(PyRuntimeError::new_err(format!("Error: {}", e))),
+        }
+    }
+
+    // wrapper of `get_info`
+    /// Get metadata info of the video: number of frames, height, width and fps
+    /// * `filename` - Path to the video file
+    /// * Returns a dictionary with the metadata
+    #[pyfn(m)]
+    #[pyo3(name = "get_info")]
+    fn get_info_py<'py>(py: Python<'py>, filename: &str) -> PyResult<Bound<'py, PyDict>> {
+        let binding = filename.to_string();
+        let res = get_info(&binding);
+        match res {
+            Ok(info_map) => Ok(info_map.into_py_dict_bound(py)),
             Err(e) => Err(PyRuntimeError::new_err(format!("Error: {}", e))),
         }
     }

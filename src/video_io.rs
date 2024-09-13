@@ -122,10 +122,10 @@ impl VideoReader {
     /// * `compression_factor` - Factor to reduce the number of frames in the video.
     /// * `resize_shorter_side` - Resize the shorter side of the video to this value.
     /// * `threads` - Number of threads to use for decoding. This will be ignored when using
-    /// the `get_batch` method, as it does not work with multithreading at the moment.
+    ///   the `get_batch` method, as it does not work with multithreading at the moment.
     /// * `with_reducer` - Whether to use the VideoReducer to reduce the number of frames.
-    /// should be set to true to be able to use `decode_video` method. Set to false when using
-    /// the `get_batch` method.
+    ///    should be set to true to be able to use `decode_video` method. Set to false when using
+    ///    the `get_batch` method.
     ///
     /// Returns: a VideoReader instance.
     pub fn new(
@@ -372,6 +372,7 @@ pub fn get_frame_count(
 /// * height (f64): Height of the frame
 /// * width (f64): Width of the frame
 /// * resize_shorter_side_to (f64): Resize the shorter side of the frame to this value.
+///
 /// Returns: Option<(f64, f64)>: Option of the resized height and width
 pub fn get_resized_dim(mut height: f64, mut width: f64, resize_shorter_side_to: f64) -> (u32, u32) {
     let mut short_side_res = height;
