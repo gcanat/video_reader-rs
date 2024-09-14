@@ -56,10 +56,30 @@ pub struct FrameTime {
     pub dts: i64,
 }
 
+/// Info gathered from iterating over the video stream
 pub struct StreamInfo {
     pub frame_count: usize,
     pub key_frames: Vec<usize>,
     pub frame_times: HashMap<usize, FrameTime>,
+}
+
+/// Metadata about the video
+pub struct VideoInfo {
+    fps: f64,
+    duration: f64,
+    id: String,
+    height: u32,
+    width: u32,
+    bit_rate: usize,
+    vid_format: String,
+    aspect_ratio: String,
+    color_space: String,
+    color_range: String,
+    color_primaries: String,
+    color_xfer_charac: String,
+    chroma_location: String,
+    vid_ref: usize,
+    intra_dc_prec: u8,
 }
 
 impl VideoDecoder {
@@ -179,6 +199,7 @@ impl VideoReader {
             .best(Type::Video)
             .ok_or(ffmpeg::Error::StreamNotFound)?;
         let fps = f64::from(input.avg_frame_rate()).round();
+        let duration = input.duration() as f64 * f64::from(input.time_base());
         // let start_time = input.start_time();
         // let time_base = f64::from(input.time_base());
         // setup the decoder context
@@ -193,10 +214,30 @@ impl VideoReader {
             #[cfg(not(feature = "ffmpeg_6_0"))]
             safe: true,
         });
+        let codec_id = context_decoder.id();
         let decoder = context_decoder.decoder().video()?;
 
         let orig_h = decoder.height();
         let orig_w = decoder.width();
+
+        // Some more metadata
+        let video_info = VideoInfo {
+            fps,
+            duration,
+            id: format!("{:?}", codec_id),
+            height: decoder.height(),
+            width: decoder.width(),
+            bit_rate: decoder.bit_rate(),
+            vid_format: format!("{:?}", decoder.format()),
+            aspect_ratio: format!("{:?}", decoder.aspect_ratio()),
+            color_space: format!("{:?}", decoder.color_space()),
+            color_range: format!("{:?}", decoder.color_range()),
+            color_primaries: format!("{:?}", decoder.color_primaries()),
+            color_xfer_charac: format!("{:?}", decoder.color_transfer_characteristic()),
+            chroma_location: format!("{:?}", decoder.chroma_location()),
+            vid_ref: decoder.references(),
+            intra_dc_prec: decoder.intra_dc_precision(),
+        };
 
         // do we need to resize the video ?
         let (h, w) = match resize_shorter_side {
