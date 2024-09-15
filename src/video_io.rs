@@ -31,7 +31,7 @@ pub struct VideoReader {
 
 /// Struct responsible for doing the actual decoding
 pub struct VideoDecoder {
-    pub decoder: ffmpeg::decoder::Video,
+    pub video: ffmpeg::decoder::Video,
     pub scaler: Context,
     pub height: u32,
     pub width: u32,
@@ -71,7 +71,7 @@ impl VideoDecoder {
         reducer: &mut VideoReducer,
     ) -> Result<(), ffmpeg::Error> {
         let mut decoded = Video::empty();
-        while self.decoder.receive_frame(&mut decoded).is_ok() {
+        while self.video.receive_frame(&mut decoded).is_ok() {
             let match_index = reducer
                 .indices
                 .iter()
@@ -105,7 +105,7 @@ impl VideoDecoder {
     ) -> Result<(), ffmpeg::Error> {
         let mut decoded = Video::empty();
         let mut nd_frame: FrameArray;
-        while self.decoder.receive_frame(&mut decoded).is_ok() {
+        while self.video.receive_frame(&mut decoded).is_ok() {
             if indices.iter().any(|x| x == &reducer.frame_index) {
                 let mut rgb_frame = Video::empty();
                 self.scaler.run(&decoded, &mut rgb_frame)?;
@@ -197,39 +197,39 @@ impl VideoReader {
             safe: true,
         });
         let codec_id = context_decoder.id();
-        let decoder = context_decoder.decoder().video()?;
+        let video = context_decoder.decoder().video()?;
 
-        let orig_h = decoder.height();
-        let orig_w = decoder.width();
+        let orig_h = video.height();
+        let orig_w = video.width();
 
         // Some more metadata
         let mut video_info: HashMap<&str, String> = HashMap::new();
         video_info.insert("fps", format!("{}", fps));
         video_info.insert("duration", format!("{}", duration));
         video_info.insert("codec_id", format!("{:?}", codec_id));
-        video_info.insert("height", format!("{}", decoder.height()));
-        video_info.insert("width", format!("{}", decoder.width()));
-        video_info.insert("bit_rate", format!("{}", decoder.bit_rate()));
-        video_info.insert("vid_format", format!("{:?}", decoder.format()));
-        video_info.insert("aspect_ratio", format!("{:?}", decoder.aspect_ratio()));
-        video_info.insert("color_space", format!("{:?}", decoder.color_space()));
-        video_info.insert("color_range", format!("{:?}", decoder.color_range()));
+        video_info.insert("height", format!("{}", video.height()));
+        video_info.insert("width", format!("{}", video.width()));
+        video_info.insert("bit_rate", format!("{}", video.bit_rate()));
+        video_info.insert("vid_format", format!("{:?}", video.format()));
+        video_info.insert("aspect_ratio", format!("{:?}", video.aspect_ratio()));
+        video_info.insert("color_space", format!("{:?}", video.color_space()));
+        video_info.insert("color_range", format!("{:?}", video.color_range()));
         video_info.insert(
             "color_primaries",
-            format!("{:?}", decoder.color_primaries()),
+            format!("{:?}", video.color_primaries()),
         );
         video_info.insert(
             "color_xfer_charac",
-            format!("{:?}", decoder.color_transfer_characteristic()),
+            format!("{:?}", video.color_transfer_characteristic()),
         );
         video_info.insert(
             "chroma_location",
-            format!("{:?}", decoder.chroma_location()),
+            format!("{:?}", video.chroma_location()),
         );
-        video_info.insert("vid_ref", format!("{}", decoder.references()));
+        video_info.insert("vid_ref", format!("{}", video.references()));
         video_info.insert(
             "intra_dc_precision",
-            format!("{}", decoder.intra_dc_precision()),
+            format!("{}", video.intra_dc_precision()),
         );
 
         // do we need to resize the video ?
@@ -239,7 +239,7 @@ impl VideoReader {
         };
 
         let scaler = Context::get(
-            decoder.format(),
+            video.format(),
             orig_w,
             orig_h,
             AvPixel::RGB24,
@@ -283,7 +283,7 @@ impl VideoReader {
         };
         Ok((
             VideoDecoder {
-                decoder,
+                video,
                 scaler,
                 height: h,
                 width: w,
@@ -332,14 +332,14 @@ impl VideoReader {
                         break;
                     }
                     if stream.index() == self.stream_index {
-                        self.decoder.decoder.send_packet(&packet)?;
+                        self.decoder.video.send_packet(&packet)?;
                         self.decoder
                             .receive_and_process_decoded_frames(&mut reducer)?;
                     } else {
                         debug!("Packet for another stream");
                     }
                 }
-                self.decoder.decoder.send_eof()?;
+                self.decoder.video.send_eof()?;
                 // only process the remaining frames if we haven't reached the last frame
                 if !reducer.indices.is_empty()
                     && (&reducer.frame_index <= reducer.indices.iter().max().unwrap_or(&0))
@@ -529,7 +529,7 @@ impl VideoReader {
             Some(mut reducer) => {
                 for (stream, packet) in self.ictx.packets() {
                     if stream.index() == self.stream_index {
-                        self.decoder.decoder.send_packet(&packet)?;
+                        self.decoder.video.send_packet(&packet)?;
                         self.decoder.skip_and_decode_frames(
                             &mut reducer,
                             &indices,
@@ -539,7 +539,7 @@ impl VideoReader {
                         debug!("Packet for another stream");
                     }
                 }
-                self.decoder.decoder.send_eof()?;
+                self.decoder.video.send_eof()?;
                 self.decoder
                     .skip_and_decode_frames(&mut reducer, &indices, &mut frame_map)?;
 
@@ -658,10 +658,10 @@ impl VideoReader {
                 Some((stream, packet)) => {
                     debug!("New packet, curr_frame: {}", self.curr_frame);
                     if stream.index() == self.stream_index {
-                        self.decoder.decoder.send_packet(&packet)?;
+                        self.decoder.video.send_packet(&packet)?;
                         let mut decoded = Video::empty();
                         debug!("Video stream, curr_frame: {}", self.curr_frame);
-                        while self.decoder.decoder.receive_frame(&mut decoded).is_ok() {
+                        while self.decoder.video.receive_frame(&mut decoded).is_ok() {
                             debug!("receive frame, curr_frame: {}", self.curr_frame);
                             self.curr_frame += 1;
                             num_skip -= 1;
@@ -685,9 +685,9 @@ impl VideoReader {
                 let mut frame: Array<u8, Dim<[usize; 3]>> =
                     Array::zeros((self.decoder.height as usize, self.decoder.width as usize, 3));
                 if stream.index() == self.stream_index {
-                    self.decoder.decoder.send_packet(&packet)?;
+                    self.decoder.video.send_packet(&packet)?;
                     let mut decoded = Video::empty();
-                    while self.decoder.decoder.receive_frame(&mut decoded).is_ok() {
+                    while self.decoder.video.receive_frame(&mut decoded).is_ok() {
                         debug!("Decoding frame : {}", self.curr_frame);
                         let mut rgb_frame = Video::empty();
                         self.decoder.scaler.run(&decoded, &mut rgb_frame)?;

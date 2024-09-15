@@ -18,8 +18,8 @@ fn video_reader<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()>
     /// Get shape of the video: number of frames, height and width
     fn get_shape(filename: &String) -> Result<(usize, usize, usize), ffmpeg::Error> {
         let vr = VideoReader::new(filename.to_owned(), None, None, 0, false, None, None)?;
-        let width = vr.decoder.decoder.width() as usize;
-        let height = vr.decoder.decoder.height() as usize;
+        let width = vr.decoder.video.width() as usize;
+        let height = vr.decoder.video.height() as usize;
         let num_frames = vr.stream_info.frame_count;
         Ok((num_frames, height, width))
     }
