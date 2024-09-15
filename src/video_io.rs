@@ -207,7 +207,7 @@ impl VideoReader {
         let mut video_info: HashMap<&str, String> = HashMap::new();
         video_info.insert("fps", format!("{}", fps));
         video_info.insert("duration", format!("{}", duration));
-        video_info.insert("id", format!("{:?}", codec_id));
+        video_info.insert("codec_id", format!("{:?}", codec_id));
         video_info.insert("height", format!("{}", decoder.height()));
         video_info.insert("width", format!("{}", decoder.width()));
         video_info.insert("bit_rate", format!("{}", decoder.bit_rate()));
@@ -219,7 +219,7 @@ impl VideoReader {
         video_info.insert("color_xfer_charac", format!("{:?}", decoder.color_transfer_characteristic()));
         video_info.insert("chroma_location", format!("{:?}", decoder.chroma_location()));
         video_info.insert("vid_ref", format!("{}", decoder.references()));
-        video_info.insert("intra_dc_prec", format!("{}", decoder.intra_dc_precision()));
+        video_info.insert("intra_dc_precision", format!("{}", decoder.intra_dc_precision()));
 
         // do we need to resize the video ?
         let (h, w) = match resize_shorter_side {
