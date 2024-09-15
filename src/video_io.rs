@@ -64,7 +64,6 @@ pub struct StreamInfo {
     pub frame_times: HashMap<usize, FrameTime>,
 }
 
-
 impl VideoDecoder {
     /// Decode all frames that match the frame indices
     pub fn receive_and_process_decoded_frames(
@@ -215,11 +214,23 @@ impl VideoReader {
         video_info.insert("aspect_ratio", format!("{:?}", decoder.aspect_ratio()));
         video_info.insert("color_space", format!("{:?}", decoder.color_space()));
         video_info.insert("color_range", format!("{:?}", decoder.color_range()));
-        video_info.insert("color_primaries", format!("{:?}", decoder.color_primaries()));
-        video_info.insert("color_xfer_charac", format!("{:?}", decoder.color_transfer_characteristic()));
-        video_info.insert("chroma_location", format!("{:?}", decoder.chroma_location()));
+        video_info.insert(
+            "color_primaries",
+            format!("{:?}", decoder.color_primaries()),
+        );
+        video_info.insert(
+            "color_xfer_charac",
+            format!("{:?}", decoder.color_transfer_characteristic()),
+        );
+        video_info.insert(
+            "chroma_location",
+            format!("{:?}", decoder.chroma_location()),
+        );
         video_info.insert("vid_ref", format!("{}", decoder.references()));
-        video_info.insert("intra_dc_precision", format!("{}", decoder.intra_dc_precision()));
+        video_info.insert(
+            "intra_dc_precision",
+            format!("{}", decoder.intra_dc_precision()),
+        );
 
         // do we need to resize the video ?
         let (h, w) = match resize_shorter_side {
