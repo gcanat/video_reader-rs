@@ -214,18 +214,12 @@ impl VideoReader {
         video_info.insert("aspect_ratio", format!("{:?}", video.aspect_ratio()));
         video_info.insert("color_space", format!("{:?}", video.color_space()));
         video_info.insert("color_range", format!("{:?}", video.color_range()));
-        video_info.insert(
-            "color_primaries",
-            format!("{:?}", video.color_primaries()),
-        );
+        video_info.insert("color_primaries", format!("{:?}", video.color_primaries()));
         video_info.insert(
             "color_xfer_charac",
             format!("{:?}", video.color_transfer_characteristic()),
         );
-        video_info.insert(
-            "chroma_location",
-            format!("{:?}", video.chroma_location()),
-        );
+        video_info.insert("chroma_location", format!("{:?}", video.chroma_location()));
         video_info.insert("vid_ref", format!("{}", video.references()));
         video_info.insert(
             "intra_dc_precision",
