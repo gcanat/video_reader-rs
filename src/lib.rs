@@ -25,14 +25,11 @@ fn video_reader<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()>
     }
 
     /// Get video information: width, height, number of frames and fps
-    fn get_info(filename: &String) -> Result<HashMap<&str, f32>, ffmpeg::Error> {
+    fn get_info(filename: &String) -> Result<HashMap<&str, String>, ffmpeg::Error> {
         let vr = VideoReader::new(filename.to_owned(), None, None, 0, false, None, None)?;
-        let mut video_info: HashMap<&str, f32> = HashMap::new();
-        video_info.insert("width", vr.decoder.decoder.width() as f32);
-        video_info.insert("height", vr.decoder.decoder.height() as f32);
-        video_info.insert("num_frames", vr.stream_info.frame_count as f32);
-        video_info.insert("fps", vr.decoder.fps as f32);
-        Ok(video_info)
+        let mut info_dict = vr.decoder.video_info;
+        info_dict.insert("frame_count", vr.stream_info.frame_count.to_string());
+        Ok(info_dict)
     }
 
     /// Decode video and return ndarray representing RGB frames

@@ -84,7 +84,7 @@ We can also get the shape of the raw video
 (n, h, w) = vr.get_shape(filename)
 ```
 
-Or get a dict with information about the video (shape and fps at the moment)
+Or get a dict with information about the video, returned as Dict[str, str]
 ```python
 info_dict = vr.get_info(filename)
 print(info_dict["fps"])

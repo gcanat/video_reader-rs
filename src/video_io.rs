@@ -36,6 +36,7 @@ pub struct VideoDecoder {
     pub height: u32,
     pub width: u32,
     pub fps: f64,
+    pub video_info: HashMap<&'static str, String>,
     // pub start_time: i64,
     // pub time_base: f64,
 }
@@ -56,6 +57,7 @@ pub struct FrameTime {
     pub dts: i64,
 }
 
+/// Info gathered from iterating over the video stream
 pub struct StreamInfo {
     pub frame_count: usize,
     pub key_frames: Vec<usize>,
@@ -179,6 +181,7 @@ impl VideoReader {
             .best(Type::Video)
             .ok_or(ffmpeg::Error::StreamNotFound)?;
         let fps = f64::from(input.avg_frame_rate()).round();
+        let duration = input.duration() as f64 * f64::from(input.time_base());
         // let start_time = input.start_time();
         // let time_base = f64::from(input.time_base());
         // setup the decoder context
@@ -193,10 +196,41 @@ impl VideoReader {
             #[cfg(not(feature = "ffmpeg_6_0"))]
             safe: true,
         });
+        let codec_id = context_decoder.id();
         let decoder = context_decoder.decoder().video()?;
 
         let orig_h = decoder.height();
         let orig_w = decoder.width();
+
+        // Some more metadata
+        let mut video_info: HashMap<&str, String> = HashMap::new();
+        video_info.insert("fps", format!("{}", fps));
+        video_info.insert("duration", format!("{}", duration));
+        video_info.insert("codec_id", format!("{:?}", codec_id));
+        video_info.insert("height", format!("{}", decoder.height()));
+        video_info.insert("width", format!("{}", decoder.width()));
+        video_info.insert("bit_rate", format!("{}", decoder.bit_rate()));
+        video_info.insert("vid_format", format!("{:?}", decoder.format()));
+        video_info.insert("aspect_ratio", format!("{:?}", decoder.aspect_ratio()));
+        video_info.insert("color_space", format!("{:?}", decoder.color_space()));
+        video_info.insert("color_range", format!("{:?}", decoder.color_range()));
+        video_info.insert(
+            "color_primaries",
+            format!("{:?}", decoder.color_primaries()),
+        );
+        video_info.insert(
+            "color_xfer_charac",
+            format!("{:?}", decoder.color_transfer_characteristic()),
+        );
+        video_info.insert(
+            "chroma_location",
+            format!("{:?}", decoder.chroma_location()),
+        );
+        video_info.insert("vid_ref", format!("{}", decoder.references()));
+        video_info.insert(
+            "intra_dc_precision",
+            format!("{}", decoder.intra_dc_precision()),
+        );
 
         // do we need to resize the video ?
         let (h, w) = match resize_shorter_side {
@@ -254,6 +288,7 @@ impl VideoReader {
                 height: h,
                 width: w,
                 fps,
+                video_info,
                 // start_time,
                 // time_base,
             },
