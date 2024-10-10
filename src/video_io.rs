@@ -673,27 +673,39 @@ impl VideoReader {
     }
 
     pub fn read_frame(&mut self) -> Result<FrameArray, ffmpeg::Error> {
-        match self.ictx.packets().next() {
-            Some((stream, packet)) => {
-                // initialize empty frame
-                let mut frame: Array<u8, Dim<[usize; 3]>> =
-                    Array::zeros((self.decoder.height as usize, self.decoder.width as usize, 3));
-                if stream.index() == self.stream_index {
-                    self.decoder.video.send_packet(&packet)?;
-                    let mut decoded = Video::empty();
-                    while self.decoder.video.receive_frame(&mut decoded).is_ok() {
-                        debug!("Decoding frame : {}", self.curr_frame);
-                        let mut rgb_frame = Video::empty();
-                        self.decoder.scaler.run(&decoded, &mut rgb_frame)?;
-                        frame = convert_frame_to_ndarray_rgb24(&mut rgb_frame)?;
-                        self.curr_frame += 1;
+        let mut cnt = 0;
+        loop {
+            match self.ictx.packets().next() {
+                Some((stream, packet)) => {
+                    // initialize empty frame
+                    let mut frame: Array<u8, Dim<[usize; 3]>> = Array::zeros((
+                        self.decoder.height as usize,
+                        self.decoder.width as usize,
+                        3,
+                    ));
+                    // receive video frame
+                    if stream.index() == self.stream_index {
+                        self.decoder.video.send_packet(&packet)?;
+                        let mut decoded = Video::empty();
+                        while self.decoder.video.receive_frame(&mut decoded).is_ok() {
+                            debug!("Decoding frame : {}", self.curr_frame);
+                            let mut rgb_frame = Video::empty();
+                            self.decoder.scaler.run(&decoded, &mut rgb_frame)?;
+                            frame = convert_frame_to_ndarray_rgb24(&mut rgb_frame)?;
+                            self.curr_frame += 1;
+                        }
+                        return Ok(frame);
+                    }
+                    cnt += 1;
+                    if cnt > 9 {
+                        error!("Could not find video stream, after iterating through 10 packets");
+                        return Err(ffmpeg::Error::Eof);
                     }
                 }
-                Ok(frame)
-            }
-            None => {
-                error!("No more packet to send for curr_frame: {}", self.curr_frame);
-                Err(ffmpeg::Error::Eof)
+                None => {
+                    error!("No more packet to send for curr_frame: {}", self.curr_frame);
+                    return Err(ffmpeg::Error::Eof);
+                }
             }
         }
     }
