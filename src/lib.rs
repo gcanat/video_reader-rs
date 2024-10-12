@@ -134,6 +134,7 @@ fn video_reader<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()>
     /// * Returns a 4D ndarray with shape (N, H, W, C)
     #[pyfn(m)]
     #[pyo3(name = "decode")]
+    #[pyo3(signature = (filename, resize_shorter_side=None, compression_factor=None, threads=None, start_frame=None, end_frame=None))]
     fn decode_py<'py>(
         py: Python<'py>,
         filename: &str,
@@ -170,6 +171,7 @@ fn video_reader<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()>
     /// * Returns a 3D ndarray with shape (N, H, W)
     #[pyfn(m)]
     #[pyo3(name = "decode_gray")]
+    #[pyo3(signature = (filename, resize_shorter_side=None, compression_factor=None, threads=None, start_frame=None, end_frame=None))]
     fn decode_gray_py<'py>(
         py: Python<'py>,
         filename: &str,
@@ -209,6 +211,7 @@ fn video_reader<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()>
     /// * Returns a 4D ndarray with shape (N, H, W, C)
     #[pyfn(m)]
     #[pyo3(name = "get_batch")]
+    #[pyo3(signature = (filename, indices, threads=None, resize_shorter_side=None, with_fallback=None))]
     fn get_batch_py<'py>(
         py: Python<'py>,
         filename: &str,
