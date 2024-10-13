@@ -12,7 +12,7 @@ use video_rs::encode::{Encoder, Settings};
 use video_rs::location::Location;
 use video_rs::time::Time;
 
-use ndarray::{s, Array, Array3, Array4, Axis, Dim};
+use ndarray::{s, Array, Array3, Array4, ArrayViewMut3, Axis};
 
 pub type FrameArray = Array3<u8>;
 pub type VideoArray = Array4<u8>;
@@ -80,15 +80,15 @@ impl VideoDecoder {
                 reducer.indices.remove(match_index.unwrap());
                 let mut rgb_frame = Video::empty();
                 self.scaler.run(&decoded, &mut rgb_frame)?;
-                let nd_frame = convert_frame_to_ndarray_rgb24(&mut rgb_frame);
-                match nd_frame {
-                    Ok(frame) => {
-                        reducer
-                            .full_video
-                            .slice_mut(s![reducer.idx_counter, .., .., ..])
-                            .assign(&frame);
-                    }
-                    Err(_) => println!("Couldnt decode frame"),
+                let res = convert_frame_to_ndarray_rgb24(
+                    &mut rgb_frame,
+                    &mut reducer
+                        .full_video
+                        .slice_mut(s![reducer.idx_counter, .., .., ..]),
+                );
+                match res {
+                    Ok(()) => {}
+                    Err(_) => println!("Couldnt decode frame {}", reducer.frame_index),
                 }
                 reducer.idx_counter += 1;
             }
@@ -104,12 +104,13 @@ impl VideoDecoder {
         frame_map: &mut HashMap<usize, FrameArray>,
     ) -> Result<(), ffmpeg::Error> {
         let mut decoded = Video::empty();
-        let mut nd_frame: FrameArray;
         while self.video.receive_frame(&mut decoded).is_ok() {
             if indices.iter().any(|x| x == &reducer.frame_index) {
                 let mut rgb_frame = Video::empty();
+                let mut nd_frame =
+                    FrameArray::zeros((self.height as usize, self.width as usize, 3_usize));
                 self.scaler.run(&decoded, &mut rgb_frame)?;
-                nd_frame = convert_frame_to_ndarray_rgb24(&mut rgb_frame)?;
+                convert_frame_to_ndarray_rgb24(&mut rgb_frame, &mut nd_frame.view_mut())?;
                 frame_map.insert(reducer.frame_index, nd_frame);
             }
             reducer.frame_index += 1;
@@ -473,7 +474,10 @@ pub fn save_video(
 /// Copied from https://github.com/oddity-ai/video-rs
 /// * `frame` - Video frame to convert.
 /// * returns a three-dimensional `ndarray` with dimensions `(H, W, C)` and type byte.
-pub fn convert_frame_to_ndarray_rgb24(frame: &mut Video) -> Result<FrameArray, ffmpeg::Error> {
+pub fn convert_frame_to_ndarray_rgb24(
+    frame: &mut Video,
+    frame_array: &mut ArrayViewMut3<u8>,
+) -> Result<(), ffmpeg::Error> {
     unsafe {
         let frame_ptr = frame.as_mut_ptr();
         let frame_width: i32 = (*frame_ptr).width;
@@ -481,9 +485,6 @@ pub fn convert_frame_to_ndarray_rgb24(frame: &mut Video) -> Result<FrameArray, f
         let frame_format =
             std::mem::transmute::<std::ffi::c_int, AVPixelFormat>((*frame_ptr).format);
         assert_eq!(frame_format, AVPixelFormat::AV_PIX_FMT_RGB24);
-
-        let mut frame_array =
-            FrameArray::default((frame_height as usize, frame_width as usize, 3_usize));
 
         let bytes_copied = av_image_copy_to_buffer(
             frame_array.as_mut_ptr(),
@@ -497,7 +498,7 @@ pub fn convert_frame_to_ndarray_rgb24(frame: &mut Video) -> Result<FrameArray, f
         );
 
         if bytes_copied == frame_array.len() as i32 {
-            Ok(frame_array)
+            Ok(())
         } else {
             Err(ffmpeg::Error::InvalidData)
         }
@@ -678,7 +679,7 @@ impl VideoReader {
             match self.ictx.packets().next() {
                 Some((stream, packet)) => {
                     // initialize empty frame
-                    let mut frame: Array<u8, Dim<[usize; 3]>> = Array::zeros((
+                    let mut frame: FrameArray = Array::zeros((
                         self.decoder.height as usize,
                         self.decoder.width as usize,
                         3,
@@ -691,7 +692,7 @@ impl VideoReader {
                             debug!("Decoding frame : {}", self.curr_frame);
                             let mut rgb_frame = Video::empty();
                             self.decoder.scaler.run(&decoded, &mut rgb_frame)?;
-                            frame = convert_frame_to_ndarray_rgb24(&mut rgb_frame)?;
+                            convert_frame_to_ndarray_rgb24(&mut rgb_frame, &mut frame.view_mut())?;
                             self.curr_frame += 1;
                         }
                         return Ok(frame);
