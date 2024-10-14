@@ -306,7 +306,7 @@ impl VideoReader {
             && (first_index > 0)
         {
             let frame_duration = (1. / self.decoder.fps * 1_000.0).round() as usize;
-            first_frame = self.seek_accurate(first_index, &frame_duration)?;
+            self.seek_accurate(first_index, &frame_duration, &mut first_frame.view_mut())?;
             seeked = true;
         }
         match self.reducer {
@@ -578,10 +578,11 @@ impl VideoReader {
         for (idx_counter, frame_index) in indices.into_iter().enumerate() {
             self.n_fails = 0;
             debug!("[NEXT INDICE] frame_index: {frame_index}");
-            let frame = self.seek_accurate(frame_index, &frame_duration)?;
-            video_frames
-                .slice_mut(s![idx_counter, .., .., ..])
-                .assign(&frame);
+            self.seek_accurate(
+                frame_index,
+                &frame_duration,
+                &mut video_frames.slice_mut(s![idx_counter, .., .., ..]),
+            )?;
         }
         Ok(video_frames)
     }
@@ -590,7 +591,8 @@ impl VideoReader {
         &mut self,
         frame_index: usize,
         frame_duration: &usize,
-    ) -> Result<FrameArray, ffmpeg::Error> {
+        frame_array: &mut ArrayViewMut3<u8>,
+    ) -> Result<(), ffmpeg::Error> {
         let key_pos = self.locate_keyframes(&frame_index, &self.stream_info.key_frames);
         debug!("    - Key pos: {}", key_pos);
         let curr_key_pos = self.locate_keyframes(&self.curr_frame, &self.stream_info.key_frames);
@@ -615,8 +617,8 @@ impl VideoReader {
             // no need to seek to keyframe
             self.skip_frames(frame_index - self.curr_frame)?;
         }
-        match self.read_frame() {
-            Ok(frame) => Ok(frame),
+        match self.read_frame(frame_array) {
+            Ok(()) => Ok(()),
             Err(e) => {
                 debug!("WENT TO EOF NEED TO RESTART");
                 if self.n_fails < 3 {
@@ -626,7 +628,7 @@ impl VideoReader {
                     let range = (ts - frame_duration / 2) as i64..(ts + frame_duration / 2) as i64;
                     self.ictx.seek(ts as i64, range)?;
                     self.curr_frame = key_pos;
-                    self.seek_accurate(frame_index, frame_duration)
+                    self.seek_accurate(frame_index, frame_duration, frame_array)
                 } else {
                     Err(e)
                 }
@@ -645,7 +647,7 @@ impl VideoReader {
             "will skip {} frames, from current frame:{}",
             num_skip, self.curr_frame
         );
-        // dont retry more than 4x the number of frames we are supposed to skip
+        // dont retry more than 2x the number of frames we are supposed to skip
         // just to make sure we get out of the loop
         let mut failsafe = num_skip * 2;
         while (num_skip > 0) & (failsafe > 0) {
@@ -673,17 +675,12 @@ impl VideoReader {
         Ok(())
     }
 
-    pub fn read_frame(&mut self) -> Result<FrameArray, ffmpeg::Error> {
+    pub fn read_frame(&mut self, frame_array: &mut ArrayViewMut3<u8>) -> Result<(), ffmpeg::Error> {
         let mut cnt = 0;
+        let mut got_frame = false;
         loop {
             match self.ictx.packets().next() {
                 Some((stream, packet)) => {
-                    // initialize empty frame
-                    let mut frame: FrameArray = Array::zeros((
-                        self.decoder.height as usize,
-                        self.decoder.width as usize,
-                        3,
-                    ));
                     // receive video frame
                     if stream.index() == self.stream_index {
                         self.decoder.video.send_packet(&packet)?;
@@ -692,14 +689,17 @@ impl VideoReader {
                             debug!("Decoding frame : {}", self.curr_frame);
                             let mut rgb_frame = Video::empty();
                             self.decoder.scaler.run(&decoded, &mut rgb_frame)?;
-                            convert_frame_to_ndarray_rgb24(&mut rgb_frame, &mut frame.view_mut())?;
+                            convert_frame_to_ndarray_rgb24(&mut rgb_frame, frame_array)?;
                             self.curr_frame += 1;
+                            got_frame = true;
                         }
-                        return Ok(frame);
+                        if got_frame {
+                            return Ok(());
+                        }
                     }
                     cnt += 1;
                     if cnt > 9 {
-                        error!("Could not find video stream, after iterating through 10 packets");
+                        error!("Could not find video stream or frame after iterating through 10 packets");
                         return Err(ffmpeg::Error::Eof);
                     }
                 }
