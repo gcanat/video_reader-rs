@@ -18,3 +18,8 @@ log = "0.4.22"
 
 [features]
 ffmpeg_6_0 = []
+
+[profile.release]
+codegen-units = 1
+lto = true
+panic = "abort"
