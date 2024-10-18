@@ -6,7 +6,7 @@ use ffmpeg::software::scaling::{context::Context, flag::Flags};
 use ffmpeg::util::frame::video::Video;
 use ffmpeg_next as ffmpeg;
 use log::{debug, error};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use video_rs::encode::{Encoder, Settings};
 use video_rs::location::Location;
@@ -37,8 +37,8 @@ pub struct VideoDecoder {
     pub width: u32,
     pub fps: f64,
     pub video_info: HashMap<&'static str, String>,
-    // pub start_time: i64,
-    // pub time_base: f64,
+    pub start_time: i64,
+    pub time_base: f64,
 }
 
 /// Struct used when we want to decode the whole video with a compression_factor
@@ -61,7 +61,7 @@ pub struct FrameTime {
 pub struct StreamInfo {
     pub frame_count: usize,
     pub key_frames: Vec<usize>,
-    pub frame_times: HashMap<usize, FrameTime>,
+    pub frame_times: BTreeMap<usize, FrameTime>,
 }
 
 impl VideoDecoder {
@@ -182,9 +182,9 @@ impl VideoReader {
             .best(Type::Video)
             .ok_or(ffmpeg::Error::StreamNotFound)?;
         let fps = f64::from(input.avg_frame_rate()).round();
-        let duration = input.duration() as f64 * f64::from(input.time_base());
-        // let start_time = input.start_time();
-        // let time_base = f64::from(input.time_base());
+        let start_time = input.start_time();
+        let time_base = f64::from(input.time_base());
+        let duration = input.duration() as f64 * time_base;
         // setup the decoder context
         let mut context_decoder =
             ffmpeg::codec::context::Context::from_parameters(input.parameters())?;
@@ -206,6 +206,8 @@ impl VideoReader {
         // Some more metadata
         let mut video_info: HashMap<&str, String> = HashMap::new();
         video_info.insert("fps", format!("{}", fps));
+        video_info.insert("time_base", format!("{}", time_base));
+        video_info.insert("start_time", format!("{}", start_time));
         video_info.insert("duration", format!("{}", duration));
         video_info.insert("codec_id", format!("{:?}", codec_id));
         video_info.insert("height", format!("{}", video.height()));
@@ -284,8 +286,8 @@ impl VideoReader {
                 width: w,
                 fps,
                 video_info,
-                // start_time,
-                // time_base,
+                start_time,
+                time_base,
             },
             reducer,
             first_frame,
@@ -371,21 +373,27 @@ pub fn get_frame_count(
     ictx: &mut ffmpeg::format::context::Input,
     stream_index: &usize,
 ) -> Result<StreamInfo, ffmpeg::Error> {
-    let mut frame_count = 0;
+    let mut frame_count: usize = 0;
     let mut key_frames = Vec::new();
-    let mut frame_times = HashMap::new();
+    let mut frame_times = BTreeMap::new();
     for (stream, packet) in ictx.packets() {
         if &stream.index() == stream_index {
             if packet.is_key() {
-                key_frames.push(frame_count);
                 let pts = packet.pts().unwrap_or(0);
                 let dur = packet.duration();
                 let dts = packet.dts().unwrap_or(0);
-                frame_times.insert(frame_count, FrameTime { pts, dur, dts });
+                let key = if dur != 0 {
+                    (pts / dur) as usize
+                } else {
+                    frame_count
+                };
+                key_frames.push(key);
+                frame_times.insert(key, FrameTime { pts, dur, dts });
             }
             frame_count += 1;
         }
     }
+    debug!("Key frames info: {:?}", frame_times);
     // Seek back to the begining of the stream
     ictx.seek(0, ..10)?;
     Ok(StreamInfo {
@@ -597,24 +605,11 @@ impl VideoReader {
         debug!("    - Key pos: {}", key_pos);
         let curr_key_pos = self.locate_keyframes(&self.curr_frame, &self.stream_info.key_frames);
         debug!("    - Curr key pos: {}", curr_key_pos);
-        if key_pos != curr_key_pos {
-            if frame_index < self.curr_frame {
-                debug!("        - Seeking back to 0");
-                self.seek_frame(&0, frame_duration)?;
-                self.curr_frame = 0;
-            }
-            self.seek_frame(&key_pos, frame_duration)?;
-            debug!("        - Frame index: {}", frame_index);
-            debug!("        - Current frame: {}", self.curr_frame);
-            let num_skip = frame_index - self.curr_frame;
-            debug!("        - Num Skip: {}", num_skip);
-            self.skip_frames(num_skip)?;
+        if (key_pos == curr_key_pos) & (frame_index >= self.curr_frame) {
+            // we can directly skip until frame_index
+            self.skip_frames(frame_index - self.curr_frame)?;
         } else {
-            if frame_index < self.curr_frame {
-                debug!("        - Seeking back to {}", key_pos);
-                self.seek_frame(&key_pos, frame_duration)?;
-            }
-            // no need to seek to keyframe
+            self.seek_frame(&key_pos, frame_duration)?;
             self.skip_frames(frame_index - self.curr_frame)?;
         }
         match self.read_frame(frame_array) {

@@ -98,12 +98,12 @@ fn video_reader<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()>
             .stream_info
             .frame_times
             .iter()
-            .filter(|(_, v)| v.pts <= 0)
+            .filter(|(_, v)| v.pts < 1)
             .collect::<Vec<_>>()
             .len();
-        let first_key = vr.stream_info.frame_times.get(&0).unwrap();
+        let (_, first_key) = vr.stream_info.frame_times.first_key_value().unwrap();
         // if fallback is enabled, try to detect weird cases and if so switch to decoding without seeking
-        if with_fallback && ((num_zero_pts > 1) || (first_key.dur <= 0) || (first_key.dts < 0)) {
+        if with_fallback && ((num_zero_pts > 1) || (first_key.dur < 1) || (first_key.dts < 0)) {
             debug!("Warning: video has weird timestamps, decoding without seeking");
             // switch to video reader that will iterate on all frames, we can use threading here
             vr = VideoReader::new(
