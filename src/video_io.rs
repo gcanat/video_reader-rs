@@ -52,16 +52,29 @@ pub struct VideoReducer {
 /// Timing info for key frames
 #[derive(Debug)]
 pub struct FrameTime {
+    // presentation time
     pub pts: i64,
+    // frame duration
     pub dur: i64,
+    // decoding time
     pub dts: i64,
+    // decoding index
+    pub didx: usize,
+    // is it a key frame?
+    pub is_key: bool,
 }
 
 /// Info gathered from iterating over the video stream
 pub struct StreamInfo {
     pub frame_count: usize,
     pub key_frames: Vec<usize>,
-    pub frame_times: BTreeMap<usize, FrameTime>,
+    // Vec of timing info for each frame (pts, dts, etc)
+    // The vec is ordered by pts.
+    pub frame_times: Vec<FrameTime>,
+    // lookup table: given the pts of frame we get its index
+    pub pts_to_frame: HashMap<i64, usize>,
+    // lookup table: given a frame index, we get its dts index
+    pub decode_order: BTreeMap<usize, usize>,
 }
 
 impl VideoDecoder {
@@ -375,31 +388,60 @@ pub fn get_frame_count(
 ) -> Result<StreamInfo, ffmpeg::Error> {
     let mut frame_count: usize = 0;
     let mut key_frames = Vec::new();
-    let mut frame_times = BTreeMap::new();
+    let mut frame_info = BTreeMap::new();
     for (stream, packet) in ictx.packets() {
         if &stream.index() == stream_index {
+            let pts = packet.pts().unwrap();
+            let dur = packet.duration();
+            let dts = packet.dts().unwrap();
+            let mut is_key = false;
             if packet.is_key() {
-                let pts = packet.pts().unwrap_or(0);
-                let dur = packet.duration();
-                let dts = packet.dts().unwrap_or(0);
-                let key = if dur != 0 {
-                    (pts / dur) as usize
-                } else {
-                    frame_count
-                };
-                key_frames.push(key);
-                frame_times.insert(key, FrameTime { pts, dur, dts });
+                is_key = true;
             }
+            frame_info.insert(
+                pts,
+                FrameTime {
+                    pts,
+                    dur,
+                    dts,
+                    didx: frame_count,
+                    is_key,
+                },
+            );
             frame_count += 1;
         }
     }
-    debug!("Key frames info: {:?}", frame_times);
+    // create frame_time vec and pts to frame map
+    let mut frame_times: Vec<FrameTime> = Vec::new();
+    let mut pts_to_frame: HashMap<i64, usize> = HashMap::new();
+    // mapping between pts index and dts index
+    let mut decode_order: BTreeMap<usize, usize> = BTreeMap::new();
+    for (idx, fr_info) in frame_info.iter().enumerate() {
+        frame_times.push(FrameTime {
+            pts: fr_info.1.pts,
+            dur: fr_info.1.dur,
+            dts: fr_info.1.dts,
+            didx: fr_info.1.didx,
+            is_key: fr_info.1.is_key,
+        });
+        pts_to_frame.insert(fr_info.1.pts, idx);
+        if fr_info.1.is_key {
+            key_frames.push(idx);
+        }
+        decode_order.insert(fr_info.1.didx, idx);
+    }
+
+    debug!("Frames pts/dts info: {:?}", frame_times);
+    debug!("FrameCount: {}", frame_count);
+    debug!("Decode order: {:?}", decode_order);
     // Seek back to the begining of the stream
     ictx.seek(0, ..10)?;
     Ok(StreamInfo {
         frame_count,
         key_frames,
         frame_times,
+        pts_to_frame,
+        decode_order,
     })
 }
 
@@ -578,6 +620,7 @@ impl VideoReader {
             self.decoder.width as usize,
             3,
         ));
+        debug!("Start time: {}", self.decoder.start_time);
         // frame rate
         let fps = self.decoder.fps;
         // duration of a frame in micro seconds
@@ -605,14 +648,20 @@ impl VideoReader {
         debug!("    - Key pos: {}", key_pos);
         let curr_key_pos = self.locate_keyframes(&self.curr_frame, &self.stream_info.key_frames);
         debug!("    - Curr key pos: {}", curr_key_pos);
-        if (key_pos == curr_key_pos) & (frame_index >= self.curr_frame) {
+        if (key_pos == curr_key_pos) & (frame_index > self.curr_frame) {
             // we can directly skip until frame_index
-            self.skip_frames(frame_index - self.curr_frame)?;
+            self.skip_frames(frame_index, frame_array, key_pos)?;
         } else {
-            self.seek_frame(&key_pos, frame_duration)?;
-            self.skip_frames(frame_index - self.curr_frame)?;
+            // seek back to 0
+            self.ictx.seek(0, ..100)?;
+            let got_frame = self.seek_frame(&frame_index, frame_array, &key_pos)?;
+            if got_frame {
+                // we directly seeked to the frame we wanted (and it's been decoded)
+                return Ok(());
+            }
+            self.skip_frames(frame_index, frame_array, key_pos)?;
         }
-        match self.read_frame(frame_array) {
+        match self.read_frame(frame_array, &frame_index) {
             Ok(()) => Ok(()),
             Err(e) => {
                 debug!("WENT TO EOF NEED TO RESTART");
@@ -636,8 +685,23 @@ impl VideoReader {
         key_pos.to_owned()
     }
 
-    pub fn skip_frames(&mut self, num: usize) -> Result<(), ffmpeg::Error> {
-        let mut num_skip = num.min(self.stream_info.frame_count);
+    pub fn skip_frames(
+        &mut self,
+        frame_index: usize,
+        frame_array: &mut ArrayViewMut3<u8>,
+        key_pos: usize,
+    ) -> Result<(), ffmpeg::Error> {
+        // find the corresponding decoding indices to know how many packets
+        // we need to skip
+        let frame_decode_idx = self.stream_info.frame_times[frame_index].didx;
+        let mut curr_frame_decode_idx = self.stream_info.frame_times[self.curr_frame].didx;
+        if curr_frame_decode_idx > frame_decode_idx {
+            // we went too far, we need to seek back to key frame
+            self.seek_frame(&frame_index, frame_array, &key_pos)?;
+            curr_frame_decode_idx = self.stream_info.frame_times[self.curr_frame].didx;
+        }
+        let num = frame_decode_idx.saturating_sub(curr_frame_decode_idx);
+        let mut num_skip = num.min(self.stream_info.frame_count - 1);
         debug!(
             "will skip {} frames, from current frame:{}",
             num_skip, self.curr_frame
@@ -645,7 +709,7 @@ impl VideoReader {
         // dont retry more than 2x the number of frames we are supposed to skip
         // just to make sure we get out of the loop
         let mut failsafe = num_skip * 2;
-        while (num_skip > 0) & (failsafe > 0) {
+        while failsafe > 0 {
             match self.ictx.packets().next() {
                 Some((stream, packet)) => {
                     debug!("New packet, curr_frame: {}", self.curr_frame);
@@ -654,10 +718,18 @@ impl VideoReader {
                         let mut decoded = Video::empty();
                         debug!("Video stream, curr_frame: {}", self.curr_frame);
                         while self.decoder.video.receive_frame(&mut decoded).is_ok() {
+                            self.curr_frame = self.stream_info.pts_to_frame[&packet.pts().unwrap()];
                             debug!("receive frame, curr_frame: {}", self.curr_frame);
-                            self.curr_frame += 1;
-                            num_skip -= 1;
+                            // check where we are at now and make sure we exit loop 1 frame before
+                            // the actual frame we want because `read_frame` will call
+                            // `packet.next()` immediatly after.
+                            let next_frame = self.get_next_frame_idx(self.curr_frame);
+                            if next_frame == frame_index {
+                                debug!("Next frame should be the one we want: {}", next_frame);
+                                return Ok(());
+                            }
                         }
+                        failsafe -= 1;
                     }
                 }
                 None => failsafe -= 1,
@@ -670,7 +742,11 @@ impl VideoReader {
         Ok(())
     }
 
-    pub fn read_frame(&mut self, frame_array: &mut ArrayViewMut3<u8>) -> Result<(), ffmpeg::Error> {
+    pub fn read_frame(
+        &mut self,
+        frame_array: &mut ArrayViewMut3<u8>,
+        frame_index: &usize,
+    ) -> Result<(), ffmpeg::Error> {
         let mut cnt = 0;
         let mut got_frame = false;
         loop {
@@ -680,16 +756,20 @@ impl VideoReader {
                     if stream.index() == self.stream_index {
                         self.decoder.video.send_packet(&packet)?;
                         let mut decoded = Video::empty();
+                        // get the frame index for this packet
+                        self.curr_frame = self.stream_info.pts_to_frame[&packet.pts().unwrap()];
+                        debug!("Decoding frame: {}", self.curr_frame);
                         while self.decoder.video.receive_frame(&mut decoded).is_ok() {
-                            debug!("Decoding frame : {}", self.curr_frame);
                             let mut rgb_frame = Video::empty();
                             self.decoder.scaler.run(&decoded, &mut rgb_frame)?;
                             convert_frame_to_ndarray_rgb24(&mut rgb_frame, frame_array)?;
-                            self.curr_frame += 1;
+                            self.curr_frame = self.get_next_frame_idx(self.curr_frame);
                             got_frame = true;
                         }
                         if got_frame {
                             return Ok(());
+                        } else {
+                            println!("No frame!");
                         }
                     }
                     cnt += 1;
@@ -710,50 +790,105 @@ impl VideoReader {
     // AVSEEK_FLAG_BYTE 2 <- seeking based on position in bytes
     // AVSEEK_FLAG_ANY 4 <- seek to any frame, even non-key frames
     // AVSEEK_FLAG_FRAME 8 <- seeking baseed on frame number
-    pub fn seek_frame(&mut self, pos: &usize, frame_duration: &usize) -> Result<(), ffmpeg::Error> {
-        let frame_ts = match self.stream_info.frame_times.get(pos) {
-            Some(fr_ts) => fr_ts.pts,
-            None => (pos * frame_duration) as i64,
-        };
+    pub fn seek_frame(
+        &mut self,
+        frame_index: &usize,
+        frame_array: &mut ArrayViewMut3<u8>,
+        pos: &usize,
+    ) -> Result<bool, ffmpeg::Error> {
+        let frame_ts = self.stream_info.frame_times[*pos].pts;
 
         let mut flag = 0;
         if pos < &self.curr_frame {
             flag = AVSEEK_FLAG_BACKWARD;
         }
-        match self.avseekframe(pos, frame_ts, flag) {
-            Ok(()) => Ok(()),
+        match self.avseekframe(frame_index, frame_array, frame_ts, flag) {
+            Ok(decoded) => Ok(decoded),
             Err(_) => {
                 if flag != 0 {
-                    match self.avseekframe(pos, frame_ts, AVSEEK_FLAG_BACKWARD) {
-                        Ok(()) => Ok(()),
-                        Err(_) => self.avseekframe(pos, *pos as i64, AVSEEK_FLAG_FRAME),
+                    match self.avseekframe(frame_index, frame_array, frame_ts, AVSEEK_FLAG_BACKWARD)
+                    {
+                        Ok(decoded) => Ok(decoded),
+                        Err(_) => self.avseekframe(
+                            frame_index,
+                            frame_array,
+                            *pos as i64,
+                            AVSEEK_FLAG_FRAME,
+                        ),
                     }
                 } else {
-                    self.avseekframe(pos, *pos as i64, AVSEEK_FLAG_FRAME)
+                    self.avseekframe(frame_index, frame_array, *pos as i64, AVSEEK_FLAG_FRAME)
                 }
             }
         }
     }
     pub fn avseekframe(
         &mut self,
-        pos: &usize,
+        frame_index: &usize,
+        frame_array: &mut ArrayViewMut3<u8>,
         frame_ts: i64,
         flag: i32,
-    ) -> Result<(), ffmpeg::Error> {
-        unsafe {
-            match av_seek_frame(
+    ) -> Result<bool, ffmpeg::Error> {
+        let res = unsafe {
+            av_seek_frame(
                 self.ictx.as_mut_ptr(),
                 self.stream_index as i32,
                 frame_ts,
                 flag,
-            ) {
-                s if s >= 0 => {
-                    self.curr_frame = *pos;
-                    debug!("Current frame after flag {}: {}:", flag, self.curr_frame);
-                    Ok(())
+            )
+        };
+        if res >= 0 {
+            // find out exactly where we seeked.
+            match self.ictx.packets().next() {
+                Some((stream, packet)) => {
+                    println!("Got next packet");
+                    if stream.index() == self.stream_index {
+                        println!("Got video stream");
+                        self.decoder.video.send_packet(&packet)?;
+                        let mut decoded = Video::empty();
+                        while self.decoder.video.receive_frame(&mut decoded).is_ok() {
+                            self.curr_frame = self.stream_info.pts_to_frame[&packet.pts().unwrap()];
+                            debug!("Current frame immediatly after seek: {}", self.curr_frame);
+                            if &self.curr_frame == frame_index {
+                                // we need to grab that frame
+                                let mut rgb_frame = Video::empty();
+                                self.decoder.scaler.run(&decoded, &mut rgb_frame)?;
+                                debug!(
+                                    "decoding frame {} which was directly seeked to",
+                                    self.curr_frame
+                                );
+                                convert_frame_to_ndarray_rgb24(&mut rgb_frame, frame_array)?;
+                                self.curr_frame = self.get_next_frame_idx(self.curr_frame);
+                                debug!(
+                                    "Current frame immediatly after decoding: {}",
+                                    self.curr_frame
+                                );
+                                return Ok(true);
+                            }
+                            self.curr_frame = self.get_next_frame_idx(self.curr_frame);
+                            debug!(
+                                "Current frame immediatly after incrementing: {}",
+                                self.curr_frame
+                            );
+                        }
+                    }
                 }
-                e => Err(ffmpeg::Error::from(e)),
+                None => {
+                    debug!("No packet!");
+                }
             }
+            debug!("Current frame after flag {}: {}:", flag, self.curr_frame);
+            Ok(false)
+        } else {
+            Err(ffmpeg::Error::from(res))
         }
+    }
+
+    /// Find the presentation index of the next frame that will be returned
+    /// when doing `packets().next()`, since decoding index can be different
+    /// from presentation index.
+    pub fn get_next_frame_idx(&mut self, curr_frame: usize) -> usize {
+        let dec_idx = self.stream_info.frame_times[curr_frame].didx + 1;
+        self.stream_info.decode_order[&dec_idx.min(self.stream_info.frame_count - 1)]
     }
 }
