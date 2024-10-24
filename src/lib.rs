@@ -47,8 +47,8 @@ fn video_reader<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()>
             resize_shorter_side,
             threads,
             true,
-            start_frame,
-            end_frame,
+            start_frame.as_ref(),
+            end_frame.as_ref(),
         )?;
         vr.decode_video()
     }
@@ -59,8 +59,8 @@ fn video_reader<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()>
         resize_shorter_side: Option<f64>,
         compression_factor: Option<f64>,
         threads: usize,
-        start_frame: Option<usize>,
-        end_frame: Option<usize>,
+        start_frame: Option<&usize>,
+        end_frame: Option<&usize>,
     ) -> Result<Array3<u8>, ffmpeg::Error> {
         let vr = VideoReader::new(
             filename.to_owned(),
@@ -94,6 +94,14 @@ fn video_reader<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()>
             None,
             None,
         )?;
+        let start_time: i32 = vr
+            .decoder
+            .video_info
+            .get("start_time")
+            .unwrap()
+            .as_str()
+            .parse::<i32>()
+            .unwrap_or(0);
         let num_zero_pts = vr
             .stream_info
             .frame_times
@@ -101,19 +109,32 @@ fn video_reader<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()>
             .filter(|(_, v)| v.pts <= 0)
             .collect::<Vec<_>>()
             .len();
-        let first_key = vr.stream_info.frame_times.get(&0).unwrap();
-        // if fallback is enabled, try to detect weird cases and if so switch to decoding without seeking
-        if with_fallback && ((num_zero_pts > 1) || (first_key.dur <= 0) || (first_key.dts < 0)) {
-            debug!("Warning: video has weird timestamps, decoding without seeking");
+        let first_key_idx = vr.stream_info.key_frames[0];
+        let (_, first_key) = vr
+            .stream_info
+            .frame_times
+            .iter()
+            .nth(first_key_idx)
+            .unwrap();
+        // Try to detect weird cases and if so switch to decoding without seeking
+        // NOTE: start_time > 0 means we have B-frames. Currently get_batch does not handle these
+        // well, so we use get_batch_safe.
+        // if `with_fallback` is set to true, always use `get_batch_safe`
+        if with_fallback
+            || ((num_zero_pts > 1) || (first_key.dur <= 0) || (first_key.dts < 0) || start_time > 0)
+        {
+            debug!("Decoding using `get_batch_safe`");
             // switch to video reader that will iterate on all frames, we can use threading here
+            let min_idx = indices.iter().min();
+            let max_idx = indices.iter().max();
             vr = VideoReader::new(
                 filename.to_owned(),
                 Some(1.0),
                 resize_shorter_side,
                 threads.unwrap_or(0),
                 true,
-                None,
-                None,
+                min_idx,
+                max_idx,
             )?;
             video = vr.get_batch_safe(indices)?;
         } else {
@@ -187,8 +208,8 @@ fn video_reader<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()>
             resize_shorter_side,
             compression_factor,
             threads,
-            start_frame,
-            end_frame,
+            start_frame.as_ref(),
+            end_frame.as_ref(),
         );
         match res_decode {
             Ok(vid) => Ok(vid.into_pyarray_bound(py)),
