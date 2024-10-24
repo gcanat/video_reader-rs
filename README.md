@@ -77,7 +77,7 @@ frames = vr.get_batch(filename, indices, threads=0, resize_shorter_side=None, wi
 * **indices**: list of indices of the frames to get
 * **threads**: number of CPU cores to use for ffmpeg decoding, currently has no effect as `get_batch` does not support multithreading. (NOTE: it is still as fast as decord from our benchmarking)
 * **resize_shorter_side**: optional resizing for the video.
-* **with_fallback**: False by default, if True will fallback to decoding without seeking (ie slower) if suspicious metadata is detected in the video, eg multiple key frames have pts <= 0, first key frames duration <= 0, etc. This might be usefull if your application requires you to be 100% sure you get the exact frames you asked for.
+* **with_fallback**: False by default, if True will fallback to iterating over all packets of the video and only decoding the frames that match in `indices`. It is safer to use when the video contains B-frames and you really need to get the frames exactly corresponding to the given indices. It can also be faster in some use cases if you have many cpu cores available.
 
 We can also get the shape of the raw video
 ```python
@@ -94,6 +94,7 @@ We can encode the video with h264 codec
 ```python
 vr.save_video(frames, "video.mp4", fps=15, codec="h264")
 ```
+NOTE: currently only work if the frames shape is a multiple of 32.
 
 ## :rocket: Performance comparison
 Decoding a video with shape (2004, 1472, 1472, 3). Tested on a laptop (12 cores Intel i7-9750H CPU @ 2.60GHz), 15Gb of RAM with Ubuntu 22.04.
