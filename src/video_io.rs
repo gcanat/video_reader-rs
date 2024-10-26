@@ -137,6 +137,7 @@ impl VideoReader {
     ///    the `get_batch` method.
     ///
     /// Returns: a VideoReader instance.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         filename: String,
         compression_factor: Option<f64>,
@@ -207,11 +208,20 @@ impl VideoReader {
         // setup the decoder context
         let mut context_decoder =
             ffmpeg::codec::context::Context::from_parameters(input.parameters())?;
+
+        // check that we have enough frames to decode to use multi threading
+        let start_frame = start_frame.unwrap_or(&0);
+        let end_frame = end_frame.unwrap_or(&frame_count).min(&frame_count);
+        let mut real_threads = threads;
+        if (end_frame - start_frame) < threads {
+            real_threads = (end_frame - start_frame).max(1);
+        }
+
         // setup multi-threading. `count` = 0 means let ffmpeg decide the optimal number
         // of cores to use. `kind` Frame or Slice (Frame is recommended).
         context_decoder.set_threading(threading::Config {
             kind: threading::Type::Frame,
-            count: threads,
+            count: real_threads,
             // FIXME: beware this does not exist in ffmpeg 6.0 ?
             #[cfg(not(feature = "ffmpeg_6_0"))]
             safe: true,
@@ -268,14 +278,14 @@ impl VideoReader {
         let (reducer, first_frame, last_frame) = if with_reducer {
             // which frames we want to gather ?
             // we may want to start or end from a specific frame
-            let start_frame = *start_frame.unwrap_or(&0);
-            let end_frame = *end_frame.unwrap_or(&frame_count).min(&frame_count);
+            // let start_frame = *start_frame.unwrap_or(&0);
+            // let end_frame = *end_frame.unwrap_or(&frame_count).min(&frame_count);
             let n_frames_compressed = ((end_frame - start_frame) as f64
                 * compression_factor.unwrap_or(1.))
             .round() as usize;
             let indices = Array::linspace(
-                start_frame as f64,
-                end_frame as f64 - 1.,
+                *start_frame as f64,
+                *end_frame as f64 - 1.,
                 n_frames_compressed,
             )
             .iter_mut()
@@ -310,8 +320,8 @@ impl VideoReader {
                 // time_base,
             },
             reducer,
-            first_frame,
-            last_frame,
+            first_frame.copied(),
+            last_frame.copied(),
         ))
     }
 
@@ -661,7 +671,7 @@ pub fn convert_yuv_to_ndarray_rgb24(mut frame: Video) -> Array3<u8> {
         if bytes_copied == buf_vec.len() as i32 {
             let mut rgb = vec![0_u8; (frame_width * frame_height * 3) as usize];
             let cut_point1 = (frame_width * frame_height) as usize;
-            let cut_point2 = (cut_point1 + cut_point1 / 4) as usize;
+            let cut_point2 = cut_point1 + cut_point1 / 4;
             yuv420_to_rgb(
                 &buf_vec[..cut_point1],
                 frame_width as u32,
@@ -676,10 +686,8 @@ pub fn convert_yuv_to_ndarray_rgb24(mut frame: Video) -> Array3<u8> {
                 YuvRange::Full,
                 colorspace,
             );
-            let frame =
-                Array3::from_shape_vec((frame_height as usize, frame_width as usize, 3_usize), rgb)
-                    .unwrap();
-            frame
+            Array3::from_shape_vec((frame_height as usize, frame_width as usize, 3_usize), rgb)
+                .unwrap()
         } else {
             Array3::zeros((frame_height as usize, frame_width as usize, 3_usize))
         }

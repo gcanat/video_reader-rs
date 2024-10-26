@@ -231,6 +231,7 @@ fn video_reader<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()>
     #[pyfn(m)]
     #[pyo3(name = "decode_fast")]
     #[pyo3(signature = (filename, resize_shorter_side=None, compression_factor=None, threads=None, start_frame=None, end_frame=None))]
+    #[allow(clippy::type_complexity)]
     fn decode_fast_py<'py>(
         py: Python<'py>,
         filename: &str,
