@@ -371,6 +371,21 @@ impl VideoReader {
         }
     }
     pub async fn decode_video_fast(mut self) -> Result<Vec<FrameArray>, ffmpeg::Error> {
+        let first_index = self.first_frame.unwrap_or(0);
+        if self
+            .stream_info
+            .key_frames
+            .iter()
+            .any(|k| &first_index >= k)
+            && (first_index > 0)
+        {
+            let key_pos = self.locate_keyframes(&first_index, &self.stream_info.key_frames);
+            let fps = self.decoder.fps;
+            // duration of a frame in micro seconds
+            let frame_duration = (1. / fps * 1_000.0).round() as usize;
+            // seek to closest key frame before first_index
+            self.seek_frame(&key_pos, &frame_duration)?;
+        }
         match self.reducer {
             Some(mut reducer) => {
                 reducer.frame_index = self.curr_frame;
@@ -414,7 +429,7 @@ impl VideoReader {
                 self.decoder.video.send_eof()?;
                 // only process the remaining frames if we haven't reached the last frame
                 if !reducer.indices.is_empty()
-                    && (&reducer.frame_index <= reducer.indices.iter().max().unwrap_or(&0))
+                    && (&self.curr_frame <= reducer.indices.iter().max().unwrap_or(&0))
                 {
                     let cnt = receive_and_process_decoded_frames(
                         &mut self.decoder.video,
