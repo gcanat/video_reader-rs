@@ -250,8 +250,10 @@ fn video_reader<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()>
             end_frame,
         );
         match res_decode {
-            // Ok(vid) => Ok(vid.into_pyarray_bound(py)),
-            Ok(vid) => Ok(vid.into_iter().map(|x| x.into_pyarray_bound(py)).collect::<Vec<_>>()),
+            Ok(vid) => Ok(vid
+                .into_iter()
+                .map(|x| x.into_pyarray_bound(py))
+                .collect::<Vec<_>>()),
             Err(e) => Err(PyRuntimeError::new_err(format!("Error: {}", e))),
         }
     }
