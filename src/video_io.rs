@@ -648,6 +648,16 @@ pub fn convert_yuv_to_ndarray_rgb24(mut frame: Video) -> Array3<u8> {
             1,
         );
 
+        // By default assume HD color space
+        let mut colorspace = YuvStandardMatrix::Bt709;
+        if frame_height < 720 {
+            // SD color space
+            colorspace = YuvStandardMatrix::Bt601;
+        } else if frame_height > 1080 {
+            // UHD color space
+            colorspace = YuvStandardMatrix::Bt2020;
+        }
+
         if bytes_copied == buf_vec.len() as i32 {
             let mut rgb = vec![0_u8; (frame_width * frame_height * 3) as usize];
             let cut_point1 = (frame_width * frame_height) as usize;
@@ -664,7 +674,7 @@ pub fn convert_yuv_to_ndarray_rgb24(mut frame: Video) -> Array3<u8> {
                 frame_width as u32,
                 frame_height as u32,
                 YuvRange::Full,
-                YuvStandardMatrix::Bt2020,
+                colorspace,
             );
             let frame =
                 Array3::from_shape_vec((frame_height as usize, frame_width as usize, 3_usize), rgb)
