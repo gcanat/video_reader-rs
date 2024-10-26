@@ -96,6 +96,30 @@ vr.save_video(frames, "video.mp4", fps=15, codec="h264")
 ```
 NOTE: currently only work if the frames shape is a multiple of 32.
 
+### :warning: Dealing with High Res videos
+ If you are dealing with High Resolution videos such as HD, UHD etc. We recommend using `vr.decode_fast()` which has the same arguments as `vr.decode()` but will return a list of frames. It uses async conversion from yuv420p to RGB to speed things up.
+
+If you have some memory limitations that wont let you decode the entire video at once, you can decode by chunk like so:
+```python
+import  video_reader as vr
+
+videoname = "/path/to/your/video.mp4"
+chunk_size = 800 # adjust to fit within your memory limit
+video_length = int(vr.get_shape(videoname)[0])
+
+for i in range(0, video_length, chunk_size):
+    end = min(i + chunk_size, video_length)
+    frames = vr.decode_fast(
+        videoname,
+        start_frame=i,
+        end_frame=end,
+        threads=8 # adjust to whatever works best for your use case
+        # you can also set threads=0 to let ffmpeg auto detect
+    )
+    # do something with this chunk of 800 `frames`
+```
+
+
 ## :rocket: Performance comparison
 Decoding a video with shape (2004, 1472, 1472, 3). Tested on a laptop (12 cores Intel i7-9750H CPU @ 2.60GHz), 15Gb of RAM with Ubuntu 22.04.
 
@@ -104,12 +128,13 @@ Options:
 - r: resize shorter side
 - g: grayscale
 
-| Options | OpenCV | decord* | video_reader |
-|:---:|:---:|:---:|:---:|
-| f 0.5 | 33.96s | **14.6s** | 26.76s | 
-|f 0.25 | 7.16s | 14.03s | **6.73s** |
-|f 0.25, r 512| 6.49s | 13.33s | **3.92s** |
-| f 0.25, g | 20.24s | 25.67s | **14.11s** |
+| Options | OpenCV | decord* | vr.decode | vr.decode_fast |
+|:---:|:---:|:---:|:---:|:---:|
+| f 1.0 | 65s | 18s | 9.3s | **6.2s** | 
+| f 0.5 | 33.96s | 14.6s | 5.5s | **4.2s** | 
+|f 0.25 | 7.16s | 14.03s | 4.2s | **3.8s** |
+|f 0.25, r 512| 6.5s | 13.3s | 3.92s | **3.5s** |
+| f 0.25, g | 20.2s | 25.7s | **11.3s** | N/A |
 
 \* decord was tested on a machine with more RAM and CPU cores because it was crashing on the laptop with only 15Gb. See below.
 

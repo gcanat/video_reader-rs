@@ -13,6 +13,8 @@ use video_rs::location::Location;
 use video_rs::time::Time;
 
 use ndarray::{s, Array, Array3, Array4, ArrayViewMut3, Axis};
+use tokio::task;
+use yuvutils_rs::{yuv420_to_rgb, YuvRange, YuvStandardMatrix};
 
 pub type FrameArray = Array3<u8>;
 pub type VideoArray = Array4<u8>;
@@ -135,6 +137,7 @@ impl VideoReader {
     ///    the `get_batch` method.
     ///
     /// Returns: a VideoReader instance.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         filename: String,
         compression_factor: Option<f64>,
@@ -143,6 +146,7 @@ impl VideoReader {
         with_reducer: bool,
         start_frame: Option<&usize>,
         end_frame: Option<&usize>,
+        pix_fmt: Option<AvPixel>,
     ) -> Result<VideoReader, ffmpeg::Error> {
         let (mut ictx, stream_index) = get_init_context(&filename)?;
         let stream_info = get_frame_count(&mut ictx, &stream_index)?;
@@ -155,6 +159,7 @@ impl VideoReader {
             with_reducer,
             start_frame,
             end_frame,
+            pix_fmt,
         )?;
         debug!("frame_count: {}", stream_info.frame_count);
         debug!("key frames: {:?}", stream_info.key_frames);
@@ -182,6 +187,7 @@ impl VideoReader {
         with_reducer: bool,
         start_frame: Option<&usize>,
         end_frame: Option<&usize>,
+        pix_fmt: Option<AvPixel>,
     ) -> Result<
         (
             VideoDecoder,
@@ -202,11 +208,20 @@ impl VideoReader {
         // setup the decoder context
         let mut context_decoder =
             ffmpeg::codec::context::Context::from_parameters(input.parameters())?;
+
+        // check that we have enough frames to decode to use multi threading
+        let start_frame = start_frame.unwrap_or(&0);
+        let end_frame = end_frame.unwrap_or(&frame_count).min(&frame_count);
+        let mut real_threads = threads;
+        if (end_frame - start_frame) < threads {
+            real_threads = (end_frame - start_frame).max(1);
+        }
+
         // setup multi-threading. `count` = 0 means let ffmpeg decide the optimal number
         // of cores to use. `kind` Frame or Slice (Frame is recommended).
         context_decoder.set_threading(threading::Config {
             kind: threading::Type::Frame,
-            count: threads,
+            count: real_threads,
             // FIXME: beware this does not exist in ffmpeg 6.0 ?
             #[cfg(not(feature = "ffmpeg_6_0"))]
             safe: true,
@@ -253,7 +268,7 @@ impl VideoReader {
             video.format(),
             orig_w,
             orig_h,
-            AvPixel::RGB24,
+            pix_fmt.unwrap_or(AvPixel::RGB24),
             w,
             h,
             Flags::BILINEAR,
@@ -263,14 +278,14 @@ impl VideoReader {
         let (reducer, first_frame, last_frame) = if with_reducer {
             // which frames we want to gather ?
             // we may want to start or end from a specific frame
-            let start_frame = *start_frame.unwrap_or(&0);
-            let end_frame = *end_frame.unwrap_or(&frame_count).min(&frame_count);
+            // let start_frame = *start_frame.unwrap_or(&0);
+            // let end_frame = *end_frame.unwrap_or(&frame_count).min(&frame_count);
             let n_frames_compressed = ((end_frame - start_frame) as f64
                 * compression_factor.unwrap_or(1.))
             .round() as usize;
             let indices = Array::linspace(
-                start_frame as f64,
-                end_frame as f64 - 1.,
+                *start_frame as f64,
+                *end_frame as f64 - 1.,
                 n_frames_compressed,
             )
             .iter_mut()
@@ -305,8 +320,8 @@ impl VideoReader {
                 // time_base,
             },
             reducer,
-            first_frame,
-            last_frame,
+            first_frame.copied(),
+            last_frame.copied(),
         ))
     }
 
@@ -361,6 +376,83 @@ impl VideoReader {
                         .receive_and_process_decoded_frames(&mut reducer)?;
                 }
                 Ok(reducer.full_video)
+            }
+            None => panic!("No Reducer to get the frames"),
+        }
+    }
+    pub async fn decode_video_fast(mut self) -> Result<Vec<FrameArray>, ffmpeg::Error> {
+        let first_index = self.first_frame.unwrap_or(0);
+        if self
+            .stream_info
+            .key_frames
+            .iter()
+            .any(|k| &first_index >= k)
+            && (first_index > 0)
+        {
+            let key_pos = self.locate_keyframes(&first_index, &self.stream_info.key_frames);
+            let fps = self.decoder.fps;
+            // duration of a frame in micro seconds
+            let frame_duration = (1. / fps * 1_000.0).round() as usize;
+            // seek to closest key frame before first_index
+            self.seek_frame(&key_pos, &frame_duration)?;
+        }
+        match self.reducer {
+            Some(mut reducer) => {
+                reducer.frame_index = self.curr_frame;
+                let mut tasks = vec![];
+
+                let mut receive_and_process_decoded_frames =
+                    |decoder: &mut ffmpeg::decoder::Video,
+                     curr_frame: usize|
+                     -> Result<usize, ffmpeg::Error> {
+                        let mut counter = 0;
+                        let mut decoded = Video::empty();
+                        while decoder.receive_frame(&mut decoded).is_ok() {
+                            let match_index = reducer.indices.iter().position(|x| x == &curr_frame);
+                            if match_index.is_some() {
+                                let mut rgb_frame = Video::empty();
+                                self.decoder.scaler.run(&decoded, &mut rgb_frame).unwrap();
+                                tasks.push(task::spawn(async move {
+                                    convert_yuv_to_ndarray_rgb24(rgb_frame)
+                                }));
+                            }
+                            counter += 1;
+                        }
+                        Ok(counter)
+                    };
+
+                for (stream, packet) in self.ictx.packets() {
+                    if &self.curr_frame > reducer.indices.iter().max().unwrap_or(&0) {
+                        break;
+                    }
+                    if stream.index() == self.stream_index {
+                        self.decoder.video.send_packet(&packet)?;
+                        let cnt = receive_and_process_decoded_frames(
+                            &mut self.decoder.video,
+                            self.curr_frame,
+                        )?;
+                        self.curr_frame += cnt;
+                    } else {
+                        debug!("Packet for another stream");
+                    }
+                }
+                self.decoder.video.send_eof()?;
+                // only process the remaining frames if we haven't reached the last frame
+                if !reducer.indices.is_empty()
+                    && (&self.curr_frame <= reducer.indices.iter().max().unwrap_or(&0))
+                {
+                    let cnt = receive_and_process_decoded_frames(
+                        &mut self.decoder.video,
+                        self.curr_frame,
+                    )?;
+                    self.curr_frame += cnt;
+                }
+
+                let mut outputs = Vec::with_capacity(tasks.len());
+                for task_ in tasks {
+                    outputs.push(task_.await.unwrap());
+                }
+                Ok(outputs)
             }
             None => panic!("No Reducer to get the frames"),
         }
@@ -509,7 +601,7 @@ pub fn save_video(
 /// Converts an RGB24 video `AVFrame` produced by ffmpeg to an `ndarray`.
 /// Copied from https://github.com/oddity-ai/video-rs
 /// * `frame` - Video frame to convert.
-/// * returns a three-dimensional `ndarray` with dimensions `(H, W, C)` and type byte.
+/// * `frame_array` mutable reference to the ndarray where the data will be copied
 pub fn convert_frame_to_ndarray_rgb24(
     frame: &mut Video,
     frame_array: &mut ArrayViewMut3<u8>,
@@ -537,6 +629,67 @@ pub fn convert_frame_to_ndarray_rgb24(
             Ok(())
         } else {
             Err(ffmpeg::Error::InvalidData)
+        }
+    }
+}
+
+/// Converts a YUV420P video `AVFrame` produced by ffmpeg to an `ndarray`.
+/// * `frame` - Video frame to convert.
+/// * returns a three-dimensional `ndarray` with dimensions `(H, W, C)` and type byte.
+pub fn convert_yuv_to_ndarray_rgb24(mut frame: Video) -> Array3<u8> {
+    unsafe {
+        let frame_ptr = frame.as_mut_ptr();
+        let frame_width: i32 = (*frame_ptr).width;
+        let frame_height: i32 = (*frame_ptr).height;
+        let frame_format =
+            std::mem::transmute::<std::ffi::c_int, AVPixelFormat>((*frame_ptr).format);
+        assert_eq!(frame_format, AVPixelFormat::AV_PIX_FMT_YUV420P);
+
+        let mut buf_vec = vec![0_u8; (frame_width * (frame_height + frame_height / 2)) as usize];
+
+        let bytes_copied = av_image_copy_to_buffer(
+            buf_vec.as_mut_ptr(),
+            buf_vec.len() as i32,
+            (*frame_ptr).data.as_ptr() as *const *const u8,
+            (*frame_ptr).linesize.as_ptr(),
+            frame_format,
+            frame_width,
+            frame_height,
+            1,
+        );
+
+        // By default assume HD color space
+        let mut colorspace = YuvStandardMatrix::Bt709;
+        if frame_height < 720 {
+            // SD color space
+            colorspace = YuvStandardMatrix::Bt601;
+        } else if frame_height > 1080 {
+            // UHD color space
+            colorspace = YuvStandardMatrix::Bt2020;
+        }
+
+        if bytes_copied == buf_vec.len() as i32 {
+            let mut rgb = vec![0_u8; (frame_width * frame_height * 3) as usize];
+            let cut_point1 = (frame_width * frame_height) as usize;
+            let cut_point2 = cut_point1 + cut_point1 / 4;
+            yuv420_to_rgb(
+                &buf_vec[..cut_point1],
+                frame_width as u32,
+                &buf_vec[cut_point1..cut_point2],
+                (frame_width / 2) as u32,
+                &buf_vec[cut_point2..],
+                (frame_width / 2) as u32,
+                &mut rgb,
+                (frame_width * 3) as u32,
+                frame_width as u32,
+                frame_height as u32,
+                YuvRange::Full,
+                colorspace,
+            );
+            Array3::from_shape_vec((frame_height as usize, frame_width as usize, 3_usize), rgb)
+                .unwrap()
+        } else {
+            Array3::zeros((frame_height as usize, frame_width as usize, 3_usize))
         }
     }
 }

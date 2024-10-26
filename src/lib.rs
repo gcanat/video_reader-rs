@@ -1,6 +1,7 @@
 use numpy::ndarray::{Array3, Array4, Dim};
 use numpy::{IntoPyArray, PyArray, PyReadonlyArray4};
 mod video_io;
+use ffmpeg::format::Pixel as AvPixel;
 use ffmpeg_next as ffmpeg;
 use log::debug;
 use pyo3::{
@@ -12,12 +13,22 @@ use pyo3::{
 use std::collections::HashMap;
 use video_io::{rgb2gray, save_video, VideoReader};
 
+use once_cell::sync::Lazy;
+use tokio::runtime::{self, Runtime};
+
+static RUNTIME: Lazy<Runtime> = Lazy::new(|| {
+    runtime::Builder::new_multi_thread()
+        .enable_io()
+        .build()
+        .unwrap()
+});
+
 #[pymodule]
 fn video_reader<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()> {
     env_logger::init();
     /// Get shape of the video: number of frames, height and width
     fn get_shape(filename: &String) -> Result<(usize, usize, usize), ffmpeg::Error> {
-        let vr = VideoReader::new(filename.to_owned(), None, None, 0, false, None, None)?;
+        let vr = VideoReader::new(filename.to_owned(), None, None, 0, false, None, None, None)?;
         let width = vr.decoder.video.width() as usize;
         let height = vr.decoder.video.height() as usize;
         let num_frames = vr.stream_info.frame_count;
@@ -26,7 +37,7 @@ fn video_reader<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()>
 
     /// Get video information: width, height, number of frames and fps
     fn get_info(filename: &String) -> Result<HashMap<&str, String>, ffmpeg::Error> {
-        let vr = VideoReader::new(filename.to_owned(), None, None, 0, false, None, None)?;
+        let vr = VideoReader::new(filename.to_owned(), None, None, 0, false, None, None, None)?;
         let mut info_dict = vr.decoder.video_info;
         info_dict.insert("frame_count", vr.stream_info.frame_count.to_string());
         Ok(info_dict)
@@ -49,8 +60,32 @@ fn video_reader<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()>
             true,
             start_frame.as_ref(),
             end_frame.as_ref(),
+            None,
         )?;
         vr.decode_video()
+    }
+
+    /// Decode video as yuv420p and ansynchronously convert to RGB frames.
+    /// Returns a Vec<FrameArray>
+    fn decode_video_fast(
+        filename: &String,
+        resize_shorter_side: Option<f64>,
+        compression_factor: Option<f64>,
+        threads: usize,
+        start_frame: Option<usize>,
+        end_frame: Option<usize>,
+    ) -> Result<Vec<Array3<u8>>, ffmpeg::Error> {
+        let vr = VideoReader::new(
+            filename.to_owned(),
+            compression_factor,
+            resize_shorter_side,
+            threads,
+            true,
+            start_frame.as_ref(),
+            end_frame.as_ref(),
+            Some(AvPixel::YUV420P),
+        )?;
+        Ok(RUNTIME.block_on(async { vr.decode_video_fast().await.unwrap() }))
     }
 
     /// Decode video and return ndarray representing grayscale frames
@@ -70,6 +105,7 @@ fn video_reader<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()>
             true,
             start_frame,
             end_frame,
+            None,
         )?;
         let vid = vr.decode_video()?;
         let gray_vid = rgb2gray(vid);
@@ -91,6 +127,7 @@ fn video_reader<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()>
             resize_shorter_side,
             1,
             false,
+            None,
             None,
             None,
         )?;
@@ -135,6 +172,7 @@ fn video_reader<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()>
                 true,
                 min_idx,
                 max_idx,
+                None,
             )?;
             video = vr.get_batch_safe(indices)?;
         } else {
@@ -176,6 +214,47 @@ fn video_reader<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()>
         );
         match res_decode {
             Ok(vid) => Ok(vid.into_pyarray_bound(py)),
+            Err(e) => Err(PyRuntimeError::new_err(format!("Error: {}", e))),
+        }
+    }
+
+    // wrapper of `decode_video_fast`
+    /// Decode video and return a Vec of RGB frames with the shape (H, W, C)
+    /// * `filename` - Path to the video file
+    /// * `resize_shorter_side` - Resize the shorter side of the video to this value.
+    /// * `compression_factor` - Factor for temporal compression. If None, then no compression.
+    /// * `threads` - Number of threads to use for decoding. If None, let ffmpeg decide the optimal
+    /// * `start_frame` - Start decoding from this frame index
+    /// * `end_frame` - Stop decoding at this frame index
+    /// number.
+    /// * Returns a Vec of 3D ndarray with shape (H, W, C)
+    #[pyfn(m)]
+    #[pyo3(name = "decode_fast")]
+    #[pyo3(signature = (filename, resize_shorter_side=None, compression_factor=None, threads=None, start_frame=None, end_frame=None))]
+    #[allow(clippy::type_complexity)]
+    fn decode_fast_py<'py>(
+        py: Python<'py>,
+        filename: &str,
+        resize_shorter_side: Option<f64>,
+        compression_factor: Option<f64>,
+        threads: Option<usize>,
+        start_frame: Option<usize>,
+        end_frame: Option<usize>,
+    ) -> PyResult<Vec<Bound<'py, PyArray<u8, Dim<[usize; 3]>>>>> {
+        let threads = threads.unwrap_or(0);
+        let res_decode = decode_video_fast(
+            &filename.to_string(),
+            resize_shorter_side,
+            compression_factor,
+            threads,
+            start_frame,
+            end_frame,
+        );
+        match res_decode {
+            Ok(vid) => Ok(vid
+                .into_iter()
+                .map(|x| x.into_pyarray_bound(py))
+                .collect::<Vec<_>>()),
             Err(e) => Err(PyRuntimeError::new_err(format!("Error: {}", e))),
         }
     }
