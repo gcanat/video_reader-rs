@@ -209,19 +209,11 @@ impl VideoReader {
         let mut context_decoder =
             ffmpeg::codec::context::Context::from_parameters(input.parameters())?;
 
-        // check that we have enough frames to decode to use multi threading
-        let start_frame = start_frame.unwrap_or(&0);
-        let end_frame = end_frame.unwrap_or(&frame_count).min(&frame_count);
-        let mut real_threads = threads;
-        if (end_frame - start_frame) < threads {
-            real_threads = (end_frame - start_frame).max(1);
-        }
-
         // setup multi-threading. `count` = 0 means let ffmpeg decide the optimal number
         // of cores to use. `kind` Frame or Slice (Frame is recommended).
         context_decoder.set_threading(threading::Config {
             kind: threading::Type::Frame,
-            count: real_threads,
+            count: threads,
             // FIXME: beware this does not exist in ffmpeg 6.0 ?
             #[cfg(not(feature = "ffmpeg_6_0"))]
             safe: true,
@@ -278,14 +270,14 @@ impl VideoReader {
         let (reducer, first_frame, last_frame) = if with_reducer {
             // which frames we want to gather ?
             // we may want to start or end from a specific frame
-            // let start_frame = *start_frame.unwrap_or(&0);
-            // let end_frame = *end_frame.unwrap_or(&frame_count).min(&frame_count);
+            let start_frame = *start_frame.unwrap_or(&0);
+            let end_frame = *end_frame.unwrap_or(&frame_count).min(&frame_count);
             let n_frames_compressed = ((end_frame - start_frame) as f64
                 * compression_factor.unwrap_or(1.))
             .round() as usize;
             let indices = Array::linspace(
-                *start_frame as f64,
-                *end_frame as f64 - 1.,
+                start_frame as f64,
+                end_frame as f64 - 1.,
                 n_frames_compressed,
             )
             .iter_mut()
@@ -320,8 +312,8 @@ impl VideoReader {
                 // time_base,
             },
             reducer,
-            first_frame.copied(),
-            last_frame.copied(),
+            first_frame,
+            last_frame,
         ))
     }
 
@@ -403,22 +395,20 @@ impl VideoReader {
 
                 let mut receive_and_process_decoded_frames =
                     |decoder: &mut ffmpeg::decoder::Video,
-                     curr_frame: usize|
+                     mut curr_frame: usize|
                      -> Result<usize, ffmpeg::Error> {
-                        let mut counter = 0;
                         let mut decoded = Video::empty();
                         while decoder.receive_frame(&mut decoded).is_ok() {
-                            let match_index = reducer.indices.iter().position(|x| x == &curr_frame);
-                            if match_index.is_some() {
+                            if reducer.indices.iter().any(|x| x == &curr_frame) {
                                 let mut rgb_frame = Video::empty();
                                 self.decoder.scaler.run(&decoded, &mut rgb_frame).unwrap();
                                 tasks.push(task::spawn(async move {
                                     convert_yuv_to_ndarray_rgb24(rgb_frame)
                                 }));
                             }
-                            counter += 1;
+                            curr_frame += 1;
                         }
-                        Ok(counter)
+                        Ok(curr_frame)
                     };
 
                 for (stream, packet) in self.ictx.packets() {
@@ -427,11 +417,11 @@ impl VideoReader {
                     }
                     if stream.index() == self.stream_index {
                         self.decoder.video.send_packet(&packet)?;
-                        let cnt = receive_and_process_decoded_frames(
+                        let upd_curr_frame = receive_and_process_decoded_frames(
                             &mut self.decoder.video,
                             self.curr_frame,
                         )?;
-                        self.curr_frame += cnt;
+                        self.curr_frame = upd_curr_frame;
                     } else {
                         debug!("Packet for another stream");
                     }
@@ -441,11 +431,11 @@ impl VideoReader {
                 if !reducer.indices.is_empty()
                     && (&self.curr_frame <= reducer.indices.iter().max().unwrap_or(&0))
                 {
-                    let cnt = receive_and_process_decoded_frames(
+                    let upd_curr_frame = receive_and_process_decoded_frames(
                         &mut self.decoder.video,
                         self.curr_frame,
                     )?;
-                    self.curr_frame += cnt;
+                    self.curr_frame = upd_curr_frame;
                 }
 
                 let mut outputs = Vec::with_capacity(tasks.len());
