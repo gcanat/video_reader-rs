@@ -12,7 +12,8 @@ use video_rs::encode::{Encoder, Settings};
 use video_rs::location::Location;
 use video_rs::time::Time;
 
-use ndarray::{s, Array, Array3, Array4, ArrayViewMut3, Axis};
+use ndarray::parallel::prelude::*;
+use ndarray::{s, stack, Array, Array2, Array3, Array4, ArrayView3, ArrayViewMut3, Axis};
 use tokio::task;
 use yuvutils_rs::{yuv420_to_rgb, YuvRange, YuvStandardMatrix};
 
@@ -684,9 +685,22 @@ pub fn convert_yuv_to_ndarray_rgb24(mut frame: Video) -> Array3<u8> {
     }
 }
 
-/// Convert all frames in the video from RGB to grayscale.
+/// Convert RGB video (N, H, W, C) to Grayscale video (N, H, W).
+/// Returns a 3D ndarray with shape (N, H, W).
 pub fn rgb2gray(frames: Array4<u8>) -> Array3<u8> {
-    frames.map_axis(Axis(3), |pix| {
+    let mut gray = Vec::new();
+    frames
+        .axis_iter(Axis(0))
+        .into_par_iter()
+        .map(rgb2gray_2d)
+        .collect_into_vec(&mut gray);
+    let views: Vec<_> = gray.iter().map(|x| x.view()).collect();
+    stack(Axis(0), &views[..]).unwrap()
+}
+
+/// Convert RGB Frame (H, W, C) to grayscale (H, W).
+fn rgb2gray_2d(frames: ArrayView3<u8>) -> Array2<u8> {
+    frames.map_axis(Axis(2), |pix| {
         (0.2125 * pix[0] as f32 + 0.7154 * pix[1] as f32 + 0.0721 * pix[2] as f32)
             .round()
             .clamp(0.0, 255.0) as u8
