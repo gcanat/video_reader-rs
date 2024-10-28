@@ -134,7 +134,7 @@ Options:
 | f 0.5 | 33.96s | 14.6s | 5.5s | **4.2s** | 
 |f 0.25 | 7.16s | 14.03s | 4.2s | **3.8s** |
 |f 0.25, r 512| 6.5s | 13.3s | 3.92s | **3.5s** |
-| f 0.25, g | 20.2s | 25.7s | **11.3s** | N/A |
+| f 0.25, g | 20.2s | 25.7s | **6.6s** | N/A |
 
 \* decord was tested on a machine with more RAM and CPU cores because it was crashing on the laptop with only 15Gb. See below.
 
