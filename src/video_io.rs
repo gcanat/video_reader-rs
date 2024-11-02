@@ -4,6 +4,7 @@ use ffmpeg::format::{input, Pixel as AvPixel};
 use ffmpeg::media::Type;
 use ffmpeg::software::scaling::{context::Context, flag::Flags};
 use ffmpeg::util::frame::video::Video;
+use ffmpeg::util::rational::Rational;
 use ffmpeg_next as ffmpeg;
 use log::debug;
 use std::collections::{BTreeMap, HashMap};
@@ -19,6 +20,138 @@ use yuvutils_rs::{yuv420_to_rgb, YuvRange, YuvStandardMatrix};
 
 pub type FrameArray = Array3<u8>;
 pub type VideoArray = Array4<u8>;
+pub type DecoderBundle = (
+    VideoDecoder,
+    Option<VideoReducer>,
+    Option<usize>,
+    Option<usize>,
+);
+
+struct VideoParams {
+    duration: f64,
+    start_time: i64,
+    time_base: f64,
+}
+
+#[derive(Default)]
+pub struct DecoderConfig {
+    threads: usize,
+    resize_shorter_side: Option<f64>,
+    compression_factor: Option<f64>,
+    with_reducer: bool,
+    start_frame: Option<usize>,
+    end_frame: Option<usize>,
+    pixel_format: Option<AvPixel>,
+}
+
+impl DecoderConfig {
+    pub fn new(
+        threads: usize,
+        resize_shorter_side: Option<f64>,
+        compression_factor: Option<f64>,
+        with_reducer: bool,
+        start_frame: Option<usize>,
+        end_frame: Option<usize>,
+        pixel_format: Option<AvPixel>,
+    ) -> Self {
+        Self {
+            threads,
+            resize_shorter_side,
+            compression_factor,
+            with_reducer,
+            start_frame,
+            end_frame,
+            pixel_format,
+        }
+    }
+}
+
+fn extract_video_params(input: &ffmpeg::Stream) -> VideoParams {
+    VideoParams {
+        duration: input.duration() as f64 * f64::from(input.time_base()),
+        start_time: input.start_time(),
+        time_base: f64::from(input.time_base()),
+    }
+}
+
+fn setup_decoder_context(
+    input: &ffmpeg::Stream,
+    threads: usize,
+) -> Result<ffmpeg::codec::context::Context, ffmpeg::Error> {
+    let mut context = ffmpeg::codec::context::Context::from_parameters(input.parameters())?;
+    context.set_threading(threading::Config {
+        kind: threading::Type::Frame,
+        count: threads,
+        #[cfg(not(feature = "ffmpeg_6_0"))]
+        safe: true,
+    });
+    Ok(context)
+}
+
+fn collect_video_metadata(
+    video: &ffmpeg::decoder::Video,
+    params: &VideoParams,
+) -> HashMap<&'static str, String> {
+    let mut info = HashMap::new();
+
+    info.insert(
+        "fps",
+        video.frame_rate().unwrap_or(Rational(0, 0)).to_string(),
+    );
+    info.insert("start_time", params.start_time.to_string());
+    info.insert("time_base", params.time_base.to_string());
+    info.insert("duration", params.duration.to_string());
+    info.insert("codec_id", format!("{:?}", video.codec().unwrap().id()));
+    info.insert("height", video.height().to_string());
+    info.insert("width", video.width().to_string());
+    info.insert("bit_rate", video.bit_rate().to_string());
+    info.insert("vid_format", format!("{:?}", video.format()));
+    info.insert("aspect_ratio", format!("{:?}", video.aspect_ratio()));
+    info.insert("color_space", format!("{:?}", video.color_space()));
+    info.insert("color_range", format!("{:?}", video.color_range()));
+    info.insert("color_primaries", format!("{:?}", video.color_primaries()));
+    info.insert(
+        "color_xfer_charac",
+        format!("{:?}", video.color_transfer_characteristic()),
+    );
+    info.insert("chroma_location", format!("{:?}", video.chroma_location()));
+    info.insert("vid_ref", video.references().to_string());
+    info.insert("intra_dc_precision", video.intra_dc_precision().to_string());
+
+    info
+}
+
+fn create_video_reducer(
+    start_frame: Option<&usize>,
+    end_frame: Option<&usize>,
+    frame_count: usize,
+    compression_factor: Option<f64>,
+    height: u32,
+    width: u32,
+) -> (Option<VideoReducer>, Option<usize>, Option<usize>) {
+    let start = *start_frame.unwrap_or(&0);
+    let end = *end_frame.unwrap_or(&frame_count).min(&frame_count);
+
+    let n_frames = ((end - start) as f64 * compression_factor.unwrap_or(1.0)).round() as usize;
+
+    let indices = Array::linspace(start as f64, end as f64 - 1., n_frames)
+        .iter()
+        .map(|x| x.round() as usize)
+        .collect::<Vec<_>>();
+
+    let full_video = Array::zeros((indices.len(), height as usize, width as usize, 3));
+
+    (
+        Some(VideoReducer {
+            indices,
+            frame_index: 0,
+            full_video,
+            idx_counter: 0,
+        }),
+        Some(start),
+        Some(end),
+    )
+}
 
 /// Struct responsible for reading the stream and getting the metadata
 pub struct VideoReader {
@@ -129,39 +262,17 @@ impl VideoDecoder {
 impl VideoReader {
     /// Create a new VideoReader instance
     /// * `filename` - Path to the video file.
-    /// * `compression_factor` - Factor to reduce the number of frames in the video.
-    /// * `resize_shorter_side` - Resize the shorter side of the video to this value.
-    /// * `threads` - Number of threads to use for decoding. This will be ignored when using
-    ///   the `get_batch` method, as it does not work with multithreading at the moment.
-    /// * `with_reducer` - Whether to use the VideoReducer to reduce the number of frames.
-    ///    should be set to true to be able to use `decode_video` method. Set to false when using
-    ///    the `get_batch` method.
+    /// * `decoder_config` - Config for the decoder see: [`DecoderConfig`]
     ///
     /// Returns: a VideoReader instance.
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         filename: String,
-        compression_factor: Option<f64>,
-        resize_shorter_side: Option<f64>,
-        threads: usize,
-        with_reducer: bool,
-        start_frame: Option<&usize>,
-        end_frame: Option<&usize>,
-        pix_fmt: Option<AvPixel>,
+        decoder_config: DecoderConfig,
     ) -> Result<VideoReader, ffmpeg::Error> {
         let (mut ictx, stream_index) = get_init_context(&filename)?;
         let stream_info = get_frame_count(&mut ictx, &stream_index)?;
-        let (decoder, reducer, first_frame, last_frame) = Self::get_decoder(
-            &ictx,
-            threads,
-            resize_shorter_side,
-            compression_factor,
-            stream_info.frame_count,
-            with_reducer,
-            start_frame,
-            end_frame,
-            pix_fmt,
-        )?;
+        let (decoder, reducer, first_frame, last_frame) =
+            Self::get_decoder(&ictx, stream_info.frame_count, decoder_config)?;
         debug!("frame_count: {}", stream_info.frame_count);
         debug!("key frames: {:?}", stream_info.key_frames);
         Ok(VideoReader {
@@ -178,139 +289,60 @@ impl VideoReader {
         })
     }
 
-    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     pub fn get_decoder(
         ictx: &ffmpeg::format::context::Input,
-        threads: usize,
-        resize_shorter_side: Option<f64>,
-        compression_factor: Option<f64>,
         frame_count: usize,
-        with_reducer: bool,
-        start_frame: Option<&usize>,
-        end_frame: Option<&usize>,
-        pix_fmt: Option<AvPixel>,
-    ) -> Result<
-        (
-            VideoDecoder,
-            Option<VideoReducer>,
-            Option<usize>,
-            Option<usize>,
-        ),
-        ffmpeg::Error,
-    > {
+        config: DecoderConfig,
+    ) -> Result<DecoderBundle, ffmpeg::Error> {
         let input = ictx
             .streams()
             .best(Type::Video)
             .ok_or(ffmpeg::Error::StreamNotFound)?;
+
         let fps = f64::from(input.avg_frame_rate()).round();
-        let duration = input.duration() as f64 * f64::from(input.time_base());
-        let start_time = input.start_time();
-        let time_base = f64::from(input.time_base());
-        // setup the decoder context
-        let mut context_decoder =
-            ffmpeg::codec::context::Context::from_parameters(input.parameters())?;
+        let video_params = extract_video_params(&input);
 
-        // setup multi-threading. `count` = 0 means let ffmpeg decide the optimal number
-        // of cores to use. `kind` Frame or Slice (Frame is recommended).
-        context_decoder.set_threading(threading::Config {
-            kind: threading::Type::Frame,
-            count: threads,
-            // FIXME: beware this does not exist in ffmpeg 6.0 ?
-            #[cfg(not(feature = "ffmpeg_6_0"))]
-            safe: true,
-        });
-        let codec_id = context_decoder.id();
-        let video = context_decoder.decoder().video()?;
+        let decoder_context = setup_decoder_context(&input, config.threads)?;
+        let video = decoder_context.decoder().video()?;
 
-        let orig_h = video.height();
-        let orig_w = video.width();
+        let video_info = collect_video_metadata(&video, &video_params);
 
-        // Some more metadata
-        let mut video_info: HashMap<&str, String> = HashMap::new();
-        video_info.insert("fps", format!("{}", fps));
-        video_info.insert("start_time", format!("{}", start_time));
-        video_info.insert("time_base", format!("{}", time_base));
-        video_info.insert("duration", format!("{}", duration));
-        video_info.insert("codec_id", format!("{:?}", codec_id));
-        video_info.insert("height", format!("{}", video.height()));
-        video_info.insert("width", format!("{}", video.width()));
-        video_info.insert("bit_rate", format!("{}", video.bit_rate()));
-        video_info.insert("vid_format", format!("{:?}", video.format()));
-        video_info.insert("aspect_ratio", format!("{:?}", video.aspect_ratio()));
-        video_info.insert("color_space", format!("{:?}", video.color_space()));
-        video_info.insert("color_range", format!("{:?}", video.color_range()));
-        video_info.insert("color_primaries", format!("{:?}", video.color_primaries()));
-        video_info.insert(
-            "color_xfer_charac",
-            format!("{:?}", video.color_transfer_characteristic()),
-        );
-        video_info.insert("chroma_location", format!("{:?}", video.chroma_location()));
-        video_info.insert("vid_ref", format!("{}", video.references()));
-        video_info.insert(
-            "intra_dc_precision",
-            format!("{}", video.intra_dc_precision()),
-        );
-
-        // do we need to resize the video ?
-        let (h, w) = match resize_shorter_side {
-            None => (orig_h, orig_w),
-            Some(resize) => get_resized_dim(orig_h as f64, orig_w as f64, resize),
+        let (height, width) = match config.resize_shorter_side {
+            Some(resize) => get_resized_dim(video.height() as f64, video.width() as f64, resize),
+            None => (video.height(), video.width()),
         };
 
         let scaler = Context::get(
             video.format(),
-            orig_w,
-            orig_h,
-            pix_fmt.unwrap_or(AvPixel::RGB24),
-            w,
-            h,
+            video.width(),
+            video.height(),
+            config.pixel_format.unwrap_or(AvPixel::RGB24),
+            width,
+            height,
             Flags::BILINEAR,
         )?;
 
-        // setup the VideoReducer if needed
-        let (reducer, first_frame, last_frame) = if with_reducer {
-            // which frames we want to gather ?
-            // we may want to start or end from a specific frame
-            let start_frame = *start_frame.unwrap_or(&0);
-            let end_frame = *end_frame.unwrap_or(&frame_count).min(&frame_count);
-            let n_frames_compressed = ((end_frame - start_frame) as f64
-                * compression_factor.unwrap_or(1.))
-            .round() as usize;
-            let indices = Array::linspace(
-                start_frame as f64,
-                end_frame as f64 - 1.,
-                n_frames_compressed,
-            )
-            .iter_mut()
-            .map(|x| x.round() as usize)
-            .collect::<Vec<_>>();
-
-            let frame_index = 0;
-            let full_video: VideoArray = Array::zeros((indices.len(), h as usize, w as usize, 3));
-            // counter to keep track of how many frames already added to the video
-            (
-                Some(VideoReducer {
-                    indices,
-                    frame_index,
-                    full_video,
-                    idx_counter: 0,
-                }),
-                Some(start_frame),
-                Some(end_frame),
+        let (reducer, first_frame, last_frame) = if config.with_reducer {
+            create_video_reducer(
+                config.start_frame.as_ref(),
+                config.end_frame.as_ref(),
+                frame_count,
+                config.compression_factor,
+                height,
+                width,
             )
         } else {
             (None, None, None)
         };
+
         Ok((
             VideoDecoder {
                 video,
                 scaler,
-                height: h,
-                width: w,
+                height,
+                width,
                 fps,
                 video_info,
-                // start_time,
-                // time_base,
             },
             reducer,
             first_frame,
