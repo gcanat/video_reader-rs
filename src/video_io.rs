@@ -155,53 +155,93 @@ fn create_video_reducer(
 
 /// Struct responsible for reading the stream and getting the metadata
 pub struct VideoReader {
-    pub ictx: ffmpeg::format::context::Input,
-    pub stream_index: usize,
-    pub stream_info: StreamInfo,
-    pub curr_frame: usize,
-    pub curr_dec_idx: usize,
-    pub n_fails: usize,
-    pub decoder: VideoDecoder,
-    pub reducer: Option<VideoReducer>,
-    pub first_frame: Option<usize>,
-    pub last_frame: Option<usize>,
+    ictx: ffmpeg::format::context::Input,
+    stream_index: usize,
+    stream_info: StreamInfo,
+    curr_frame: usize,
+    curr_dec_idx: usize,
+    n_fails: usize,
+    decoder: VideoDecoder,
+    reducer: Option<VideoReducer>,
+    first_frame: Option<usize>,
+    last_frame: Option<usize>,
+}
+
+impl VideoReader {
+    pub fn decoder(&self) -> &VideoDecoder {
+        &self.decoder
+    }
+    pub fn stream_info(&self) -> &StreamInfo {
+        &self.stream_info
+    }
 }
 
 /// Struct responsible for doing the actual decoding
 pub struct VideoDecoder {
-    pub video: ffmpeg::decoder::Video,
-    pub scaler: Context,
-    pub height: u32,
-    pub width: u32,
-    pub fps: f64,
-    pub video_info: HashMap<&'static str, String>,
-    // pub start_time: i64,
-    // pub time_base: f64,
+    video: ffmpeg::decoder::Video,
+    scaler: Context,
+    height: u32,
+    width: u32,
+    fps: f64,
+    video_info: HashMap<&'static str, String>,
+}
+
+impl VideoDecoder {
+    pub fn video_info(&self) -> &HashMap<&'static str, String> {
+        &self.video_info
+    }
+    pub fn video(&self) -> &ffmpeg::decoder::Video {
+        &self.video
+    }
 }
 
 /// Struct used when we want to decode the whole video with a compression_factor
 pub struct VideoReducer {
-    pub indices: Vec<usize>,
-    pub frame_index: usize,
-    pub idx_counter: usize,
-    pub full_video: VideoArray,
+    indices: Vec<usize>,
+    frame_index: usize,
+    idx_counter: usize,
+    full_video: VideoArray,
 }
 
 /// Timing info for key frames
 #[derive(Debug)]
 pub struct FrameTime {
-    pub pts: i64,
-    pub dur: i64,
-    pub dts: i64,
-    pub didx: usize,
+    pts: i64,
+    dur: i64,
+    dts: i64,
+    didx: usize,
+}
+
+impl FrameTime {
+    pub fn pts(&self) -> &i64 {
+        &self.pts
+    }
+    pub fn dts(&self) -> &i64 {
+        &self.dts
+    }
+    pub fn dur(&self) -> &i64 {
+        &self.dur
+    }
 }
 
 /// Info gathered from iterating over the video stream
 pub struct StreamInfo {
-    pub frame_count: usize,
-    pub key_frames: Vec<usize>,
-    pub frame_times: BTreeMap<i64, FrameTime>,
-    pub decode_order: HashMap<usize, usize>,
+    frame_count: usize,
+    key_frames: Vec<usize>,
+    frame_times: BTreeMap<i64, FrameTime>,
+    decode_order: HashMap<usize, usize>,
+}
+
+impl StreamInfo {
+    pub fn frame_count(&self) -> &usize {
+        &self.frame_count
+    }
+    pub fn key_frames(&self) -> &Vec<usize> {
+        &self.key_frames
+    }
+    pub fn frame_times(&self) -> &BTreeMap<i64, FrameTime> {
+        &self.frame_times
+    }
 }
 
 impl VideoDecoder {

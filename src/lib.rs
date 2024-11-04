@@ -29,17 +29,17 @@ fn video_reader<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()>
     /// Get shape of the video: number of frames, height and width
     fn get_shape(filename: &String) -> Result<(usize, usize, usize), ffmpeg::Error> {
         let vr = VideoReader::new(filename.to_owned(), DecoderConfig::default())?;
-        let width = vr.decoder.video.width() as usize;
-        let height = vr.decoder.video.height() as usize;
-        let num_frames = vr.stream_info.frame_count;
-        Ok((num_frames, height, width))
+        let width = vr.decoder().video().width() as usize;
+        let height = vr.decoder().video().height() as usize;
+        let num_frames = vr.stream_info().frame_count();
+        Ok((*num_frames, height, width))
     }
 
     /// Get video information: width, height, number of frames and fps
-    fn get_info(filename: &String) -> Result<HashMap<&str, String>, ffmpeg::Error> {
+    fn get_info(filename: &str) -> Result<HashMap<&str, String>, ffmpeg::Error> {
         let vr = VideoReader::new(filename.to_owned(), DecoderConfig::default())?;
-        let mut info_dict = vr.decoder.video_info;
-        info_dict.insert("frame_count", vr.stream_info.frame_count.to_string());
+        let mut info_dict = vr.decoder().video_info().clone();
+        info_dict.insert("frame_count", vr.stream_info().frame_count().to_string());
         Ok(info_dict)
     }
 
@@ -106,24 +106,24 @@ fn video_reader<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()>
             DecoderConfig::new(1, resize_shorter_side, None, false, None, None, None);
         let mut vr = VideoReader::new(filename.to_owned(), decoder_config)?;
         let start_time: i32 = vr
-            .decoder
-            .video_info
+            .decoder()
+            .video_info()
             .get("start_time")
             .unwrap()
             .as_str()
             .parse::<i32>()
             .unwrap_or(0);
         let num_zero_pts = vr
-            .stream_info
-            .frame_times
+            .stream_info()
+            .frame_times()
             .iter()
-            .filter(|(_, v)| v.pts <= 0)
+            .filter(|(_, v)| v.pts() <= &0)
             .collect::<Vec<_>>()
             .len();
-        let first_key_idx = vr.stream_info.key_frames[0];
+        let first_key_idx = vr.stream_info().key_frames()[0];
         let (_, first_key) = vr
-            .stream_info
-            .frame_times
+            .stream_info()
+            .frame_times()
             .iter()
             .nth(first_key_idx)
             .unwrap();
@@ -132,7 +132,10 @@ fn video_reader<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()>
         // well, so we use get_batch_safe.
         // if `with_fallback` is set to true, always use `get_batch_safe`
         if with_fallback
-            || ((num_zero_pts > 1) || (first_key.dur <= 0) || (first_key.dts < 0) || start_time > 0)
+            || ((num_zero_pts > 1)
+                || (first_key.dur() <= &0)
+                || (first_key.dts() < &0)
+                || start_time > 0)
         {
             debug!("Decoding using `get_batch_safe`");
             // switch to video reader that will iterate on all frames, we can use threading here
