@@ -13,6 +13,8 @@ use video_rs::encode::{Encoder, Settings};
 use video_rs::location::Location;
 use video_rs::time::Time;
 
+use crate::ffi_hwaccel::hwdevice_transfer_frame;
+use crate::hwaccel::{HardwareAccelerationContext, HardwareAccelerationDeviceType};
 use ndarray::parallel::prelude::*;
 use ndarray::{s, stack, Array, Array2, Array3, Array4, ArrayView3, ArrayViewMut3, Axis};
 use tokio::task;
@@ -20,6 +22,9 @@ use yuvutils_rs::{yuv420_to_rgb, YuvPlanarImage, YuvRange, YuvStandardMatrix};
 
 pub type FrameArray = Array3<u8>;
 pub type VideoArray = Array4<u8>;
+
+/// Always use NV12 pixel format with hardware acceleration, then rescale later.
+static HWACCEL_PIXEL_FORMAT: AvPixel = AvPixel::NV12;
 
 struct VideoParams {
     duration: f64,
@@ -31,13 +36,19 @@ struct VideoParams {
 pub struct DecoderConfig {
     threads: usize,
     resize_shorter_side: Option<f64>,
+    hw_accel: Option<HardwareAccelerationDeviceType>,
 }
 
 impl DecoderConfig {
-    pub fn new(threads: usize, resize_shorter_side: Option<f64>) -> Self {
+    pub fn new(
+        threads: usize,
+        resize_shorter_side: Option<f64>,
+        hw_accel: Option<HardwareAccelerationDeviceType>,
+    ) -> Self {
         Self {
             threads,
             resize_shorter_side,
+            hw_accel,
         }
     }
 }
@@ -53,15 +64,27 @@ fn extract_video_params(input: &ffmpeg::Stream) -> VideoParams {
 fn setup_decoder_context(
     input: &ffmpeg::Stream,
     threads: usize,
-) -> Result<ffmpeg::codec::context::Context, ffmpeg::Error> {
+    hwaccel_device_type: Option<HardwareAccelerationDeviceType>,
+) -> Result<
+    (
+        ffmpeg::codec::context::Context,
+        Option<HardwareAccelerationContext>,
+    ),
+    ffmpeg::Error,
+> {
     let mut context = ffmpeg::codec::context::Context::from_parameters(input.parameters())?;
+
+    let hwaccel_context = match hwaccel_device_type {
+        Some(device_type) => Some(HardwareAccelerationContext::new(&mut context, device_type)?),
+        None => None,
+    };
     context.set_threading(threading::Config {
         kind: threading::Type::Frame,
         count: threads,
         #[cfg(not(feature = "ffmpeg_6_0"))]
         safe: true,
     });
-    Ok(context)
+    Ok((context, hwaccel_context))
 }
 
 fn collect_video_metadata(
@@ -159,6 +182,7 @@ pub struct VideoDecoder {
     width: u32,
     fps: f64,
     video_info: HashMap<&'static str, String>,
+    hwaccel_context: Option<HardwareAccelerationContext>,
 }
 
 unsafe impl Send for VideoDecoder {}
@@ -225,6 +249,15 @@ impl StreamInfo {
 }
 
 impl VideoDecoder {
+    fn download_frame(frame: &Video) -> Result<Video, ffmpeg::Error> {
+        let mut frame_downloaded = Video::empty();
+        frame_downloaded.set_format(HWACCEL_PIXEL_FORMAT);
+        hwdevice_transfer_frame(&mut frame_downloaded, frame)?;
+        unsafe {
+            av_frame_copy_props(frame_downloaded.as_mut_ptr(), frame.as_ptr());
+        }
+        Ok(frame_downloaded)
+    }
     /// Decode all frames that match the frame indices
     pub fn receive_and_process_decoded_frames(
         &mut self,
@@ -239,6 +272,12 @@ impl VideoDecoder {
                 .position(|x| x == &reducer.frame_index);
             if match_index.is_some() {
                 reducer.indices.remove(match_index.unwrap());
+
+                // handle hardware frame if necessary
+                if self.hwaccel_context.is_some() {
+                    decoded = Self::download_frame(&decoded)?;
+                }
+
                 let mut rgb_frame = Video::empty();
                 scaler.run(&decoded, &mut rgb_frame)?;
                 let res = convert_frame_to_ndarray_rgb24(
@@ -319,7 +358,8 @@ impl VideoReader {
         let fps = f64::from(input.avg_frame_rate());
         let video_params = extract_video_params(&input);
 
-        let decoder_context = setup_decoder_context(&input, config.threads)?;
+        let (decoder_context, hwaccel_context) =
+            setup_decoder_context(&input, config.threads, config.hw_accel)?;
         let video = decoder_context.decoder().video()?;
 
         let video_info = collect_video_metadata(&video, &video_params, &fps);
@@ -335,6 +375,7 @@ impl VideoReader {
             width,
             fps,
             video_info,
+            hwaccel_context,
         })
     }
 
