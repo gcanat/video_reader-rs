@@ -13,6 +13,8 @@ use video_rs::encode::{Encoder, Settings};
 use video_rs::location::Location;
 use video_rs::time::Time;
 
+use crate::ffi_hwaccel::hwdevice_transfer_frame;
+use crate::hwaccel::{HardwareAccelerationContext, HardwareAccelerationDeviceType};
 use ndarray::parallel::prelude::*;
 use ndarray::{s, stack, Array, Array2, Array3, Array4, ArrayView3, ArrayViewMut3, Axis};
 use tokio::task;
@@ -20,6 +22,11 @@ use yuvutils_rs::{yuv420_to_rgb, YuvRange, YuvStandardMatrix};
 
 pub type FrameArray = Array3<u8>;
 pub type VideoArray = Array4<u8>;
+
+/// Always use NV12 pixel format with hardware acceleration, then rescale later.
+static HWACCEL_PIXEL_FORMAT: AvPixel = AvPixel::NV12;
+
+// type returned by the get_decoder method
 pub type DecoderBundle = (
     VideoDecoder,
     Option<VideoReducer>,
@@ -42,6 +49,7 @@ pub struct DecoderConfig {
     start_frame: Option<usize>,
     end_frame: Option<usize>,
     pixel_format: Option<AvPixel>,
+    hw_accel: Option<HardwareAccelerationDeviceType>,
 }
 
 impl DecoderConfig {
@@ -53,6 +61,7 @@ impl DecoderConfig {
         start_frame: Option<usize>,
         end_frame: Option<usize>,
         pixel_format: Option<AvPixel>,
+        hw_accel: Option<HardwareAccelerationDeviceType>,
     ) -> Self {
         Self {
             threads,
@@ -62,6 +71,7 @@ impl DecoderConfig {
             start_frame,
             end_frame,
             pixel_format,
+            hw_accel,
         }
     }
 }
@@ -77,15 +87,27 @@ fn extract_video_params(input: &ffmpeg::Stream) -> VideoParams {
 fn setup_decoder_context(
     input: &ffmpeg::Stream,
     threads: usize,
-) -> Result<ffmpeg::codec::context::Context, ffmpeg::Error> {
+    hwaccel_device_type: Option<HardwareAccelerationDeviceType>,
+) -> Result<
+    (
+        ffmpeg::codec::context::Context,
+        Option<HardwareAccelerationContext>,
+    ),
+    ffmpeg::Error,
+> {
     let mut context = ffmpeg::codec::context::Context::from_parameters(input.parameters())?;
+
+    let hwaccel_context = match hwaccel_device_type {
+        Some(device_type) => Some(HardwareAccelerationContext::new(&mut context, device_type)?),
+        None => None,
+    };
     context.set_threading(threading::Config {
         kind: threading::Type::Frame,
         count: threads,
         #[cfg(not(feature = "ffmpeg_6_0"))]
         safe: true,
     });
-    Ok(context)
+    Ok((context, hwaccel_context))
 }
 
 fn collect_video_metadata(
@@ -175,6 +197,7 @@ pub struct VideoDecoder {
     pub width: u32,
     pub fps: f64,
     pub video_info: HashMap<&'static str, String>,
+    pub hwaccel_context: Option<HardwareAccelerationContext>,
     // pub start_time: i64,
     // pub time_base: f64,
 }
@@ -205,6 +228,15 @@ pub struct StreamInfo {
 }
 
 impl VideoDecoder {
+    fn download_frame(frame: &Video) -> Result<Video, ffmpeg::Error> {
+        let mut frame_downloaded = Video::empty();
+        frame_downloaded.set_format(HWACCEL_PIXEL_FORMAT);
+        hwdevice_transfer_frame(&mut frame_downloaded, frame)?;
+        unsafe {
+            av_frame_copy_props(frame_downloaded.as_mut_ptr(), frame.as_ptr());
+        }
+        Ok(frame_downloaded)
+    }
     /// Decode all frames that match the frame indices
     pub fn receive_and_process_decoded_frames(
         &mut self,
@@ -218,6 +250,12 @@ impl VideoDecoder {
                 .position(|x| x == &reducer.frame_index);
             if match_index.is_some() {
                 reducer.indices.remove(match_index.unwrap());
+
+                // handle hardware frame if necessary
+                if self.hwaccel_context.is_some() {
+                    decoded = Self::download_frame(&decoded)?;
+                }
+
                 let mut rgb_frame = Video::empty();
                 self.scaler.run(&decoded, &mut rgb_frame)?;
                 let res = convert_frame_to_ndarray_rgb24(
@@ -302,7 +340,8 @@ impl VideoReader {
         let fps = f64::from(input.avg_frame_rate()).round();
         let video_params = extract_video_params(&input);
 
-        let decoder_context = setup_decoder_context(&input, config.threads)?;
+        let (decoder_context, hwaccel_context) =
+            setup_decoder_context(&input, config.threads, config.hw_accel)?;
         let video = decoder_context.decoder().video()?;
 
         let video_info = collect_video_metadata(&video, &video_params);
@@ -312,8 +351,14 @@ impl VideoReader {
             None => (video.height(), video.width()),
         };
 
+        let scaler_input_format = if hwaccel_context.is_some() {
+            HWACCEL_PIXEL_FORMAT
+        } else {
+            video.format()
+        };
+
         let scaler = Context::get(
-            video.format(),
+            scaler_input_format,
             video.width(),
             video.height(),
             config.pixel_format.unwrap_or(AvPixel::RGB24),
@@ -343,6 +388,7 @@ impl VideoReader {
                 width,
                 fps,
                 video_info,
+                hwaccel_context,
             },
             reducer,
             first_frame,
@@ -400,6 +446,11 @@ impl VideoReader {
                     self.decoder
                         .receive_and_process_decoded_frames(&mut reducer)?;
                 }
+                // if self.decoder.hwaccel_context.is_some() {
+                //     let hw_ctx = self.decoder.hwaccel_context.unwrap();
+                //     let device_ctx = hw_ctx.get_device_ctx();
+                //     unsafe { av_buffer_unref(&mut device_ctx.ref_raw()) };
+                // }
                 Ok(reducer.full_video)
             }
             None => panic!("No Reducer to get the frames"),

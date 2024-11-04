@@ -1,3 +1,7 @@
+mod ffi_hwaccel;
+use std::str::FromStr;
+mod hwaccel;
+use hwaccel::HardwareAccelerationDeviceType;
 use numpy::ndarray::{Array3, Array4, Dim};
 use numpy::{IntoPyArray, PyArray, PyReadonlyArray4};
 mod video_io;
@@ -99,11 +103,25 @@ fn video_reader<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()>
         resize_shorter_side: Option<f64>,
         threads: Option<usize>,
         with_fallback: bool,
+        hw_accel: Option<&str>,
     ) -> Result<Array4<u8>, ffmpeg::Error> {
         let video: Array4<u8>;
+        let hwaccel = match hw_accel {
+            Some(val) => Some(HardwareAccelerationDeviceType::from_str(val).unwrap()),
+            None => None,
+        };
+
+        let decoder_config = DecoderConfig::new(
+            1,
+            resize_shorter_side,
+            None,
+            false,
+            None,
+            None,
+            None,
+            hwaccel,
+        );
         // video reader that will use Seeking, only works in single thread mode for now
-        let decoder_config =
-            DecoderConfig::new(1, resize_shorter_side, None, false, None, None, None);
         let mut vr = VideoReader::new(filename.to_owned(), decoder_config)?;
         let start_time: i32 = vr
             .decoder
@@ -138,6 +156,10 @@ fn video_reader<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()>
             // switch to video reader that will iterate on all frames, we can use threading here
             let min_idx = indices.iter().min();
             let max_idx = indices.iter().max();
+            let hw_accel = match hw_accel {
+                Some(val) => Some(HardwareAccelerationDeviceType::from_str(val).unwrap()),
+                None => None,
+            };
             let decoder_config = DecoderConfig::new(
                 threads.unwrap_or(0),
                 resize_shorter_side,
@@ -146,6 +168,7 @@ fn video_reader<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()>
                 min_idx.copied(),
                 max_idx.copied(),
                 None,
+                hw_accel,
             );
             vr = VideoReader::new(filename.to_owned(), decoder_config)?;
             video = vr.get_batch_safe(indices)?;
@@ -167,7 +190,7 @@ fn video_reader<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()>
     /// * Returns a 4D ndarray with shape (N, H, W, C)
     #[pyfn(m)]
     #[pyo3(name = "decode")]
-    #[pyo3(signature = (filename, resize_shorter_side=None, compression_factor=None, threads=None, start_frame=None, end_frame=None))]
+    #[pyo3(signature = (filename, resize_shorter_side=None, compression_factor=None, threads=None, start_frame=None, end_frame=None, hw_accel=None))]
     fn decode_py<'py>(
         py: Python<'py>,
         filename: &str,
@@ -176,7 +199,12 @@ fn video_reader<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()>
         threads: Option<usize>,
         start_frame: Option<usize>,
         end_frame: Option<usize>,
+        hw_accel: Option<&str>,
     ) -> PyResult<Bound<'py, PyArray<u8, Dim<[usize; 4]>>>> {
+        let hw_accel = match hw_accel {
+            Some(val) => Some(HardwareAccelerationDeviceType::from_str(val).unwrap()),
+            None => None,
+        };
         let decoder_config = DecoderConfig::new(
             threads.unwrap_or(0),
             resize_shorter_side,
@@ -185,6 +213,7 @@ fn video_reader<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()>
             start_frame,
             end_frame,
             None,
+            hw_accel,
         );
         let res_decode = decode_video(filename, decoder_config);
         match res_decode {
@@ -205,7 +234,7 @@ fn video_reader<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()>
     /// * Returns a Vec of 3D ndarray with shape (H, W, C)
     #[pyfn(m)]
     #[pyo3(name = "decode_fast")]
-    #[pyo3(signature = (filename, resize_shorter_side=None, compression_factor=None, threads=None, start_frame=None, end_frame=None))]
+    #[pyo3(signature = (filename, resize_shorter_side=None, compression_factor=None, threads=None, start_frame=None, end_frame=None, hw_accel=None))]
     #[allow(clippy::type_complexity)]
     fn decode_fast_py<'py>(
         py: Python<'py>,
@@ -215,7 +244,12 @@ fn video_reader<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()>
         threads: Option<usize>,
         start_frame: Option<usize>,
         end_frame: Option<usize>,
+        hw_accel: Option<&str>,
     ) -> PyResult<Vec<Bound<'py, PyArray<u8, Dim<[usize; 3]>>>>> {
+        let hw_accel = match hw_accel {
+            Some(val) => Some(HardwareAccelerationDeviceType::from_str(val).unwrap()),
+            None => None,
+        };
         let decoder_config = DecoderConfig::new(
             threads.unwrap_or(0),
             resize_shorter_side,
@@ -224,6 +258,7 @@ fn video_reader<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()>
             start_frame,
             end_frame,
             Some(AvPixel::YUV420P),
+            hw_accel,
         );
         let res_decode = decode_video_fast(filename, decoder_config);
         match res_decode {
@@ -247,7 +282,7 @@ fn video_reader<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()>
     /// * Returns a 3D ndarray with shape (N, H, W)
     #[pyfn(m)]
     #[pyo3(name = "decode_gray")]
-    #[pyo3(signature = (filename, resize_shorter_side=None, compression_factor=None, threads=None, start_frame=None, end_frame=None))]
+    #[pyo3(signature = (filename, resize_shorter_side=None, compression_factor=None, threads=None, start_frame=None, end_frame=None, hw_accel=None))]
     fn decode_gray_py<'py>(
         py: Python<'py>,
         filename: &str,
@@ -256,7 +291,12 @@ fn video_reader<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()>
         threads: Option<usize>,
         start_frame: Option<usize>,
         end_frame: Option<usize>,
+        hw_accel: Option<&str>,
     ) -> PyResult<Bound<'py, PyArray<u8, Dim<[usize; 3]>>>> {
+        let hw_accel = match hw_accel {
+            Some(val) => Some(HardwareAccelerationDeviceType::from_str(val).unwrap()),
+            None => None,
+        };
         let decoder_config = DecoderConfig::new(
             threads.unwrap_or(0),
             resize_shorter_side,
@@ -265,6 +305,7 @@ fn video_reader<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()>
             start_frame,
             end_frame,
             None,
+            hw_accel,
         );
         let res_decode = decode_video_gray(filename, decoder_config);
         match res_decode {
@@ -288,7 +329,7 @@ fn video_reader<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()>
     /// * Returns a 4D ndarray with shape (N, H, W, C)
     #[pyfn(m)]
     #[pyo3(name = "get_batch")]
-    #[pyo3(signature = (filename, indices, threads=None, resize_shorter_side=None, with_fallback=None))]
+    #[pyo3(signature = (filename, indices, threads=None, resize_shorter_side=None, with_fallback=None, hw_accel=None))]
     fn get_batch_py<'py>(
         py: Python<'py>,
         filename: &str,
@@ -296,6 +337,7 @@ fn video_reader<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()>
         threads: Option<usize>,
         resize_shorter_side: Option<f64>,
         with_fallback: Option<bool>,
+        hw_accel: Option<&str>,
     ) -> PyResult<Bound<'py, PyArray<u8, Dim<[usize; 4]>>>> {
         let vid = get_batch(
             &filename.to_string(),
@@ -303,6 +345,7 @@ fn video_reader<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()>
             resize_shorter_side,
             threads,
             with_fallback.unwrap_or(false),
+            hw_accel,
         );
         match vid {
             Ok(vid) => Ok(vid.into_pyarray_bound(py)),
