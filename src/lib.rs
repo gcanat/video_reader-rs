@@ -128,11 +128,11 @@ fn video_reader<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()>
             .nth(first_key_idx)
             .unwrap();
         // Try to detect weird cases and if so switch to decoding without seeking
-        // NOTE: start_time > 0 means we have B-frames. Currently get_batch does not handle these
-        // well, so we use get_batch_safe.
-        // if `with_fallback` is set to true, always use `get_batch_safe`
+        // NOTE: start_time > 0 means we have B-frames. Currently `get_batch` does not guarantee
+        // that we get the exact frame we want in this case, so by setting with_fallback to True
+        // we can enable a more accurate method, namely `get_batch_safe`.
         if with_fallback
-            || ((num_zero_pts > 1)
+            && ((num_zero_pts > 1)
                 || (first_key.dur() <= &0)
                 || (first_key.dts() < &0)
                 || start_time > 0)
