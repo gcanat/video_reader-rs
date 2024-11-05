@@ -91,13 +91,13 @@ fn setup_decoder_context(
 fn collect_video_metadata(
     video: &ffmpeg::decoder::Video,
     params: &VideoParams,
+    fps: &f64,
 ) -> HashMap<&'static str, String> {
     let mut info = HashMap::new();
 
-    info.insert(
-        "fps",
-        video.frame_rate().unwrap_or(Rational(0, 0)).to_string(),
-    );
+    let fps_rational = video.frame_rate().unwrap_or(Rational(0, 1));
+    info.insert("fps_rational", fps_rational.to_string());
+    info.insert("fps", format!("{}", fps));
     info.insert("start_time", params.start_time.to_string());
     info.insert("time_base", params.time_base.to_string());
     info.insert("duration", params.duration.to_string());
@@ -117,6 +117,7 @@ fn collect_video_metadata(
     info.insert("chroma_location", format!("{:?}", video.chroma_location()));
     info.insert("vid_ref", video.references().to_string());
     info.insert("intra_dc_precision", video.intra_dc_precision().to_string());
+    info.insert("has_b_frames", format!("{}", video.has_b_frames()));
 
     info
 }
@@ -339,13 +340,13 @@ impl VideoReader {
             .best(Type::Video)
             .ok_or(ffmpeg::Error::StreamNotFound)?;
 
-        let fps = f64::from(input.avg_frame_rate()).round();
+        let fps = f64::from(input.avg_frame_rate());
         let video_params = extract_video_params(&input);
 
         let decoder_context = setup_decoder_context(&input, config.threads)?;
         let video = decoder_context.decoder().video()?;
 
-        let video_info = collect_video_metadata(&video, &video_params);
+        let video_info = collect_video_metadata(&video, &video_params, &fps);
 
         let (height, width) = match config.resize_shorter_side {
             Some(resize) => get_resized_dim(video.height() as f64, video.width() as f64, resize),
@@ -392,9 +393,6 @@ impl VideoReader {
 
     pub fn decode_video(mut self) -> Result<VideoArray, ffmpeg::Error> {
         let first_index = self.first_frame.unwrap_or(0);
-        let mut seeked = false;
-        let mut first_frame: FrameArray =
-            Array::zeros((self.decoder.height as usize, self.decoder.width as usize, 3));
         // check if first_index is after the first keyframe, if so we can seek
         if self
             .stream_info
@@ -404,22 +402,14 @@ impl VideoReader {
             && (first_index > 0)
         {
             let frame_duration = (1. / self.decoder.fps * 1_000.0).round() as usize;
-            self.seek_accurate(first_index, &frame_duration, &mut first_frame.view_mut())?;
-            seeked = true;
+            let key_pos = self.locate_keyframes(&first_index, &self.stream_info.key_frames);
+            // self.seek_accurate(first_index, &frame_duration, &mut first_frame.view_mut())?;
+            self.seek_frame(&key_pos, &frame_duration)?;
+            self.curr_frame = key_pos;
         }
         match self.reducer {
             Some(mut reducer) => {
                 reducer.frame_index = self.curr_frame;
-                if seeked {
-                    // first frame was seeked and decoded, so we increment the counter
-                    // and assign the frame to the full video
-                    reducer
-                        .full_video
-                        .slice_mut(s![reducer.idx_counter, .., .., ..])
-                        .assign(&first_frame);
-                    reducer.indices.remove(0);
-                    reducer.idx_counter += 1;
-                }
                 for (stream, packet) in self.ictx.packets() {
                     if &reducer.frame_index > reducer.indices.iter().max().unwrap_or(&0) {
                         break;
@@ -781,12 +771,12 @@ fn rgb2gray_2d(frames: ArrayView3<u8>) -> Array2<u8> {
 
 impl VideoReader {
     /// Safely get the batch of frames from the video by iterating over all frames and decoding
-    /// only the ones we need. This is of course slower than seeking to closest keyframe, but
-    /// can be more accurate when the video's metadata is not reliable.
+    /// only the ones we need. This can be more accurate when the video's metadata is not reliable,
+    /// or when the video has B-frames.
     pub fn get_batch_safe(mut self, indices: Vec<usize>) -> Result<VideoArray, ffmpeg::Error> {
         let first_index = self.first_frame.unwrap_or(0);
         let last_index = self.last_frame.unwrap_or(self.stream_info.frame_count - 1);
-        // check if first_index is after the first keyframe, if so we can seek
+        // check if closest key frames to first_index is non zero, if so we can seek
         let key_pos = self.locate_keyframes(&first_index, &self.stream_info.key_frames);
         if key_pos > 0 {
             let frame_duration = (1. / self.decoder.fps * 1_000.0).round() as usize;
@@ -796,7 +786,7 @@ impl VideoReader {
         match self.reducer {
             Some(mut reducer) => {
                 if key_pos > 0 {
-                    reducer.frame_index = key_pos;
+                    reducer.frame_index = self.curr_frame;
                 }
 
                 for (stream, packet) in self.ictx.packets() {
@@ -829,10 +819,9 @@ impl VideoReader {
                 let _ = indices
                     .iter()
                     .enumerate()
-                    .map(|(i, idx)| {
-                        frame_batch
-                            .slice_mut(s![i, .., .., ..])
-                            .assign(frame_map.get(idx).unwrap())
+                    .map(|(i, idx)| match frame_map.get(idx) {
+                        Some(frame) => frame_batch.slice_mut(s![i, .., .., ..]).assign(frame),
+                        None => debug!("No frame found for {}", idx),
                     })
                     .collect::<Vec<_>>();
 
@@ -869,14 +858,6 @@ impl VideoReader {
         Ok(video_frames)
     }
 
-    /// How many frames we need to skip to go from current decoding index `curr_dec_idx`
-    /// to `target_dec_index`. The `frame_index` argument corresponds to the presentation
-    /// index, while we need to know the number of frames to skip in terms of decoding index.
-    pub fn get_num_skip(&self, frame_index: &usize) -> usize {
-        let target_dec_idx = self.stream_info.decode_order.get(frame_index).unwrap();
-        target_dec_idx.saturating_sub(self.curr_dec_idx)
-    }
-
     pub fn seek_accurate(
         &mut self,
         frame_index: usize,
@@ -893,8 +874,7 @@ impl VideoReader {
             self.skip_frames(num_skip, &frame_index, frame_array)?;
         } else {
             if key_pos < curr_key_pos {
-                self.ictx.seek(0, ..100)?;
-                self.avflushbuf()?;
+                self.seek_to_start()?;
             }
             self.seek_frame(&key_pos, frame_duration)?;
             let num_skip = self.get_num_skip(&frame_index);
@@ -903,9 +883,27 @@ impl VideoReader {
         Ok(())
     }
 
+    /// Find the closest key frame before `pos`
     pub fn locate_keyframes(&self, pos: &usize, key_frames: &[usize]) -> usize {
         let key_pos = key_frames.iter().filter(|e| pos >= *e).max().unwrap_or(&0);
         key_pos.to_owned()
+    }
+
+    /// How many frames we need to skip to go from current decoding index `curr_dec_idx`
+    /// to `target_dec_index`. The `frame_index` argument corresponds to the presentation
+    /// index, while we need to know the number of frames to skip in terms of decoding index.
+    pub fn get_num_skip(&self, frame_index: &usize) -> usize {
+        let target_dec_idx = self.stream_info.decode_order.get(frame_index).unwrap();
+        target_dec_idx.saturating_sub(self.curr_dec_idx)
+    }
+
+    /// Seek back to the begining of the stream
+    fn seek_to_start(&mut self) -> Result<(), ffmpeg::Error> {
+        self.ictx.seek(0, ..100)?;
+        self.avflushbuf()?;
+        self.curr_dec_idx = 0;
+        self.curr_frame = 0;
+        Ok(())
     }
 
     pub fn skip_frames(
@@ -963,29 +961,16 @@ impl VideoReader {
     // AVSEEK_FLAG_BACKWARD 1 <- seek backward
     // AVSEEK_FLAG_BYTE 2 <- seeking based on position in bytes
     // AVSEEK_FLAG_ANY 4 <- seek to any frame, even non-key frames
-    // AVSEEK_FLAG_FRAME 8 <- seeking baseed on frame number
+    // AVSEEK_FLAG_FRAME 8 <- seeking based on frame number
     pub fn seek_frame(&mut self, pos: &usize, frame_duration: &usize) -> Result<(), ffmpeg::Error> {
         let frame_ts = match self.stream_info.frame_times.iter().nth(*pos) {
             Some((_, fr_ts)) => fr_ts.pts,
             None => (pos * frame_duration) as i64,
         };
 
-        let mut flag = 0;
-        if pos < &self.curr_dec_idx {
-            flag = AVSEEK_FLAG_BACKWARD;
-        }
-        match self.avseekframe(pos, frame_ts, flag) {
+        match self.avseekframe(pos, frame_ts, AVSEEK_FLAG_BACKWARD) {
             Ok(()) => Ok(()),
-            Err(_) => {
-                if flag != 0 {
-                    match self.avseekframe(pos, frame_ts, AVSEEK_FLAG_BACKWARD) {
-                        Ok(()) => Ok(()),
-                        Err(_) => self.avseekframe(pos, *pos as i64, AVSEEK_FLAG_FRAME),
-                    }
-                } else {
-                    self.avseekframe(pos, *pos as i64, AVSEEK_FLAG_FRAME)
-                }
-            }
+            Err(_) => self.avseekframe(pos, *pos as i64, AVSEEK_FLAG_FRAME),
         }
     }
     pub fn avseekframe(
