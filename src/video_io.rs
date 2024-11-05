@@ -91,13 +91,13 @@ fn setup_decoder_context(
 fn collect_video_metadata(
     video: &ffmpeg::decoder::Video,
     params: &VideoParams,
+    fps: &f64,
 ) -> HashMap<&'static str, String> {
     let mut info = HashMap::new();
 
-    info.insert(
-        "fps",
-        video.frame_rate().unwrap_or(Rational(0, 0)).to_string(),
-    );
+    let fps_rational = video.frame_rate().unwrap_or(Rational(0, 1));
+    info.insert("fps_rational", fps_rational.to_string());
+    info.insert("fps", format!("{}", fps));
     info.insert("start_time", params.start_time.to_string());
     info.insert("time_base", params.time_base.to_string());
     info.insert("duration", params.duration.to_string());
@@ -117,6 +117,7 @@ fn collect_video_metadata(
     info.insert("chroma_location", format!("{:?}", video.chroma_location()));
     info.insert("vid_ref", video.references().to_string());
     info.insert("intra_dc_precision", video.intra_dc_precision().to_string());
+    info.insert("has_b_frames", format!("{}", video.has_b_frames()));
 
     info
 }
@@ -339,13 +340,13 @@ impl VideoReader {
             .best(Type::Video)
             .ok_or(ffmpeg::Error::StreamNotFound)?;
 
-        let fps = f64::from(input.avg_frame_rate()).round();
+        let fps = f64::from(input.avg_frame_rate());
         let video_params = extract_video_params(&input);
 
         let decoder_context = setup_decoder_context(&input, config.threads)?;
         let video = decoder_context.decoder().video()?;
 
-        let video_info = collect_video_metadata(&video, &video_params);
+        let video_info = collect_video_metadata(&video, &video_params, &fps);
 
         let (height, width) = match config.resize_shorter_side {
             Some(resize) => get_resized_dim(video.height() as f64, video.width() as f64, resize),
