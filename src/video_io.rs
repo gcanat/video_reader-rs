@@ -20,12 +20,6 @@ use yuvutils_rs::{yuv420_to_rgb, YuvRange, YuvStandardMatrix};
 
 pub type FrameArray = Array3<u8>;
 pub type VideoArray = Array4<u8>;
-pub type DecoderBundle = (
-    VideoDecoder,
-    Option<VideoReducer>,
-    Option<usize>,
-    Option<usize>,
-);
 
 struct VideoParams {
     duration: f64,
@@ -37,10 +31,6 @@ struct VideoParams {
 pub struct DecoderConfig {
     threads: usize,
     resize_shorter_side: Option<f64>,
-    compression_factor: Option<f64>,
-    with_reducer: bool,
-    start_frame: Option<usize>,
-    end_frame: Option<usize>,
     pixel_format: Option<AvPixel>,
 }
 
@@ -48,19 +38,11 @@ impl DecoderConfig {
     pub fn new(
         threads: usize,
         resize_shorter_side: Option<f64>,
-        compression_factor: Option<f64>,
-        with_reducer: bool,
-        start_frame: Option<usize>,
-        end_frame: Option<usize>,
         pixel_format: Option<AvPixel>,
     ) -> Self {
         Self {
             threads,
             resize_shorter_side,
-            compression_factor,
-            with_reducer,
-            start_frame,
-            end_frame,
             pixel_format,
         }
     }
@@ -123,15 +105,15 @@ fn collect_video_metadata(
 }
 
 fn create_video_reducer(
-    start_frame: Option<&usize>,
-    end_frame: Option<&usize>,
+    start_frame: Option<usize>,
+    end_frame: Option<usize>,
     frame_count: usize,
     compression_factor: Option<f64>,
     height: u32,
     width: u32,
 ) -> (Option<VideoReducer>, Option<usize>, Option<usize>) {
-    let start = *start_frame.unwrap_or(&0);
-    let end = *end_frame.unwrap_or(&frame_count).min(&frame_count);
+    let start = start_frame.unwrap_or(0);
+    let end = end_frame.unwrap_or(frame_count).min(frame_count);
 
     let n_frames = ((end - start) as f64 * compression_factor.unwrap_or(1.0)).round() as usize;
 
@@ -163,10 +145,9 @@ pub struct VideoReader {
     curr_dec_idx: usize,
     n_fails: usize,
     decoder: VideoDecoder,
-    reducer: Option<VideoReducer>,
-    first_frame: Option<usize>,
-    last_frame: Option<usize>,
 }
+
+unsafe impl Send for VideoReader {}
 
 impl VideoReader {
     pub fn decoder(&self) -> &VideoDecoder {
@@ -187,9 +168,14 @@ pub struct VideoDecoder {
     video_info: HashMap<&'static str, String>,
 }
 
+unsafe impl Send for VideoDecoder {}
+
 impl VideoDecoder {
     pub fn video_info(&self) -> &HashMap<&'static str, String> {
         &self.video_info
+    }
+    pub fn fps(&self) -> f64 {
+        self.fps
     }
     pub fn video(&self) -> &ffmpeg::decoder::Video {
         &self.video
@@ -197,6 +183,7 @@ impl VideoDecoder {
 }
 
 /// Struct used when we want to decode the whole video with a compression_factor
+#[derive(Clone)]
 pub struct VideoReducer {
     indices: Vec<usize>,
     frame_index: usize,
@@ -312,8 +299,7 @@ impl VideoReader {
     ) -> Result<VideoReader, ffmpeg::Error> {
         let (mut ictx, stream_index) = get_init_context(&filename)?;
         let stream_info = get_frame_count(&mut ictx, &stream_index)?;
-        let (decoder, reducer, first_frame, last_frame) =
-            Self::get_decoder(&ictx, stream_info.frame_count, decoder_config)?;
+        let decoder = Self::get_decoder(&ictx, decoder_config)?;
         debug!("frame_count: {}", stream_info.frame_count);
         debug!("key frames: {:?}", stream_info.key_frames);
         Ok(VideoReader {
@@ -324,17 +310,13 @@ impl VideoReader {
             curr_dec_idx: 0,
             n_fails: 0,
             decoder,
-            reducer,
-            first_frame,
-            last_frame,
         })
     }
 
     pub fn get_decoder(
         ictx: &ffmpeg::format::context::Input,
-        frame_count: usize,
         config: DecoderConfig,
-    ) -> Result<DecoderBundle, ffmpeg::Error> {
+    ) -> Result<VideoDecoder, ffmpeg::Error> {
         let input = ictx
             .streams()
             .best(Type::Video)
@@ -363,36 +345,31 @@ impl VideoReader {
             Flags::BILINEAR,
         )?;
 
-        let (reducer, first_frame, last_frame) = if config.with_reducer {
-            create_video_reducer(
-                config.start_frame.as_ref(),
-                config.end_frame.as_ref(),
-                frame_count,
-                config.compression_factor,
-                height,
-                width,
-            )
-        } else {
-            (None, None, None)
-        };
-
-        Ok((
-            VideoDecoder {
-                video,
-                scaler,
-                height,
-                width,
-                fps,
-                video_info,
-            },
-            reducer,
-            first_frame,
-            last_frame,
-        ))
+        Ok(VideoDecoder {
+            video,
+            scaler,
+            height,
+            width,
+            fps,
+            video_info,
+        })
     }
 
-    pub fn decode_video(mut self) -> Result<VideoArray, ffmpeg::Error> {
-        let first_index = self.first_frame.unwrap_or(0);
+    pub fn decode_video(
+        &mut self,
+        start_frame: Option<usize>,
+        end_frame: Option<usize>,
+        compression_factor: Option<f64>,
+    ) -> Result<VideoArray, ffmpeg::Error> {
+        let (reducer, start_frame, _end_frame) = create_video_reducer(
+            start_frame,
+            end_frame,
+            self.stream_info.frame_count,
+            compression_factor,
+            self.decoder.height,
+            self.decoder.width,
+        );
+        let first_index = start_frame.unwrap_or(0);
         // check if first_index is after the first keyframe, if so we can seek
         if self
             .stream_info
@@ -403,40 +380,49 @@ impl VideoReader {
         {
             let frame_duration = (1. / self.decoder.fps * 1_000.0).round() as usize;
             let key_pos = self.locate_keyframes(&first_index, &self.stream_info.key_frames);
-            // self.seek_accurate(first_index, &frame_duration, &mut first_frame.view_mut())?;
             self.seek_frame(&key_pos, &frame_duration)?;
             self.curr_frame = key_pos;
         }
-        match self.reducer {
-            Some(mut reducer) => {
-                reducer.frame_index = self.curr_frame;
-                for (stream, packet) in self.ictx.packets() {
-                    if &reducer.frame_index > reducer.indices.iter().max().unwrap_or(&0) {
-                        break;
-                    }
-                    if stream.index() == self.stream_index {
-                        self.decoder.video.send_packet(&packet)?;
-                        self.decoder
-                            .receive_and_process_decoded_frames(&mut reducer)?;
-                    } else {
-                        debug!("Packet for another stream");
-                    }
-                }
-                self.decoder.video.send_eof()?;
-                // only process the remaining frames if we haven't reached the last frame
-                if !reducer.indices.is_empty()
-                    && (&reducer.frame_index <= reducer.indices.iter().max().unwrap_or(&0))
-                {
-                    self.decoder
-                        .receive_and_process_decoded_frames(&mut reducer)?;
-                }
-                Ok(reducer.full_video)
+
+        let mut reducer = reducer.unwrap();
+        reducer.frame_index = self.curr_frame;
+        for (stream, packet) in self.ictx.packets() {
+            if &reducer.frame_index > reducer.indices.iter().max().unwrap_or(&0) {
+                break;
             }
-            None => panic!("No Reducer to get the frames"),
+            if stream.index() == self.stream_index {
+                self.decoder.video.send_packet(&packet)?;
+                self.decoder
+                    .receive_and_process_decoded_frames(&mut reducer)?;
+            } else {
+                debug!("Packet for another stream");
+            }
         }
+        self.decoder.video.send_eof()?;
+        // only process the remaining frames if we haven't reached the last frame
+        if !reducer.indices.is_empty()
+            && (&reducer.frame_index <= reducer.indices.iter().max().unwrap_or(&0))
+        {
+            self.decoder
+                .receive_and_process_decoded_frames(&mut reducer)?;
+        }
+        Ok(reducer.full_video)
     }
-    pub async fn decode_video_fast(mut self) -> Result<Vec<FrameArray>, ffmpeg::Error> {
-        let first_index = self.first_frame.unwrap_or(0);
+    pub async fn decode_video_fast(
+        &mut self,
+        start_frame: Option<usize>,
+        end_frame: Option<usize>,
+        compression_factor: Option<f64>,
+    ) -> Result<Vec<FrameArray>, ffmpeg::Error> {
+        let (reducer, start_frame, _) = create_video_reducer(
+            start_frame,
+            end_frame,
+            self.stream_info.frame_count,
+            compression_factor,
+            self.decoder.height,
+            self.decoder.width,
+        );
+        let first_index = start_frame.unwrap_or(0);
         if self
             .stream_info
             .key_frames
@@ -451,64 +437,56 @@ impl VideoReader {
             // seek to closest key frame before first_index
             self.seek_frame(&key_pos, &frame_duration)?;
         }
-        match self.reducer {
-            Some(mut reducer) => {
-                reducer.frame_index = self.curr_frame;
-                let mut tasks = vec![];
 
-                let mut receive_and_process_decoded_frames =
-                    |decoder: &mut ffmpeg::decoder::Video,
-                     mut curr_frame: usize|
-                     -> Result<usize, ffmpeg::Error> {
-                        let mut decoded = Video::empty();
-                        while decoder.receive_frame(&mut decoded).is_ok() {
-                            if reducer.indices.iter().any(|x| x == &curr_frame) {
-                                let mut rgb_frame = Video::empty();
-                                self.decoder.scaler.run(&decoded, &mut rgb_frame).unwrap();
-                                tasks.push(task::spawn(async move {
-                                    convert_yuv_to_ndarray_rgb24(rgb_frame)
-                                }));
-                            }
-                            curr_frame += 1;
-                        }
-                        Ok(curr_frame)
-                    };
+        let mut reducer = reducer.unwrap();
+        reducer.frame_index = self.curr_frame;
+        let mut tasks = vec![];
 
-                for (stream, packet) in self.ictx.packets() {
-                    if &self.curr_frame > reducer.indices.iter().max().unwrap_or(&0) {
-                        break;
-                    }
-                    if stream.index() == self.stream_index {
-                        self.decoder.video.send_packet(&packet)?;
-                        let upd_curr_frame = receive_and_process_decoded_frames(
-                            &mut self.decoder.video,
-                            self.curr_frame,
-                        )?;
-                        self.curr_frame = upd_curr_frame;
-                    } else {
-                        debug!("Packet for another stream");
-                    }
+        let mut receive_and_process_decoded_frames = |decoder: &mut ffmpeg::decoder::Video,
+                                                      mut curr_frame: usize|
+         -> Result<usize, ffmpeg::Error> {
+            let mut decoded = Video::empty();
+            while decoder.receive_frame(&mut decoded).is_ok() {
+                if reducer.indices.iter().any(|x| x == &curr_frame) {
+                    let mut rgb_frame = Video::empty();
+                    self.decoder.scaler.run(&decoded, &mut rgb_frame).unwrap();
+                    tasks.push(task::spawn(async move {
+                        convert_yuv_to_ndarray_rgb24(rgb_frame)
+                    }));
                 }
-                self.decoder.video.send_eof()?;
-                // only process the remaining frames if we haven't reached the last frame
-                if !reducer.indices.is_empty()
-                    && (&self.curr_frame <= reducer.indices.iter().max().unwrap_or(&0))
-                {
-                    let upd_curr_frame = receive_and_process_decoded_frames(
-                        &mut self.decoder.video,
-                        self.curr_frame,
-                    )?;
-                    self.curr_frame = upd_curr_frame;
-                }
-
-                let mut outputs = Vec::with_capacity(tasks.len());
-                for task_ in tasks {
-                    outputs.push(task_.await.unwrap());
-                }
-                Ok(outputs)
+                curr_frame += 1;
             }
-            None => panic!("No Reducer to get the frames"),
+            Ok(curr_frame)
+        };
+
+        for (stream, packet) in self.ictx.packets() {
+            if &self.curr_frame > reducer.indices.iter().max().unwrap_or(&0) {
+                break;
+            }
+            if stream.index() == self.stream_index {
+                self.decoder.video.send_packet(&packet)?;
+                let upd_curr_frame =
+                    receive_and_process_decoded_frames(&mut self.decoder.video, self.curr_frame)?;
+                self.curr_frame = upd_curr_frame;
+            } else {
+                debug!("Packet for another stream");
+            }
         }
+        self.decoder.video.send_eof()?;
+        // only process the remaining frames if we haven't reached the last frame
+        if !reducer.indices.is_empty()
+            && (&self.curr_frame <= reducer.indices.iter().max().unwrap_or(&0))
+        {
+            let upd_curr_frame =
+                receive_and_process_decoded_frames(&mut self.decoder.video, self.curr_frame)?;
+            self.curr_frame = upd_curr_frame;
+        }
+
+        let mut outputs = Vec::with_capacity(tasks.len());
+        for task_ in tasks {
+            outputs.push(task_.await.unwrap());
+        }
+        Ok(outputs)
     }
 }
 
@@ -773,62 +751,65 @@ impl VideoReader {
     /// Safely get the batch of frames from the video by iterating over all frames and decoding
     /// only the ones we need. This can be more accurate when the video's metadata is not reliable,
     /// or when the video has B-frames.
-    pub fn get_batch_safe(mut self, indices: Vec<usize>) -> Result<VideoArray, ffmpeg::Error> {
-        let first_index = self.first_frame.unwrap_or(0);
-        let last_index = self.last_frame.unwrap_or(self.stream_info.frame_count - 1);
+    pub fn get_batch_safe(&mut self, indices: Vec<usize>) -> Result<VideoArray, ffmpeg::Error> {
+        let first_index = indices.iter().min().unwrap_or(&0);
+        let max_index = self.stream_info.frame_count - 1;
+        let last_index = indices.iter().max().unwrap_or(&max_index);
+        let (reducer, _, _) = create_video_reducer(
+            Some(*first_index),
+            Some(*last_index),
+            self.stream_info.frame_count,
+            None,
+            self.decoder.height,
+            self.decoder.width,
+        );
         // check if closest key frames to first_index is non zero, if so we can seek
-        let key_pos = self.locate_keyframes(&first_index, &self.stream_info.key_frames);
+        let key_pos = self.locate_keyframes(first_index, &self.stream_info.key_frames);
         if key_pos > 0 {
             let frame_duration = (1. / self.decoder.fps * 1_000.0).round() as usize;
             self.seek_frame(&key_pos, &frame_duration)?;
         }
         let mut frame_map: HashMap<usize, FrameArray> = HashMap::new();
-        match self.reducer {
-            Some(mut reducer) => {
-                if key_pos > 0 {
-                    reducer.frame_index = self.curr_frame;
-                }
 
-                for (stream, packet) in self.ictx.packets() {
-                    if stream.index() == self.stream_index {
-                        self.decoder.video.send_packet(&packet)?;
-                        self.decoder.skip_and_decode_frames(
-                            &mut reducer,
-                            &indices,
-                            &mut frame_map,
-                        )?;
-                    } else {
-                        debug!("Packet for another stream");
-                    }
-                    if reducer.frame_index > last_index {
-                        break;
-                    }
-                }
-                self.decoder.video.send_eof()?;
-                if reducer.frame_index <= last_index {
-                    self.decoder
-                        .skip_and_decode_frames(&mut reducer, &indices, &mut frame_map)?;
-                }
-
-                let mut frame_batch: VideoArray = Array4::zeros((
-                    indices.len(),
-                    self.decoder.height as usize,
-                    self.decoder.width as usize,
-                    3,
-                ));
-                let _ = indices
-                    .iter()
-                    .enumerate()
-                    .map(|(i, idx)| match frame_map.get(idx) {
-                        Some(frame) => frame_batch.slice_mut(s![i, .., .., ..]).assign(frame),
-                        None => debug!("No frame found for {}", idx),
-                    })
-                    .collect::<Vec<_>>();
-
-                Ok(frame_batch)
-            }
-            None => panic!("No Reducer to get the frames"),
+        let mut reducer = reducer.unwrap();
+        if key_pos > 0 {
+            reducer.frame_index = self.curr_frame;
         }
+
+        for (stream, packet) in self.ictx.packets() {
+            if stream.index() == self.stream_index {
+                self.decoder.video.send_packet(&packet)?;
+                self.decoder
+                    .skip_and_decode_frames(&mut reducer, &indices, &mut frame_map)?;
+            } else {
+                debug!("Packet for another stream");
+            }
+            if &reducer.frame_index > last_index {
+                break;
+            }
+        }
+        self.decoder.video.send_eof()?;
+        if &reducer.frame_index <= last_index {
+            self.decoder
+                .skip_and_decode_frames(&mut reducer, &indices, &mut frame_map)?;
+        }
+
+        let mut frame_batch: VideoArray = Array4::zeros((
+            indices.len(),
+            self.decoder.height as usize,
+            self.decoder.width as usize,
+            3,
+        ));
+        let _ = indices
+            .iter()
+            .enumerate()
+            .map(|(i, idx)| match frame_map.get(idx) {
+                Some(frame) => frame_batch.slice_mut(s![i, .., .., ..]).assign(frame),
+                None => debug!("No frame found for {}", idx),
+            })
+            .collect::<Vec<_>>();
+
+        Ok(frame_batch)
     }
 
     /// Get the batch of frames from the video by seeking to the closest keyframe and skipping
