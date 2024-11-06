@@ -3,7 +3,7 @@ from pathlib import Path
 from time import time
 
 import numpy as np
-import video_reader
+from video_reader import PyVideoReader
 from decord import VideoReader
 from tqdm import tqdm
 
@@ -18,7 +18,8 @@ def parse_args():
 
 def bench_get_batch(filename: str, indices: np.ndarray):
     start = time()
-    vid = video_reader.get_batch(filename, indices, 0, None, with_fallback=True)
+    vr = PyVideoReader(filename, threads=1)
+    vid = vr.get_batch(indices, with_fallback=True)
     duration = time() - start
     return vid, duration
 
@@ -36,8 +37,8 @@ def test_single_file(filename: str, batch_size: int = 32, num_batches: int = 5):
     num_frames = len(vr)
     batch_sizes = [batch_size] * num_batches
     batch_indices = [np.random.randint(0, num_frames, x) for x in batch_sizes]
-    # ground_truth = vr[:].asnumpy()
-    ground_truth = video_reader.decode(filename)
+    ground_truth = vr[:].asnumpy()
+    # ground_truth = video_reader.decode(filename)
 
     dec_durations = []
     vidrs_durations = []
