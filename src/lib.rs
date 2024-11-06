@@ -33,6 +33,14 @@ struct PyVideoReader {
 impl PyVideoReader {
     #[new]
     #[pyo3(signature = (filename, threads=None, resize_shorter_side=None, pixel_format="rgb24"))]
+    /// create an instance of VideoReader
+    /// * `filename` - path to the video file
+    /// * `threads` - number of threads to use. If None, let ffmpeg choose the optimal number.
+    /// * `resize_shorter_side - Optional, resize shorted side of the video to this value while
+    /// preserving the aspect ratio.
+    /// * `pixel_format` - pixel format to use for the ffmpeg scaler. If you are going to use the
+    /// `decode_fast` method, you must set this to "yuv420".
+    /// * returns a PyVideoReader instance.
     fn new(
         filename: &str,
         threads: Option<usize>,
@@ -52,6 +60,9 @@ impl PyVideoReader {
             Err(e) => Err(PyRuntimeError::new_err(format!("Error: {}", e))),
         }
     }
+
+    /// Returns the dict with metadata information of the video. All values in the dict
+    /// are strings.
     fn get_info<'a>(&'a self, py: Python<'a>) -> PyResult<Bound<PyDict>> {
         match self.inner.lock() {
             Ok(vr) => {
@@ -62,6 +73,8 @@ impl PyVideoReader {
             Err(e) => Err(PyRuntimeError::new_err(format!("Lock error: {}", e))),
         }
     }
+
+    /// Returns the average fps of the video as float.
     fn get_fps<'a>(&'a self, py: Python<'a>) -> PyResult<Bound<PyFloat>> {
         match self.inner.lock() {
             Ok(vr) => {
@@ -72,7 +85,7 @@ impl PyVideoReader {
         }
     }
 
-    /// Get shape of the video: number of frames, height and width
+    /// Get shape of the video: [number of frames, height and width]
     fn get_shape<'a>(&'a self, py: Python<'a>) -> PyResult<Bound<PyList>> {
         match self.inner.lock() {
             Ok(vr) => {
@@ -87,6 +100,12 @@ impl PyVideoReader {
     }
 
     #[pyo3(signature = (start_frame=None, end_frame=None, compression_factor=None))]
+    /// Decode the video.
+    /// * `start_frame` - optional starting index (will start decoding from this frame)
+    /// * `end_frame` - optional last frame index (will stop decoding after this frame)
+    /// * `compression_factor` - optional temporal compression, eg if set to 0.25, will
+    /// decode 1 frame out of 4. If None, will default to 1.0, ie decoding all frames.
+    /// * returns a numpy array of shape (N, H, W, C), where N is the number of frames
     fn decode<'a>(
         &'a self,
         py: Python<'a>,
@@ -105,6 +124,13 @@ impl PyVideoReader {
     }
 
     #[pyo3(signature = (start_frame=None, end_frame=None, compression_factor=None))]
+    /// Decode the video using YUV420P format in the ffmpeg scaler followed by asynchronous
+    /// YUV to RGB conversion. Can be must faster than `decode()` for High Res videos.
+    /// * `start_frame` - optional starting index (will start decoding from this frame)
+    /// * `end_frame` - optional last frame index (will stop decoding after this frame)
+    /// * `compression_factor` - optional temporal compression, eg if set to 0.25, will
+    /// decode 1 frame out of 4. If None, will default to 1.0, ie decoding all frames.
+    /// * returns a list of numpy array, each ndarray being a frame.
     fn decode_fast<'a>(
         &'a self,
         py: Python<'a>,
@@ -130,6 +156,12 @@ impl PyVideoReader {
     }
 
     #[pyo3(signature = (start_frame=None, end_frame=None, compression_factor=None))]
+    /// Decode the video, returning grayscale frames.
+    /// * `start_frame` - optional starting index (will start decoding from this frame)
+    /// * `end_frame` - optional last frame index (will stop decoding after this frame)
+    /// * `compression_factor` - optional temporal compression, eg if set to 0.25, will
+    /// decode 1 frame out of 4. If None, will default to 1.0, ie decoding all frames.
+    /// * returns a numpy array of shape (N, H, W), where N is the number of frames.
     fn decode_gray<'a>(
         &'a self,
         py: Python<'a>,
@@ -151,6 +183,10 @@ impl PyVideoReader {
     }
 
     #[pyo3(signature = (indices, with_fallback=false))]
+    /// Decodes the frames in the video corresponding to the indices in `indices`.
+    /// * `indices` - list of frame index to decode.
+    /// * `with_fallback` - whether to fallback to safe decoding when video has weird
+    /// timestamps or B-frames.
     fn get_batch<'a>(
         &'a self,
         py: Python<'a>,
@@ -214,15 +250,6 @@ fn video_reader<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()>
 
     // Add the VideoReader class to the module
     m.add_class::<PyVideoReader>()?;
-
-    // /// Get shape of the video: number of frames, height and width
-    // fn get_shape(filename: &String) -> Result<(usize, usize, usize), ffmpeg::Error> {
-    //     let vr = VideoReader::new(filename.to_owned(), DecoderConfig::default())?;
-    //     let width = vr.decoder().video().width() as usize;
-    //     let height = vr.decoder().video().height() as usize;
-    //     let num_frames = vr.stream_info().frame_count();
-    //     Ok((*num_frames, height, width))
-    // }
 
     // wrapper of `save_video`
     /// Save 4D np.ndarray of frames to video file
