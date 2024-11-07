@@ -1,8 +1,7 @@
-use ffmpeg::format::Pixel as AvPixel;
-use ffmpeg_next as ffmpeg;
 use numpy::ndarray::Dim;
 use numpy::{IntoPyArray, PyArray, PyReadonlyArray4};
 mod video_io;
+use log::debug;
 use pyo3::{
     exceptions::PyRuntimeError,
     pyclass, pymethods, pymodule,
@@ -32,27 +31,19 @@ struct PyVideoReader {
 #[pymethods]
 impl PyVideoReader {
     #[new]
-    #[pyo3(signature = (filename, threads=None, resize_shorter_side=None, pixel_format="rgb24"))]
+    #[pyo3(signature = (filename, threads=None, resize_shorter_side=None))]
     /// create an instance of VideoReader
     /// * `filename` - path to the video file
     /// * `threads` - number of threads to use. If None, let ffmpeg choose the optimal number.
     /// * `resize_shorter_side - Optional, resize shorted side of the video to this value while
     /// preserving the aspect ratio.
-    /// * `pixel_format` - pixel format to use for the ffmpeg scaler. If you are going to use the
-    /// `decode_fast` method, you must set this to "yuv420".
     /// * returns a PyVideoReader instance.
     fn new(
         filename: &str,
         threads: Option<usize>,
         resize_shorter_side: Option<f64>,
-        pixel_format: &str,
     ) -> PyResult<Self> {
-        let pixel_format = match pixel_format {
-            "yuv420" => Some(AvPixel::YUV420P),
-            _ => None,
-        };
-        let decoder_config =
-            DecoderConfig::new(threads.unwrap_or(0), resize_shorter_side, pixel_format);
+        let decoder_config = DecoderConfig::new(threads.unwrap_or(0), resize_shorter_side);
         match VideoReader::new(filename.to_string(), decoder_config) {
             Ok(reader) => Ok(PyVideoReader {
                 inner: Mutex::new(reader),
@@ -228,6 +219,7 @@ impl PyVideoReader {
                         || (first_key.dts() < &0)
                         || start_time > 0)
                 {
+                    debug!("Switching to get_batch_safe!");
                     match vr.get_batch_safe(indices) {
                         Ok(batch) => Ok(batch.into_pyarray_bound(py)),
                         Err(e) => Err(PyRuntimeError::new_err(format!("Error: {}", e))),
