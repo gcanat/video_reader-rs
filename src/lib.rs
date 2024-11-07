@@ -3,6 +3,7 @@ use ffmpeg_next as ffmpeg;
 use numpy::ndarray::Dim;
 use numpy::{IntoPyArray, PyArray, PyReadonlyArray4};
 mod video_io;
+use log::debug;
 use pyo3::{
     exceptions::PyRuntimeError,
     pyclass, pymethods, pymodule,
@@ -228,6 +229,7 @@ impl PyVideoReader {
                         || (first_key.dts() < &0)
                         || start_time > 0)
                 {
+                    debug!("Switching to get_batch_safe!");
                     match vr.get_batch_safe(indices) {
                         Ok(batch) => Ok(batch.into_pyarray_bound(py)),
                         Err(e) => Err(PyRuntimeError::new_err(format!("Error: {}", e))),

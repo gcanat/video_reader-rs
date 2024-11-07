@@ -370,6 +370,10 @@ impl VideoReader {
             self.decoder.width,
         );
         let first_index = start_frame.unwrap_or(0);
+
+        // make sure we are at the begining of the stream
+        self.seek_to_start()?;
+
         // check if first_index is after the first keyframe, if so we can seek
         if self
             .stream_info
@@ -423,6 +427,10 @@ impl VideoReader {
             self.decoder.width,
         );
         let first_index = start_frame.unwrap_or(0);
+
+        // make sure we are at the begining of the stream
+        self.seek_to_start()?;
+
         if self
             .stream_info
             .key_frames
@@ -763,6 +771,10 @@ impl VideoReader {
             self.decoder.height,
             self.decoder.width,
         );
+
+        // make sure we are at the begining of the stream
+        self.seek_to_start()?;
+
         // check if closest key frames to first_index is non zero, if so we can seek
         let key_pos = self.locate_keyframes(first_index, &self.stream_info.key_frames);
         if key_pos > 0 {
@@ -827,6 +839,9 @@ impl VideoReader {
         // duration of a frame in micro seconds
         let frame_duration = (1. / fps * 1_000.0).round() as usize;
 
+        // make sure we are at the begining of the stream
+        self.seek_to_start()?;
+
         for (idx_counter, frame_index) in indices.into_iter().enumerate() {
             self.n_fails = 0;
             debug!("[NEXT INDICE] frame_index: {frame_index}");
@@ -851,12 +866,15 @@ impl VideoReader {
         debug!("    - Curr key pos: {}", curr_key_pos);
         if (key_pos == curr_key_pos) & (frame_index > self.curr_frame) {
             // we can directly skip until frame_index
+            debug!("No need to seek, we can directly skip frames");
             let num_skip = self.get_num_skip(&frame_index);
             self.skip_frames(num_skip, &frame_index, frame_array)?;
         } else {
             if key_pos < curr_key_pos {
+                debug!("Seeking back to start");
                 self.seek_to_start()?;
             }
+            debug!("Seeking to key_pos: {}", key_pos);
             self.seek_frame(&key_pos, frame_duration)?;
             let num_skip = self.get_num_skip(&frame_index);
             self.skip_frames(num_skip, &frame_index, frame_array)?;
@@ -937,6 +955,10 @@ impl VideoReader {
             .decode_order
             .get(&self.curr_dec_idx)
             .unwrap_or(&self.stream_info.frame_count);
+        debug!(
+            "dec_idx: {}, curr_frame: {}",
+            self.curr_dec_idx, self.curr_frame
+        );
     }
 
     // AVSEEK_FLAG_BACKWARD 1 <- seek backward
