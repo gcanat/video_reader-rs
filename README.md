@@ -113,8 +113,7 @@ If you have some memory limitations that wont let you decode the entire video at
 from video_reader import PyVideoReader
 
 videoname = "/path/to/your/video.mp4"
-# must set pixel_format to "yuv420" to be able to use `decode_fast()`
-vr = PyVideoReader(videoname, pixel_format="yuv420")
+vr = PyVideoReader(videoname)
 
 chunk_size = 800 # adjust to fit within your memory limit
 video_length = vr.get_shape()[0]
