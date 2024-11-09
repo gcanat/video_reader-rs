@@ -16,7 +16,7 @@ use video_rs::time::Time;
 use ndarray::parallel::prelude::*;
 use ndarray::{s, stack, Array, Array2, Array3, Array4, ArrayView3, ArrayViewMut3, Axis};
 use tokio::task;
-use yuvutils_rs::{yuv420_to_rgb, YuvRange, YuvStandardMatrix};
+use yuvutils_rs::{yuv420_to_rgb, YuvRange, YuvStandardMatrix, YuvPlanarImage};
 
 pub type FrameArray = Array3<u8>;
 pub type VideoArray = Array4<u8>;
@@ -712,20 +712,23 @@ pub fn convert_yuv_to_ndarray_rgb24(mut frame: Video) -> Array3<u8> {
             let mut rgb = vec![0_u8; (frame_width * frame_height * 3) as usize];
             let cut_point1 = (frame_width * frame_height) as usize;
             let cut_point2 = cut_point1 + cut_point1 / 4;
+            let yuv_planar = YuvPlanarImage {
+                y_plane: &buf_vec[..cut_point1],
+                y_stride: frame_width as u32,
+                u_plane: &buf_vec[cut_point1..cut_point2],
+                u_stride: (frame_width / 2) as u32,
+                v_plane: &buf_vec[cut_point2..],
+                v_stride: (frame_width / 2) as u32,
+                width: frame_width as u32,
+                height: frame_height as u32,
+            };
             yuv420_to_rgb(
-                &buf_vec[..cut_point1],
-                frame_width as u32,
-                &buf_vec[cut_point1..cut_point2],
-                (frame_width / 2) as u32,
-                &buf_vec[cut_point2..],
-                (frame_width / 2) as u32,
+                &yuv_planar,
                 &mut rgb,
                 (frame_width * 3) as u32,
-                frame_width as u32,
-                frame_height as u32,
                 YuvRange::Full,
                 colorspace,
-            );
+            ).unwrap();
             Array3::from_shape_vec((frame_height as usize, frame_width as usize, 3_usize), rgb)
                 .unwrap()
         } else {
