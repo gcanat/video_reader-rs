@@ -54,7 +54,7 @@ impl PyVideoReader {
 
     /// Returns the dict with metadata information of the video. All values in the dict
     /// are strings.
-    fn get_info<'a>(&'a self, py: Python<'a>) -> PyResult<Bound<PyDict>> {
+    fn get_info<'a>(&'a self, py: Python<'a>) -> PyResult<Bound<'a, PyDict>> {
         match self.inner.lock() {
             Ok(vr) => {
                 let mut info_dict = vr.decoder().video_info().clone();
@@ -66,7 +66,7 @@ impl PyVideoReader {
     }
 
     /// Returns the average fps of the video as float.
-    fn get_fps<'a>(&'a self, py: Python<'a>) -> PyResult<Bound<PyFloat>> {
+    fn get_fps<'a>(&'a self, py: Python<'a>) -> PyResult<Bound<'a, PyFloat>> {
         match self.inner.lock() {
             Ok(vr) => {
                 let fps = vr.decoder().fps();
@@ -77,7 +77,7 @@ impl PyVideoReader {
     }
 
     /// Get shape of the video: [number of frames, height and width]
-    fn get_shape<'a>(&'a self, py: Python<'a>) -> PyResult<Bound<PyList>> {
+    fn get_shape<'a>(&'a self, py: Python<'a>) -> PyResult<Bound<'a, PyList>> {
         match self.inner.lock() {
             Ok(vr) => {
                 let width = vr.decoder().video().width() as usize;
@@ -103,7 +103,7 @@ impl PyVideoReader {
         start_frame: Option<usize>,
         end_frame: Option<usize>,
         compression_factor: Option<f64>,
-    ) -> PyResult<Bound<PyArray<u8, Dim<[usize; 4]>>>> {
+    ) -> PyResult<Bound<'a, PyArray<u8, Dim<[usize; 4]>>>> {
         match self.inner.lock() {
             Ok(mut reader) => match reader.decode_video(start_frame, end_frame, compression_factor)
             {
@@ -128,7 +128,7 @@ impl PyVideoReader {
         start_frame: Option<usize>,
         end_frame: Option<usize>,
         compression_factor: Option<f64>,
-    ) -> PyResult<Vec<Bound<Frame>>> {
+    ) -> PyResult<Vec<Bound<'a, Frame>>> {
         match self.inner.lock() {
             Ok(mut reader) => {
                 let res_decode = RUNTIME.block_on(async {
@@ -159,7 +159,7 @@ impl PyVideoReader {
         start_frame: Option<usize>,
         end_frame: Option<usize>,
         compression_factor: Option<f64>,
-    ) -> PyResult<Bound<PyArray<u8, Dim<[usize; 3]>>>> {
+    ) -> PyResult<Bound<'a, PyArray<u8, Dim<[usize; 3]>>>> {
         match self.inner.lock() {
             Ok(mut reader) => match reader.decode_video(start_frame, end_frame, compression_factor)
             {
@@ -183,7 +183,7 @@ impl PyVideoReader {
         py: Python<'a>,
         indices: Vec<usize>,
         with_fallback: bool,
-    ) -> PyResult<Bound<PyArray<u8, Dim<[usize; 4]>>>> {
+    ) -> PyResult<Bound<'a, PyArray<u8, Dim<[usize; 4]>>>> {
         match self.inner.lock() {
             Ok(mut vr) => {
                 // let video: Array4<u8>;
