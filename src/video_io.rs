@@ -190,7 +190,6 @@ pub struct FrameTime {
     pts: i64,
     dur: i64,
     dts: i64,
-    didx: usize,
 }
 
 impl FrameTime {
@@ -209,7 +208,7 @@ impl FrameTime {
 pub struct StreamInfo {
     frame_count: usize,
     key_frames: Vec<usize>,
-    frame_times: BTreeMap<i64, FrameTime>,
+    frame_times: BTreeMap<usize, FrameTime>,
     decode_order: HashMap<usize, usize>,
 }
 
@@ -220,7 +219,7 @@ impl StreamInfo {
     pub fn key_frames(&self) -> &Vec<usize> {
         &self.key_frames
     }
-    pub fn frame_times(&self) -> &BTreeMap<i64, FrameTime> {
+    pub fn frame_times(&self) -> &BTreeMap<usize, FrameTime> {
         &self.frame_times
     }
 }
@@ -531,15 +530,7 @@ pub fn get_frame_count(
             let pts = packet.pts().unwrap_or(0);
             let dur = packet.duration();
             let dts = packet.dts().unwrap_or(0);
-            frame_times.insert(
-                pts,
-                FrameTime {
-                    pts,
-                    dur,
-                    dts,
-                    didx,
-                },
-            );
+            frame_times.insert(didx, FrameTime { pts, dur, dts });
             if packet.is_key() {
                 key_frames.push(didx);
             }
@@ -550,7 +541,7 @@ pub fn get_frame_count(
     // mapping between decoding order and presentation order
     let mut decode_order: HashMap<usize, usize> = HashMap::new();
     for (idx, fr_info) in frame_times.iter().enumerate() {
-        decode_order.insert(fr_info.1.didx, idx);
+        decode_order.insert(*fr_info.0, idx);
     }
 
     // Seek back to the begining of the stream
@@ -911,8 +902,11 @@ impl VideoReader {
     /// to `target_dec_index`. The `frame_index` argument corresponds to the presentation
     /// index, while we need to know the number of frames to skip in terms of decoding index.
     pub fn get_num_skip(&self, frame_index: &usize) -> usize {
-        let target_dec_idx = self.stream_info.decode_order.get(frame_index).unwrap();
-        target_dec_idx.saturating_sub(self.curr_dec_idx)
+        let target_dec_idx = self.stream_info.decode_order.get(frame_index);
+        match target_dec_idx {
+            Some(v) => v.saturating_sub(self.curr_dec_idx),
+            None => *frame_index,
+        }
     }
 
     /// Seek back to the begining of the stream
