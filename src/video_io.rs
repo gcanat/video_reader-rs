@@ -248,16 +248,17 @@ impl StreamInfo {
     }
 }
 
-impl VideoDecoder {
-    fn download_frame(frame: &Video) -> Result<Video, ffmpeg::Error> {
-        let mut frame_downloaded = Video::empty();
-        frame_downloaded.set_format(HWACCEL_PIXEL_FORMAT);
-        hwdevice_transfer_frame(&mut frame_downloaded, frame)?;
-        unsafe {
-            av_frame_copy_props(frame_downloaded.as_mut_ptr(), frame.as_ptr());
-        }
-        Ok(frame_downloaded)
+fn download_frame(frame: &Video) -> Result<Video, ffmpeg::Error> {
+    let mut frame_downloaded = Video::empty();
+    frame_downloaded.set_format(HWACCEL_PIXEL_FORMAT);
+    hwdevice_transfer_frame(&mut frame_downloaded, frame)?;
+    unsafe {
+        av_frame_copy_props(frame_downloaded.as_mut_ptr(), frame.as_ptr());
     }
+    Ok(frame_downloaded)
+}
+
+impl VideoDecoder {
     /// Decode all frames that match the frame indices
     pub fn receive_and_process_decoded_frames(
         &mut self,
@@ -275,7 +276,7 @@ impl VideoDecoder {
 
                 // handle hardware frame if necessary
                 if self.hwaccel_context.is_some() {
-                    decoded = Self::download_frame(&decoded)?;
+                    decoded = download_frame(&decoded)?;
                 }
 
                 let mut rgb_frame = Video::empty();
@@ -899,6 +900,7 @@ impl VideoReader {
                 &frame_duration,
                 &mut video_frames.slice_mut(s![idx_counter, .., .., ..]),
                 &mut scaler,
+                self.decoder.hwaccel_context.is_some(),
             )?;
         }
         Ok(video_frames)
@@ -910,6 +912,7 @@ impl VideoReader {
         frame_duration: &usize,
         frame_array: &mut ArrayViewMut3<u8>,
         scaler: &mut Context,
+        is_hwaccel: bool,
     ) -> Result<(), ffmpeg::Error> {
         let key_pos = self.locate_keyframes(&frame_index, &self.stream_info.key_frames);
         debug!("    - Key pos: {}", key_pos);
@@ -919,7 +922,7 @@ impl VideoReader {
             // we can directly skip until frame_index
             debug!("No need to seek, we can directly skip frames");
             let num_skip = self.get_num_skip(&frame_index);
-            self.skip_frames(num_skip, &frame_index, frame_array, scaler)?;
+            self.skip_frames(num_skip, &frame_index, frame_array, scaler, is_hwaccel)?;
         } else {
             if key_pos < curr_key_pos {
                 debug!("Seeking back to start");
@@ -928,7 +931,7 @@ impl VideoReader {
             debug!("Seeking to key_pos: {}", key_pos);
             self.seek_frame(&key_pos, frame_duration)?;
             let num_skip = self.get_num_skip(&frame_index);
-            self.skip_frames(num_skip, &frame_index, frame_array, scaler)?;
+            self.skip_frames(num_skip, &frame_index, frame_array, scaler, is_hwaccel)?;
         }
         Ok(())
     }
@@ -965,6 +968,7 @@ impl VideoReader {
         frame_index: &usize,
         frame_array: &mut ArrayViewMut3<u8>,
         scaler: &mut Context,
+        is_hwaccel: bool,
     ) -> Result<(), ffmpeg::Error> {
         let num_skip = num.min(self.stream_info.frame_count - 1);
         debug!(
@@ -982,6 +986,10 @@ impl VideoReader {
                         let mut decoded = Video::empty();
                         while self.decoder.video.receive_frame(&mut decoded).is_ok() {
                             if &self.curr_frame == frame_index {
+                                // handle hardware frame if necessary
+                                if is_hwaccel {
+                                    decoded = download_frame(&decoded)?;
+                                }
                                 let mut rgb_frame = Video::empty();
                                 scaler.run(&decoded, &mut rgb_frame)?;
                                 convert_frame_to_ndarray_rgb24(&mut rgb_frame, frame_array)?;
