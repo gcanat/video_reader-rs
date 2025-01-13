@@ -1,3 +1,4 @@
+// from https://github.com/oddity-ai/video-rs/blob/main/src/ffi_hwaccel.rs
 extern crate ffmpeg_next as ffmpeg;
 
 use crate::hwaccel::HardwareAccelerationDeviceType;

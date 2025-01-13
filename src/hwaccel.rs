@@ -1,10 +1,10 @@
+// based on: https://github.com/oddity-ai/video-rs/blob/main/src/hwaccel.rs
 use ffmpeg_next as ffmpeg;
 use std::str::FromStr;
 
 use crate::ffi_hwaccel;
 
 pub(crate) struct HardwareAccelerationContext {
-    // pixel_format: ffmpeg::util::format::Pixel,
     _hardware_device_context: ffi_hwaccel::HardwareDeviceContext,
 }
 
@@ -23,18 +23,9 @@ impl HardwareAccelerationContext {
         ffi_hwaccel::codec_context_hwaccel_set_hw_device_ctx(decoder, &hardware_device_context);
 
         Ok(HardwareAccelerationContext {
-            // pixel_format,
             _hardware_device_context: hardware_device_context,
         })
     }
-
-    // pub(crate) fn format(&self) -> ffmpeg::util::format::Pixel {
-    //     self.pixel_format
-    // }
-    //
-    // pub(crate) fn get_device_ctx(self) -> ffi_hwaccel::HardwareDeviceContext {
-    //     self._hardware_device_context
-    // }
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
