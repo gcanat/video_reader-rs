@@ -50,10 +50,8 @@ impl PyVideoReader {
         resize_shorter_side: Option<f64>,
         hw_accel: Option<&str>,
     ) -> PyResult<Self> {
-        let hwaccel = match hw_accel {
-            Some(hw_str) => Some(HardwareAccelerationDeviceType::from_str(hw_str).unwrap()),
-            None => None,
-        };
+        let hwaccel =
+            hw_accel.map(|hw_str| HardwareAccelerationDeviceType::from_str(hw_str).unwrap());
         let decoder_config = DecoderConfig::new(threads.unwrap_or(0), resize_shorter_side, hwaccel);
         match VideoReader::new(filename.to_string(), decoder_config) {
             Ok(reader) => Ok(PyVideoReader {
