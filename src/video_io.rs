@@ -308,6 +308,9 @@ impl VideoDecoder {
         let mut decoded = Video::empty();
         while self.video.receive_frame(&mut decoded).is_ok() {
             if indices.iter().any(|x| x == &reducer.frame_index) {
+                if self.hwaccel_context.is_some() {
+                    decoded = download_frame(&decoded)?;
+                }
                 let mut rgb_frame = Video::empty();
                 let mut nd_frame =
                     FrameArray::zeros((self.height as usize, self.width as usize, 3_usize));
@@ -381,8 +384,13 @@ impl VideoReader {
     }
 
     pub fn get_scaler(&self, pix_fmt: AvPixel) -> Result<Context, ffmpeg::Error> {
+        let vid_format = if self.decoder.hwaccel_context.is_some() {
+            HWACCEL_PIXEL_FORMAT
+        } else {
+            self.decoder.video.format()
+        };
         let scaler = Context::get(
-            self.decoder.video.format(),
+            vid_format,
             self.decoder.video.width(),
             self.decoder.video.height(),
             pix_fmt,
@@ -498,6 +506,9 @@ impl VideoReader {
             let mut decoded = Video::empty();
             while decoder.receive_frame(&mut decoded).is_ok() {
                 if reducer.indices.iter().any(|x| x == &curr_frame) {
+                    if self.decoder.hwaccel_context.is_some() {
+                        decoded = download_frame(&decoded)?;
+                    }
                     let mut rgb_frame = Video::empty();
                     scaler.run(&decoded, &mut rgb_frame).unwrap();
                     tasks.push(task::spawn(async move {
