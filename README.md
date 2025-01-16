@@ -57,6 +57,8 @@ from video_reader import PyVideoReader
 vr = PyVideoReader(filename)
 # or if you want to resize and use a specific number of threads
 vr = PyVideoReader(filename, threads=8, resize_shorter_side=512)
+# or to use GPU decoding:
+vr = PyVideoReader(filename, device='cuda')
 
 # decode all frames from the video
 frames = vr.decode()
@@ -98,12 +100,6 @@ print(info_dict)
 # {'color_space': 'BT709', 'aspect_ratio': 'Rational(1/1)', 'color_xfer_charac': 'BT709', 'codec_id': 'H264', 'fps_rational': '0/1', 'width': '1280', 'vid_ref': '1', 'duration': '148.28736979166666', 'height': '720', 'has_b_frames': 'true', 'color_primaries': 'BT709', 'chroma_location': 'Left', 'time_base': '0.00006510416666666667', 'vid_format': 'YUV420P', 'bit_rate': '900436', 'fps': '33.57669643068823', 'start_time': '0', 'color_range': 'MPEG', 'intra_dc_precision': '0', 'frame_count': '4979'}
 ```
 
-We can encode the video with h264 codec
-```python
-from video_reader import save_video
-save_video(frames, "video.mp4", fps=15, codec="h264")
-```
-NOTE: currently only work if the frames shape is a multiple of 32.
 
 ### ⚠️  Dealing with High Res videos
  If you are dealing with High Resolution videos such as HD, UHD etc. We recommend using `vr.decode_fast()` which has the same arguments as `vr.decode()` but will return a list of frames. It uses async conversion from yuv420p to RGB to speed things up.

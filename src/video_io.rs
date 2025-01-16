@@ -8,10 +8,7 @@ use ffmpeg::util::rational::Rational;
 use ffmpeg_next as ffmpeg;
 use log::debug;
 use std::collections::{BTreeMap, HashMap};
-use std::path::{Path, PathBuf};
-use video_rs::encode::{Encoder, Settings};
-use video_rs::location::Location;
-use video_rs::time::Time;
+use std::path::Path;
 
 use crate::ffi_hwaccel::hwdevice_transfer_frame;
 use crate::hwaccel::{HardwareAccelerationContext, HardwareAccelerationDeviceType};
@@ -629,57 +626,6 @@ pub fn get_resized_dim(mut height: f64, mut width: f64, resize_shorter_side_to: 
         width = resize_shorter_side_to;
     }
     (height as u32, width as u32)
-}
-
-/// Encode frames to a video file with h264 codec.
-/// * `frames` - Video frames to encode.
-/// * `destination_path` - Path to save the video.
-/// * `fps` - Frames per second of the video.
-/// * `codec` - Codec to use for encoding the video, eg "h264".
-pub fn save_video(
-    frames: Array4<u8>,
-    destination_path: &str,
-    fps: usize,
-    codec: &str,
-) -> Result<(), ffmpeg::Error> {
-    video_rs::init().unwrap();
-    let shape = frames.shape();
-    let n_frames = shape[0];
-    let height = shape[1];
-    let width = shape[2];
-
-    let destination: Location = Location::File(PathBuf::from(destination_path));
-    let mut encoder = match codec {
-        "h264" => {
-            let settings = Settings::preset_h264_yuv420p(width, height, false);
-            Encoder::new(&destination, settings).expect("failed to create encoder")
-        }
-        _ => {
-            // encode with mpeg4 format, ie XviD
-            // FIXME: does not work, video is still encoded as h264
-            let mut opts = HashMap::new();
-            opts.insert("vcodec".to_string(), "libxvid".to_string());
-            opts.insert("vtag".to_string(), "xvid".to_string());
-            opts.insert("q:v".to_string(), "5".to_string());
-            let settings =
-                Settings::preset_h264_custom(width, height, AvPixel::YUV420P, opts.into());
-            Encoder::new(&destination, settings).expect("failed to create encoder")
-        }
-    };
-
-    let duration: Time = Time::from_nth_of_a_second(fps);
-    let mut position = Time::zero();
-    for i in 0..n_frames {
-        encoder
-            .encode(&frames.slice(s![i, .., .., ..]).to_owned(), position)
-            .expect("failed to encode frame");
-
-        // Update the current position and add the inter-frame duration to it.
-        position = position.aligned_with(duration).add();
-    }
-
-    encoder.finish().expect("failed to finish encoder");
-    Ok(())
 }
 
 /// Converts an RGB24 video `AVFrame` produced by ffmpeg to an `ndarray`.
