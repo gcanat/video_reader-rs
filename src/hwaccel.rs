@@ -1,10 +1,12 @@
 // based on: https://github.com/oddity-ai/video-rs/blob/main/src/hwaccel.rs
 use ffmpeg_next as ffmpeg;
+use log::debug;
 use std::str::FromStr;
 
 use crate::ffi_hwaccel;
 
 pub(crate) struct HardwareAccelerationContext {
+    pixel_format: ffmpeg::util::format::Pixel,
     _hardware_device_context: ffi_hwaccel::HardwareDeviceContext,
 }
 
@@ -15,7 +17,15 @@ impl HardwareAccelerationContext {
     ) -> Result<Self, ffmpeg::Error> {
         let codec = ffmpeg::codec::decoder::find(decoder.id()).unwrap();
         let pixel_format =
-            ffi_hwaccel::codec_find_corresponding_hwaccel_pixfmt(&codec, device_type).unwrap();
+            match ffi_hwaccel::codec_find_corresponding_hwaccel_pixfmt(&codec, device_type) {
+                Some(pix_fmt) => pix_fmt,
+                None => ffmpeg::util::format::Pixel::None,
+            };
+        if pixel_format == ffmpeg::util::format::Pixel::None {
+            println!("Could not find hwaccel pix_fmt for this device type");
+            return Err(ffmpeg::Error::DecoderNotFound);
+        }
+        debug!("HardwareAccel Pixel format: {:?}", pixel_format);
 
         ffi_hwaccel::codec_context_hwaccel_set_get_format(decoder, pixel_format);
 
@@ -23,8 +33,12 @@ impl HardwareAccelerationContext {
         ffi_hwaccel::codec_context_hwaccel_set_hw_device_ctx(decoder, &hardware_device_context);
 
         Ok(HardwareAccelerationContext {
+            pixel_format,
             _hardware_device_context: hardware_device_context,
         })
+    }
+    pub(crate) fn format(&self) -> ffmpeg::util::format::Pixel {
+        self.pixel_format
     }
 }
 

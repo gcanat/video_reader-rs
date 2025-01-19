@@ -2,6 +2,7 @@
 extern crate ffmpeg_next as ffmpeg;
 
 use crate::hwaccel::HardwareAccelerationDeviceType;
+use ffmpeg::ffi::*;
 
 pub struct HardwareDeviceContext {
     ptr: *mut ffmpeg::ffi::AVBufferRef,
@@ -109,6 +110,29 @@ pub fn codec_context_hwaccel_set_hw_device_ctx(
     unsafe {
         (*codec_context.as_mut_ptr()).hw_device_ctx = hardware_device_context.ref_raw();
     }
+}
+
+pub fn codec_context_get_hw_frames_ctx(
+    codec_context: &mut ffmpeg::codec::decoder::Video,
+    hw_pixfmt: ffmpeg::util::format::Pixel,
+    sw_pixfmt: ffmpeg::util::format::Pixel,
+) -> Result<(), ffmpeg::error::Error> {
+    unsafe {
+        let hw_frame_ref = av_hwframe_ctx_alloc((*codec_context.as_mut_ptr()).hw_device_ctx);
+        (*codec_context.as_mut_ptr()).pix_fmt = hw_pixfmt.into();
+        let frame_ctx = (*hw_frame_ref).data as *mut AVHWFramesContext;
+        (*frame_ctx).format = hw_pixfmt.into();
+        (*frame_ctx).sw_format = sw_pixfmt.into();
+        (*frame_ctx).width = (*codec_context.as_mut_ptr()).width;
+        (*frame_ctx).height = (*codec_context.as_mut_ptr()).height;
+        (*frame_ctx).initial_pool_size = 4;
+        let ret = av_hwframe_ctx_init(hw_frame_ref);
+        if ret < 0 {
+            return Err(ffmpeg::error::Error::from(ret));
+        }
+        (*codec_context.as_mut_ptr()).hw_frames_ctx = av_buffer_ref(hw_frame_ref);
+    }
+    Ok(())
 }
 
 // #[no_mangle]

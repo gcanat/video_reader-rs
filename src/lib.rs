@@ -35,24 +35,29 @@ struct PyVideoReader {
 #[pymethods]
 impl PyVideoReader {
     #[new]
-    #[pyo3(signature = (filename, threads=None, resize_shorter_side=None, hw_accel=None))]
+    #[pyo3(signature = (filename, threads=None, resize_shorter_side=None, device=None, filter=None))]
     /// create an instance of VideoReader
     /// * `filename` - path to the video file
     /// * `threads` - number of threads to use. If None, let ffmpeg choose the optimal number.
     /// * `resize_shorter_side - Optional, resize shorted side of the video to this value while
-    /// * `hw_accel` - type of hardware acceleration, eg: cuda, vdpau, drm, etc. If None, cpu is
-    /// used.
     /// preserving the aspect ratio.
+    /// * `device` - type of hardware acceleration, eg: 'cuda', 'vdpau', 'drm', etc.
+    /// * `filter` - custome ffmpeg filter to use, eg "format=rgb24,scale=w=256:h=256:flags=fast_bilinear"
+    /// If set to None (default) or 'cpu' then cpu is used.
     /// * returns a PyVideoReader instance.
     fn new(
         filename: &str,
         threads: Option<usize>,
         resize_shorter_side: Option<f64>,
-        hw_accel: Option<&str>,
+        device: Option<&str>,
+        filter: Option<String>,
     ) -> PyResult<Self> {
-        let hwaccel =
-            hw_accel.map(|hw_str| HardwareAccelerationDeviceType::from_str(hw_str).unwrap());
-        let decoder_config = DecoderConfig::new(threads.unwrap_or(0), resize_shorter_side, hwaccel);
+        let hwaccel = match device {
+            Some("cpu") | None => None,
+            Some(other) => Some(HardwareAccelerationDeviceType::from_str(other).unwrap()),
+        };
+        let decoder_config =
+            DecoderConfig::new(threads.unwrap_or(0), resize_shorter_side, hwaccel, filter);
         match VideoReader::new(filename.to_string(), decoder_config) {
             Ok(reader) => Ok(PyVideoReader {
                 inner: Mutex::new(reader),
