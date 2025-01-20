@@ -365,25 +365,23 @@ impl VideoDecoder {
                     .add(&decoded)
                     .unwrap();
 
-                let mut rgb_frame = Video::empty();
-                while self
+                let mut yuv_frame = Video::empty();
+                if self
                     .graph
                     .get("out")
                     .unwrap()
                     .sink()
-                    .frame(&mut rgb_frame)
+                    .frame(&mut yuv_frame)
                     .is_ok()
                 {
-                    let res = convert_frame_to_ndarray_rgb24(
-                        &mut rgb_frame,
-                        &mut reducer
+                    let mut slice_frame =
+                        reducer
                             .full_video
-                            .slice_mut(s![reducer.idx_counter, .., .., ..]),
-                    );
-                    match res {
-                        Ok(()) => {}
-                        Err(_) => println!("Couldnt decode frame {}", reducer.frame_index),
-                    }
+                            .slice_mut(s![reducer.idx_counter, .., .., ..]);
+                    let rgb_frame = convert_yuv_to_ndarray_rgb24(yuv_frame);
+                    slice_frame.zip_mut_with(&rgb_frame, |a, b| {
+                        *a = *b;
+                    });
                 }
                 reducer.idx_counter += 1;
             }
@@ -468,7 +466,7 @@ impl VideoReader {
             None => (orig_h, orig_w),
         };
 
-        let pix_fmt = AvPixel::RGB24;
+        let pix_fmt = AvPixel::YUV420P;
         let mut is_hwaccel = false;
         let mut pixel_format: Option<ffmpeg::util::format::Pixel> = None;
 
@@ -484,7 +482,6 @@ impl VideoReader {
                 if let Some(hw_ctx) = hwaccel_context {
                     is_hwaccel = true;
                     filter_spec = format!(
-                        // "scale_npp=w={}:h={}:format={}:interp_algo=lanczos,hwdownload,format={},format={}",
                         "scale_cuda=w={}:h={}:passthrough=0,hwdownload,format={},format={}",
                         width,
                         height,
@@ -631,8 +628,6 @@ impl VideoReader {
         );
         let first_index = start_frame.unwrap_or(0);
 
-        let mut scaler = self.get_scaler(AvPixel::YUV420P)?;
-
         // make sure we are at the begining of the stream
         self.seek_to_start()?;
 
@@ -661,14 +656,27 @@ impl VideoReader {
             let mut decoded = Video::empty();
             while decoder.receive_frame(&mut decoded).is_ok() {
                 if reducer.indices.iter().any(|x| x == &curr_frame) {
-                    if self.decoder.is_hwaccel {
-                        decoded = download_frame(&decoded)?;
-                    }
+                    self.decoder
+                        .graph
+                        .get("in")
+                        .unwrap()
+                        .source()
+                        .add(&decoded)
+                        .unwrap();
                     let mut rgb_frame = Video::empty();
-                    scaler.run(&decoded, &mut rgb_frame).unwrap();
-                    tasks.push(task::spawn(async move {
-                        convert_yuv_to_ndarray_rgb24(rgb_frame)
-                    }));
+                    if self
+                        .decoder
+                        .graph
+                        .get("out")
+                        .unwrap()
+                        .sink()
+                        .frame(&mut rgb_frame)
+                        .is_ok()
+                    {
+                        tasks.push(task::spawn(async move {
+                            convert_yuv_to_ndarray_rgb24(rgb_frame)
+                        }));
+                    }
                 }
                 curr_frame += 1;
             }
