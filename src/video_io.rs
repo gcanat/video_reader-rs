@@ -1017,8 +1017,6 @@ impl VideoReader {
         // duration of a frame in micro seconds
         let frame_duration = (1. / fps * 1_000.0).round() as usize;
 
-        let mut scaler = self.get_scaler(AvPixel::RGB24)?;
-
         // make sure we are at the begining of the stream
         self.seek_to_start()?;
 
@@ -1029,8 +1027,6 @@ impl VideoReader {
                 frame_index,
                 &frame_duration,
                 &mut video_frames.slice_mut(s![idx_counter, .., .., ..]),
-                &mut scaler,
-                self.decoder.is_hwaccel,
             )?;
         }
         Ok(video_frames)
@@ -1041,8 +1037,6 @@ impl VideoReader {
         frame_index: usize,
         frame_duration: &usize,
         frame_array: &mut ArrayViewMut3<u8>,
-        scaler: &mut Context,
-        is_hwaccel: bool,
     ) -> Result<(), ffmpeg::Error> {
         let key_pos = self.locate_keyframes(&frame_index, &self.stream_info.key_frames);
         debug!("    - Key pos: {}", key_pos);
@@ -1052,7 +1046,7 @@ impl VideoReader {
             // we can directly skip until frame_index
             debug!("No need to seek, we can directly skip frames");
             let num_skip = self.get_num_skip(&frame_index);
-            self.skip_frames(num_skip, &frame_index, frame_array, scaler, is_hwaccel)?;
+            self.skip_frames(num_skip, &frame_index, frame_array)?;
         } else {
             if key_pos < curr_key_pos {
                 debug!("Seeking back to start");
@@ -1061,7 +1055,7 @@ impl VideoReader {
             debug!("Seeking to key_pos: {}", key_pos);
             self.seek_frame(&key_pos, frame_duration)?;
             let num_skip = self.get_num_skip(&frame_index);
-            self.skip_frames(num_skip, &frame_index, frame_array, scaler, is_hwaccel)?;
+            self.skip_frames(num_skip, &frame_index, frame_array)?;
         }
         Ok(())
     }
@@ -1097,8 +1091,6 @@ impl VideoReader {
         num: usize,
         frame_index: &usize,
         frame_array: &mut ArrayViewMut3<u8>,
-        scaler: &mut Context,
-        is_hwaccel: bool,
     ) -> Result<(), ffmpeg::Error> {
         let num_skip = num.min(self.stream_info.frame_count - 1);
         debug!(
@@ -1116,13 +1108,29 @@ impl VideoReader {
                         let mut decoded = Video::empty();
                         while self.decoder.video.receive_frame(&mut decoded).is_ok() {
                             if &self.curr_frame == frame_index {
-                                // handle hardware frame if necessary
-                                if is_hwaccel {
-                                    decoded = download_frame(&decoded)?;
+                                self.decoder
+                                    .graph
+                                    .get("in")
+                                    .unwrap()
+                                    .source()
+                                    .add(&decoded)
+                                    .unwrap();
+
+                                let mut yuv_frame = Video::empty();
+                                if self
+                                    .decoder
+                                    .graph
+                                    .get("out")
+                                    .unwrap()
+                                    .sink()
+                                    .frame(&mut yuv_frame)
+                                    .is_ok()
+                                {
+                                    let rgb_frame = convert_yuv_to_ndarray_rgb24(yuv_frame);
+                                    frame_array.zip_mut_with(&rgb_frame, |a, b| {
+                                        *a = *b;
+                                    });
                                 }
-                                let mut rgb_frame = Video::empty();
-                                scaler.run(&decoded, &mut rgb_frame)?;
-                                convert_frame_to_ndarray_rgb24(&mut rgb_frame, frame_array)?;
                                 self.update_indices();
                                 return Ok(());
                             }
