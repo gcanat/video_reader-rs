@@ -63,6 +63,15 @@ impl DecoderConfig {
     }
 }
 
+struct FilterConfig<'a> {
+    height: u32,
+    width: u32,
+    vid_format: ffmpeg::util::format::Pixel,
+    time_base: &'a str,
+    spec: &'a str,
+    is_hwaccel: bool,
+}
+
 fn extract_video_params(input: &ffmpeg::Stream) -> VideoParams {
     VideoParams {
         duration: input.duration() as f64 * f64::from(input.time_base()),
@@ -165,24 +174,19 @@ fn create_video_reducer(
     )
 }
 
-pub fn create_filters(
-    height: u32,
-    width: u32,
-    vid_format: ffmpeg::util::format::Pixel,
-    time_base: &str,
+fn create_filters(
     decoder_ctx: &mut ffmpeg::codec::Context,
     hw_fmt: Option<ffmpeg::util::format::Pixel>,
-    spec: &str,
-    is_hwaccel: bool,
+    filter_cfg: FilterConfig,
 ) -> Result<filter::Graph, ffmpeg::Error> {
     let mut graph = filter::Graph::new();
 
     let args = format!(
         "video_size={}x{}:pix_fmt={}:time_base={}:pixel_aspect=1/1",
-        width,
-        height,
-        vid_format.descriptor().unwrap().name(),
-        time_base,
+        filter_cfg.width,
+        filter_cfg.height,
+        filter_cfg.vid_format.descriptor().unwrap().name(),
+        filter_cfg.time_base,
     );
     println!("args: {}", args);
 
@@ -191,15 +195,18 @@ pub fn create_filters(
         create_hwbuffer_src(
             decoder_ctx,
             &mut buffersrc_ctx,
-            height,
-            width,
+            filter_cfg.height,
+            filter_cfg.width,
             hw_pix_fmt,
-            time_base,
-            is_hwaccel,
+            filter_cfg.time_base,
+            filter_cfg.is_hwaccel,
         )?;
     }
     graph.add(&filter::find("buffersink").unwrap(), "out", "")?;
-    graph.output("in", 0)?.input("out", 0)?.parse(spec)?;
+    graph
+        .output("in", 0)?
+        .input("out", 0)?
+        .parse(filter_cfg.spec)?;
     graph.validate()?;
     Ok(graph)
 }
@@ -515,16 +522,16 @@ impl VideoReader {
         };
 
         println!("Filter spec: {}", filter_spec);
-        let graph = create_filters(
-            orig_h,
-            orig_w,
-            orig_fmt,
-            video_info.get("time_base_rational").unwrap(),
-            &mut video,
-            pixel_format,
-            &filter_spec,
+        let filter_cfg = FilterConfig {
+            height: orig_h,
+            width: orig_w,
+            vid_format: orig_fmt,
+            time_base: video_info.get("time_base_rational").unwrap(),
+            spec: &filter_spec,
             is_hwaccel,
-        )?;
+        };
+
+        let graph = create_filters(&mut video, pixel_format, filter_cfg)?;
 
         Ok(VideoDecoder {
             video,
