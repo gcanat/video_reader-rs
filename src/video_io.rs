@@ -387,12 +387,11 @@ impl VideoDecoder {
                             .full_video
                             .slice_mut(s![reducer.idx_counter, .., .., ..]);
 
-                    let rgb_frame: Array3<u8>;
-                    if self.is_hwaccel {
-                        rgb_frame = convert_nv12_to_ndarray_rgb24(yuv_frame);
+                    let rgb_frame: Array3<u8> = if self.is_hwaccel {
+                        convert_nv12_to_ndarray_rgb24(yuv_frame)
                     } else {
-                        rgb_frame = convert_yuv_to_ndarray_rgb24(yuv_frame);
-                    }
+                        convert_yuv_to_ndarray_rgb24(yuv_frame)
+                    };
 
                     slice_frame.zip_mut_with(&rgb_frame, |a, b| {
                         *a = *b;
@@ -1192,12 +1191,11 @@ impl VideoReader {
                                     .frame(&mut yuv_frame)
                                     .is_ok()
                                 {
-                                    let rgb_frame: Array3<u8>;
-                                    if self.decoder.is_hwaccel {
-                                        rgb_frame = convert_nv12_to_ndarray_rgb24(yuv_frame);
+                                    let rgb_frame: Array3<u8> = if self.decoder.is_hwaccel {
+                                        convert_nv12_to_ndarray_rgb24(yuv_frame)
                                     } else {
-                                        rgb_frame = convert_yuv_to_ndarray_rgb24(yuv_frame);
-                                    }
+                                        convert_yuv_to_ndarray_rgb24(yuv_frame)
+                                    };
                                     frame_array.zip_mut_with(&rgb_frame, |a, b| {
                                         *a = *b;
                                     });
