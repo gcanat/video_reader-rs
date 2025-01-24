@@ -861,15 +861,7 @@ pub fn convert_yuv_to_ndarray_rgb24(frame: Video) -> Array3<u8> {
     let (buf_vec, frame_width, frame_height, bytes_copied) =
         copy_image(frame, AVPixelFormat::AV_PIX_FMT_YUV420P);
 
-    // By default assume HD color space
-    let mut colorspace = YuvStandardMatrix::Bt709;
-    if frame_height < 720 {
-        // SD color space
-        colorspace = YuvStandardMatrix::Bt601;
-    } else if frame_height > 1080 {
-        // UHD color space
-        colorspace = YuvStandardMatrix::Bt2020;
-    }
+    let colorspace = get_colorspace(frame_height);
 
     if bytes_copied == buf_vec.len() as i32 {
         let mut rgb = vec![0_u8; (frame_width * frame_height * 3) as usize];
@@ -924,6 +916,19 @@ fn copy_image(mut frame: Video, pix_fmt: AVPixelFormat) -> (Vec<u8>, i32, i32, i
     }
 }
 
+fn get_colorspace(height: i32) -> YuvStandardMatrix {
+    // By default assume HD color space
+    let mut colorspace = YuvStandardMatrix::Bt709;
+    if height < 720 {
+        // SD color space
+        colorspace = YuvStandardMatrix::Bt601;
+    } else if height > 1080 {
+        // UHD color space
+        colorspace = YuvStandardMatrix::Bt2020;
+    }
+    colorspace
+}
+
 /// Converts a NV12 video `AVFrame` produced by ffmpeg to an `ndarray`.
 /// * `frame` - Video frame to convert.
 /// * returns a three-dimensional `ndarray` with dimensions `(H, W, C)` and type byte.
@@ -931,15 +936,7 @@ pub fn convert_nv12_to_ndarray_rgb24(frame: Video) -> Array3<u8> {
     let (buf_vec, frame_width, frame_height, bytes_copied) =
         copy_image(frame, AVPixelFormat::AV_PIX_FMT_NV12);
 
-    // By default assume HD color space
-    let mut colorspace = YuvStandardMatrix::Bt709;
-    if frame_height < 720 {
-        // SD color space
-        colorspace = YuvStandardMatrix::Bt601;
-    } else if frame_height > 1080 {
-        // UHD color space
-        colorspace = YuvStandardMatrix::Bt2020;
-    }
+    let colorspace = get_colorspace(frame_width);
 
     if bytes_copied == buf_vec.len() as i32 {
         let mut rgb = vec![0_u8; (frame_width * frame_height * 3) as usize];
