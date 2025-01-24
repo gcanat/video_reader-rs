@@ -17,7 +17,9 @@ use crate::hwaccel::{HardwareAccelerationContext, HardwareAccelerationDeviceType
 use ndarray::parallel::prelude::*;
 use ndarray::{s, stack, Array, Array2, Array3, Array4, ArrayView3, ArrayViewMut3, Axis};
 use tokio::task;
-use yuvutils_rs::{yuv420_to_rgb, YuvPlanarImage, YuvRange, YuvStandardMatrix};
+use yuvutils_rs::{
+    yuv420_to_rgb, yuv_nv12_to_rgb, YuvBiPlanarImage, YuvPlanarImage, YuvRange, YuvStandardMatrix,
+};
 
 pub type FrameArray = Array3<u8>;
 pub type VideoArray = Array4<u8>;
@@ -385,7 +387,14 @@ impl VideoDecoder {
                         reducer
                             .full_video
                             .slice_mut(s![reducer.idx_counter, .., .., ..]);
-                    let rgb_frame = convert_yuv_to_ndarray_rgb24(yuv_frame);
+
+                    let rgb_frame: Array3<u8>;
+                    if self.is_hwaccel {
+                        rgb_frame = convert_nv12_to_ndarray_rgb24(yuv_frame);
+                    } else {
+                        rgb_frame = convert_yuv_to_ndarray_rgb24(yuv_frame);
+                    }
+
                     slice_frame.zip_mut_with(&rgb_frame, |a, b| {
                         *a = *b;
                     });
@@ -499,11 +508,10 @@ impl VideoReader {
                     }
 
                     filter_spec = format!(
-                        "scale_cuda=w={}:h={}:passthrough=0,hwdownload,format={},format={}",
+                        "scale_cuda=w={}:h={}:passthrough=0,hwdownload,format={}",
                         width,
                         height,
                         HWACCEL_PIXEL_FORMAT.descriptor().unwrap().name(),
-                        pix_fmt.descriptor().unwrap().name(),
                     );
                     codec_context_get_hw_frames_ctx(
                         &mut video,
@@ -845,14 +853,56 @@ pub fn convert_frame_to_ndarray_rgb24(
 /// Converts a YUV420P video `AVFrame` produced by ffmpeg to an `ndarray`.
 /// * `frame` - Video frame to convert.
 /// * returns a three-dimensional `ndarray` with dimensions `(H, W, C)` and type byte.
-pub fn convert_yuv_to_ndarray_rgb24(mut frame: Video) -> Array3<u8> {
+pub fn convert_yuv_to_ndarray_rgb24(frame: Video) -> Array3<u8> {
+    let (buf_vec, frame_width, frame_height, bytes_copied) =
+        copy_image(frame, AVPixelFormat::AV_PIX_FMT_YUV420P);
+
+    // By default assume HD color space
+    let mut colorspace = YuvStandardMatrix::Bt709;
+    if frame_height < 720 {
+        // SD color space
+        colorspace = YuvStandardMatrix::Bt601;
+    } else if frame_height > 1080 {
+        // UHD color space
+        colorspace = YuvStandardMatrix::Bt2020;
+    }
+
+    if bytes_copied == buf_vec.len() as i32 {
+        let mut rgb = vec![0_u8; (frame_width * frame_height * 3) as usize];
+        let cut_point1 = (frame_width * frame_height) as usize;
+        let cut_point2 = cut_point1 + cut_point1 / 4;
+        let yuv_planar = YuvPlanarImage {
+            y_plane: &buf_vec[..cut_point1],
+            y_stride: frame_width as u32,
+            u_plane: &buf_vec[cut_point1..cut_point2],
+            u_stride: (frame_width / 2) as u32,
+            v_plane: &buf_vec[cut_point2..],
+            v_stride: (frame_width / 2) as u32,
+            width: frame_width as u32,
+            height: frame_height as u32,
+        };
+        yuv420_to_rgb(
+            &yuv_planar,
+            &mut rgb,
+            (frame_width * 3) as u32,
+            YuvRange::Full,
+            colorspace,
+        )
+        .unwrap();
+        Array3::from_shape_vec((frame_height as usize, frame_width as usize, 3_usize), rgb).unwrap()
+    } else {
+        Array3::zeros((frame_height as usize, frame_width as usize, 3_usize))
+    }
+}
+
+fn copy_image(mut frame: Video, pix_fmt: AVPixelFormat) -> (Vec<u8>, i32, i32, i32) {
     unsafe {
         let frame_ptr = frame.as_mut_ptr();
         let frame_width: i32 = (*frame_ptr).width;
         let frame_height: i32 = (*frame_ptr).height;
         let frame_format =
             std::mem::transmute::<std::ffi::c_int, AVPixelFormat>((*frame_ptr).format);
-        assert_eq!(frame_format, AVPixelFormat::AV_PIX_FMT_YUV420P);
+        assert_eq!(frame_format, pix_fmt);
 
         let mut buf_vec = vec![0_u8; (frame_width * (frame_height + frame_height / 2)) as usize];
 
@@ -866,44 +916,49 @@ pub fn convert_yuv_to_ndarray_rgb24(mut frame: Video) -> Array3<u8> {
             frame_height,
             1,
         );
+        (buf_vec, frame_width, frame_height, bytes_copied)
+    }
+}
 
-        // By default assume HD color space
-        let mut colorspace = YuvStandardMatrix::Bt709;
-        if frame_height < 720 {
-            // SD color space
-            colorspace = YuvStandardMatrix::Bt601;
-        } else if frame_height > 1080 {
-            // UHD color space
-            colorspace = YuvStandardMatrix::Bt2020;
-        }
+/// Converts a NV12 video `AVFrame` produced by ffmpeg to an `ndarray`.
+/// * `frame` - Video frame to convert.
+/// * returns a three-dimensional `ndarray` with dimensions `(H, W, C)` and type byte.
+pub fn convert_nv12_to_ndarray_rgb24(frame: Video) -> Array3<u8> {
+    let (buf_vec, frame_width, frame_height, bytes_copied) =
+        copy_image(frame, AVPixelFormat::AV_PIX_FMT_NV12);
 
-        if bytes_copied == buf_vec.len() as i32 {
-            let mut rgb = vec![0_u8; (frame_width * frame_height * 3) as usize];
-            let cut_point1 = (frame_width * frame_height) as usize;
-            let cut_point2 = cut_point1 + cut_point1 / 4;
-            let yuv_planar = YuvPlanarImage {
-                y_plane: &buf_vec[..cut_point1],
-                y_stride: frame_width as u32,
-                u_plane: &buf_vec[cut_point1..cut_point2],
-                u_stride: (frame_width / 2) as u32,
-                v_plane: &buf_vec[cut_point2..],
-                v_stride: (frame_width / 2) as u32,
-                width: frame_width as u32,
-                height: frame_height as u32,
-            };
-            yuv420_to_rgb(
-                &yuv_planar,
-                &mut rgb,
-                (frame_width * 3) as u32,
-                YuvRange::Full,
-                colorspace,
-            )
-            .unwrap();
-            Array3::from_shape_vec((frame_height as usize, frame_width as usize, 3_usize), rgb)
-                .unwrap()
-        } else {
-            Array3::zeros((frame_height as usize, frame_width as usize, 3_usize))
-        }
+    // By default assume HD color space
+    let mut colorspace = YuvStandardMatrix::Bt709;
+    if frame_height < 720 {
+        // SD color space
+        colorspace = YuvStandardMatrix::Bt601;
+    } else if frame_height > 1080 {
+        // UHD color space
+        colorspace = YuvStandardMatrix::Bt2020;
+    }
+
+    if bytes_copied == buf_vec.len() as i32 {
+        let mut rgb = vec![0_u8; (frame_width * frame_height * 3) as usize];
+        let cut_point = (frame_width * frame_height) as usize;
+        let yuv_planar = YuvBiPlanarImage {
+            y_plane: &buf_vec[..cut_point],
+            y_stride: frame_width as u32,
+            uv_plane: &buf_vec[cut_point..],
+            uv_stride: (frame_width / 2) as u32,
+            width: frame_width as u32,
+            height: frame_height as u32,
+        };
+        yuv_nv12_to_rgb(
+            &yuv_planar,
+            &mut rgb,
+            (frame_width * 3) as u32,
+            YuvRange::Full,
+            colorspace,
+        )
+        .unwrap();
+        Array3::from_shape_vec((frame_height as usize, frame_width as usize, 3_usize), rgb).unwrap()
+    } else {
+        Array3::zeros((frame_height as usize, frame_width as usize, 3_usize))
     }
 }
 
