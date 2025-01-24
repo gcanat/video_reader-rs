@@ -188,7 +188,7 @@ fn create_filters(
         filter_cfg.vid_format.descriptor().unwrap().name(),
         filter_cfg.time_base,
     );
-    println!("args: {}", args);
+    debug!("Buffer args: {}", args);
 
     let mut buffersrc_ctx = graph.add(&filter::find("buffer").unwrap(), "in", args.as_str())?;
     if let Some(hw_pix_fmt) = hw_fmt {
@@ -488,17 +488,23 @@ impl VideoReader {
 
                 if let Some(hw_ctx) = hwaccel_context {
                     is_hwaccel = true;
+                    pixel_format = Some(hw_ctx.format());
+                    // Need a custom filter for hwaccel != cuda
+                    if pixel_format != Some(ffmpeg::util::format::Pixel::CUDA) {
+                        // FIXME: proper error handling
+                        println!(
+                            "Using hwaccel other than cuda, you should provide a custom filter"
+                        );
+                        return Err(ffmpeg::error::Error::DecoderNotFound);
+                    }
+
                     filter_spec = format!(
                         "scale_cuda=w={}:h={}:passthrough=0,hwdownload,format={},format={}",
                         width,
                         height,
-                        // HWACCEL_PIXEL_FORMAT.descriptor().unwrap().name(),
                         HWACCEL_PIXEL_FORMAT.descriptor().unwrap().name(),
                         pix_fmt.descriptor().unwrap().name(),
-                        // pix_fmt.descriptor().unwrap().name(),
-                        // "yuv420p",
                     );
-                    pixel_format = Some(hw_ctx.format());
                     codec_context_get_hw_frames_ctx(
                         &mut video,
                         pixel_format.unwrap(),
@@ -521,7 +527,7 @@ impl VideoReader {
             }
         };
 
-        println!("Filter spec: {}", filter_spec);
+        debug!("Filter spec: {}", filter_spec);
         let filter_cfg = FilterConfig {
             height: orig_h,
             width: orig_w,
