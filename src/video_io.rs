@@ -275,7 +275,6 @@ pub struct VideoDecoder {
     width: u32,
     fps: f64,
     video_info: HashMap<&'static str, String>,
-    // hwaccel_context: Option<HardwareAccelerationContext>,
     is_hwaccel: bool,
     graph: filter::Graph,
 }
@@ -694,9 +693,15 @@ impl VideoReader {
                         .frame(&mut rgb_frame)
                         .is_ok()
                     {
-                        tasks.push(task::spawn(async move {
-                            convert_yuv_to_ndarray_rgb24(rgb_frame)
-                        }));
+                        if self.decoder.is_hwaccel {
+                            tasks.push(task::spawn(async move {
+                                convert_nv12_to_ndarray_rgb24(rgb_frame)
+                            }));
+                        } else {
+                            tasks.push(task::spawn(async move {
+                                convert_yuv_to_ndarray_rgb24(rgb_frame)
+                            }));
+                        }
                     }
                 }
                 curr_frame += 1;
@@ -944,7 +949,7 @@ pub fn convert_nv12_to_ndarray_rgb24(frame: Video) -> Array3<u8> {
             y_plane: &buf_vec[..cut_point],
             y_stride: frame_width as u32,
             uv_plane: &buf_vec[cut_point..],
-            uv_stride: (frame_width / 2) as u32,
+            uv_stride: frame_width as u32,
             width: frame_width as u32,
             height: frame_height as u32,
         };
@@ -1187,7 +1192,12 @@ impl VideoReader {
                                     .frame(&mut yuv_frame)
                                     .is_ok()
                                 {
-                                    let rgb_frame = convert_yuv_to_ndarray_rgb24(yuv_frame);
+                                    let rgb_frame: Array3<u8>;
+                                    if self.decoder.is_hwaccel {
+                                        rgb_frame = convert_nv12_to_ndarray_rgb24(yuv_frame);
+                                    } else {
+                                        rgb_frame = convert_yuv_to_ndarray_rgb24(yuv_frame);
+                                    }
                                     frame_array.zip_mut_with(&rgb_frame, |a, b| {
                                         *a = *b;
                                     });
