@@ -482,7 +482,7 @@ impl VideoReader {
 
         let pix_fmt = AvPixel::YUV420P;
         let mut is_hwaccel = false;
-        let mut pixel_format: Option<ffmpeg::util::format::Pixel> = None;
+        let mut hw_format: Option<ffmpeg::util::format::Pixel> = None;
 
         let filter_spec = match config.ff_filter {
             None => {
@@ -495,16 +495,15 @@ impl VideoReader {
 
                 if let Some(hw_ctx) = hwaccel_context {
                     is_hwaccel = true;
-                    pixel_format = Some(hw_ctx.format());
+                    hw_format = Some(hw_ctx.format());
                     // Need a custom filter for hwaccel != cuda
-                    if pixel_format != Some(ffmpeg::util::format::Pixel::CUDA) {
+                    if hw_format != Some(ffmpeg::util::format::Pixel::CUDA) {
                         // FIXME: proper error handling
                         println!(
                             "Using hwaccel other than cuda, you should provide a custom filter"
                         );
                         return Err(ffmpeg::error::Error::DecoderNotFound);
                     }
-
                     filter_spec = format!(
                         "scale_cuda=w={}:h={}:passthrough=0,hwdownload,format={}",
                         width,
@@ -513,7 +512,7 @@ impl VideoReader {
                     );
                     codec_context_get_hw_frames_ctx(
                         &mut video,
-                        pixel_format.unwrap(),
+                        hw_format.unwrap(),
                         HWACCEL_PIXEL_FORMAT,
                     )?;
                 }
@@ -522,10 +521,10 @@ impl VideoReader {
             Some(spec) => {
                 if let Some(hw_ctx) = hwaccel_context {
                     is_hwaccel = true;
-                    pixel_format = Some(hw_ctx.format());
+                    hw_format = Some(hw_ctx.format());
                     codec_context_get_hw_frames_ctx(
                         &mut video,
-                        pixel_format.unwrap(),
+                        hw_format.unwrap(),
                         HWACCEL_PIXEL_FORMAT,
                     )?;
                 }
@@ -543,7 +542,7 @@ impl VideoReader {
             is_hwaccel,
         };
 
-        let graph = create_filters(&mut video, pixel_format, filter_cfg)?;
+        let graph = create_filters(&mut video, hw_format, filter_cfg)?;
 
         Ok(VideoDecoder {
             video,
