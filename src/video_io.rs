@@ -1,5 +1,6 @@
 use ffmpeg::codec::threading;
 use ffmpeg::ffi::*;
+use ffmpeg::filter;
 use ffmpeg::format::{input, Pixel as AvPixel};
 use ffmpeg::media::Type;
 use ffmpeg::software::scaling::{context::Context, flag::Flags};
@@ -8,38 +9,69 @@ use ffmpeg::util::rational::Rational;
 use ffmpeg_next as ffmpeg;
 use log::debug;
 use std::collections::{BTreeMap, HashMap};
-use std::path::{Path, PathBuf};
-use video_rs::encode::{Encoder, Settings};
-use video_rs::location::Location;
-use video_rs::time::Time;
+use std::path::Path;
 
+use crate::ffi_hwaccel::codec_context_get_hw_frames_ctx;
+use crate::ffi_hwaccel::hwdevice_transfer_frame;
+use crate::hwaccel::{HardwareAccelerationContext, HardwareAccelerationDeviceType};
 use ndarray::parallel::prelude::*;
 use ndarray::{s, stack, Array, Array2, Array3, Array4, ArrayView3, ArrayViewMut3, Axis};
 use tokio::task;
-use yuvutils_rs::{yuv420_to_rgb, YuvPlanarImage, YuvRange, YuvStandardMatrix};
+use yuvutils_rs::{
+    yuv420_to_rgb, yuv_nv12_to_rgb, YuvBiPlanarImage, YuvPlanarImage, YuvRange, YuvStandardMatrix,
+};
 
 pub type FrameArray = Array3<u8>;
 pub type VideoArray = Array4<u8>;
+
+/// Always use NV12 pixel format with hardware acceleration, then rescale later.
+static HWACCEL_PIXEL_FORMAT: AvPixel = AvPixel::NV12;
 
 struct VideoParams {
     duration: f64,
     start_time: i64,
     time_base: f64,
+    time_base_rational: Rational,
 }
 
+/// Config to instantiate a Decoder
+/// * threads: number of threads to use
+/// * resize_shorter_side: resize shorter side of the video to this value
+///   (preserves aspect ratio)
+/// * hw_accel: hardware acceleration device type, eg cuda, qsv, etc
+/// * ff_filter: optional custom ffmpeg filter to use, eg:
+///   "format=rgb24,scale=w=256:h=256:flags=fast_bilinear"
 #[derive(Default)]
 pub struct DecoderConfig {
     threads: usize,
     resize_shorter_side: Option<f64>,
+    hw_accel: Option<HardwareAccelerationDeviceType>,
+    ff_filter: Option<String>,
 }
 
 impl DecoderConfig {
-    pub fn new(threads: usize, resize_shorter_side: Option<f64>) -> Self {
+    pub fn new(
+        threads: usize,
+        resize_shorter_side: Option<f64>,
+        hw_accel: Option<HardwareAccelerationDeviceType>,
+        ff_filter: Option<String>,
+    ) -> Self {
         Self {
             threads,
             resize_shorter_side,
+            hw_accel,
+            ff_filter,
         }
     }
+}
+
+struct FilterConfig<'a> {
+    height: u32,
+    width: u32,
+    vid_format: ffmpeg::util::format::Pixel,
+    time_base: &'a str,
+    spec: &'a str,
+    is_hwaccel: bool,
 }
 
 fn extract_video_params(input: &ffmpeg::Stream) -> VideoParams {
@@ -47,21 +79,34 @@ fn extract_video_params(input: &ffmpeg::Stream) -> VideoParams {
         duration: input.duration() as f64 * f64::from(input.time_base()),
         start_time: input.start_time(),
         time_base: f64::from(input.time_base()),
+        time_base_rational: input.time_base(),
     }
 }
 
 fn setup_decoder_context(
     input: &ffmpeg::Stream,
     threads: usize,
-) -> Result<ffmpeg::codec::context::Context, ffmpeg::Error> {
+    hwaccel_device_type: Option<HardwareAccelerationDeviceType>,
+) -> Result<
+    (
+        ffmpeg::codec::context::Context,
+        Option<HardwareAccelerationContext>,
+    ),
+    ffmpeg::Error,
+> {
     let mut context = ffmpeg::codec::context::Context::from_parameters(input.parameters())?;
+
+    let hwaccel_context = match hwaccel_device_type {
+        Some(device_type) => Some(HardwareAccelerationContext::new(&mut context, device_type)?),
+        None => None,
+    };
     context.set_threading(threading::Config {
         kind: threading::Type::Frame,
         count: threads,
         #[cfg(not(feature = "ffmpeg_6_0"))]
         safe: true,
     });
-    Ok(context)
+    Ok((context, hwaccel_context))
 }
 
 fn collect_video_metadata(
@@ -76,6 +121,7 @@ fn collect_video_metadata(
     info.insert("fps", format!("{}", fps));
     info.insert("start_time", params.start_time.to_string());
     info.insert("time_base", params.time_base.to_string());
+    info.insert("time_base_rational", params.time_base_rational.to_string());
     info.insert("duration", params.duration.to_string());
     info.insert("codec_id", format!("{:?}", video.codec().unwrap().id()));
     info.insert("height", video.height().to_string());
@@ -130,6 +176,76 @@ fn create_video_reducer(
     )
 }
 
+fn create_filters(
+    decoder_ctx: &mut ffmpeg::codec::Context,
+    hw_fmt: Option<ffmpeg::util::format::Pixel>,
+    filter_cfg: FilterConfig,
+) -> Result<filter::Graph, ffmpeg::Error> {
+    let mut graph = filter::Graph::new();
+
+    let args = format!(
+        "video_size={}x{}:pix_fmt={}:time_base={}:pixel_aspect=1/1",
+        filter_cfg.width,
+        filter_cfg.height,
+        filter_cfg.vid_format.descriptor().unwrap().name(),
+        filter_cfg.time_base,
+    );
+    debug!("Buffer args: {}", args);
+
+    let mut buffersrc_ctx = graph.add(&filter::find("buffer").unwrap(), "in", args.as_str())?;
+    if let Some(hw_pix_fmt) = hw_fmt {
+        create_hwbuffer_src(
+            decoder_ctx,
+            &mut buffersrc_ctx,
+            filter_cfg.height,
+            filter_cfg.width,
+            hw_pix_fmt,
+            filter_cfg.time_base,
+            filter_cfg.is_hwaccel,
+        )?;
+    }
+    graph.add(&filter::find("buffersink").unwrap(), "out", "")?;
+    graph
+        .output("in", 0)?
+        .input("out", 0)?
+        .parse(filter_cfg.spec)?;
+    graph.validate()?;
+    Ok(graph)
+}
+
+pub fn create_hwbuffer_src(
+    codec_ctx: &mut ffmpeg::codec::context::Context,
+    filt_ctx: &mut filter::Context,
+    height: u32,
+    width: u32,
+    vid_format: ffmpeg::util::format::Pixel,
+    time_base: &str,
+    is_hwaccel: bool,
+) -> Result<filter::Context, ffmpeg::util::error::Error> {
+    let time_base = time_base.split_once('/').unwrap();
+
+    unsafe {
+        let params_ptr = av_buffersrc_parameters_alloc();
+        if let Some(params) = params_ptr.as_mut() {
+            params.format = Into::<AVPixelFormat>::into(vid_format) as i32;
+            params.width = width as i32;
+            params.height = height as i32;
+            params.time_base = Rational(
+                time_base.0.parse::<i32>().unwrap(),
+                time_base.1.parse::<i32>().unwrap(),
+            )
+            .into();
+            if is_hwaccel {
+                params.hw_frames_ctx = (*codec_ctx.as_mut_ptr()).hw_frames_ctx;
+            }
+        };
+        match av_buffersrc_parameters_set(filt_ctx.as_mut_ptr(), params_ptr) {
+            n if n >= 0 => Ok(filter::Context::wrap(filt_ctx.as_mut_ptr())),
+            e => Err(ffmpeg::Error::from(e)),
+        }
+    }
+}
+
 /// Struct responsible for reading the stream and getting the metadata
 pub struct VideoReader {
     ictx: ffmpeg::format::context::Input,
@@ -159,6 +275,8 @@ pub struct VideoDecoder {
     width: u32,
     fps: f64,
     video_info: HashMap<&'static str, String>,
+    is_hwaccel: bool,
+    graph: filter::Graph,
 }
 
 unsafe impl Send for VideoDecoder {}
@@ -224,11 +342,20 @@ impl StreamInfo {
     }
 }
 
+fn download_frame(frame: &Video) -> Result<Video, ffmpeg::Error> {
+    let mut frame_downloaded = Video::empty();
+    frame_downloaded.set_format(HWACCEL_PIXEL_FORMAT);
+    hwdevice_transfer_frame(&mut frame_downloaded, frame)?;
+    unsafe {
+        av_frame_copy_props(frame_downloaded.as_mut_ptr(), frame.as_ptr());
+    }
+    Ok(frame_downloaded)
+}
+
 impl VideoDecoder {
     /// Decode all frames that match the frame indices
     pub fn receive_and_process_decoded_frames(
         &mut self,
-        scaler: &mut Context,
         reducer: &mut VideoReducer,
     ) -> Result<(), ffmpeg::Error> {
         let mut decoded = Video::empty();
@@ -239,17 +366,36 @@ impl VideoDecoder {
                 .position(|x| x == &reducer.frame_index);
             if match_index.is_some() {
                 reducer.indices.remove(match_index.unwrap());
-                let mut rgb_frame = Video::empty();
-                scaler.run(&decoded, &mut rgb_frame)?;
-                let res = convert_frame_to_ndarray_rgb24(
-                    &mut rgb_frame,
-                    &mut reducer
-                        .full_video
-                        .slice_mut(s![reducer.idx_counter, .., .., ..]),
-                );
-                match res {
-                    Ok(()) => {}
-                    Err(_) => println!("Couldnt decode frame {}", reducer.frame_index),
+                self.graph
+                    .get("in")
+                    .unwrap()
+                    .source()
+                    .add(&decoded)
+                    .unwrap();
+
+                let mut yuv_frame = Video::empty();
+                if self
+                    .graph
+                    .get("out")
+                    .unwrap()
+                    .sink()
+                    .frame(&mut yuv_frame)
+                    .is_ok()
+                {
+                    let mut slice_frame =
+                        reducer
+                            .full_video
+                            .slice_mut(s![reducer.idx_counter, .., .., ..]);
+
+                    let rgb_frame: Array3<u8> = if self.is_hwaccel {
+                        convert_nv12_to_ndarray_rgb24(yuv_frame)
+                    } else {
+                        convert_yuv_to_ndarray_rgb24(yuv_frame)
+                    };
+
+                    slice_frame.zip_mut_with(&rgb_frame, |a, b| {
+                        *a = *b;
+                    });
                 }
                 reducer.idx_counter += 1;
             }
@@ -268,6 +414,9 @@ impl VideoDecoder {
         let mut decoded = Video::empty();
         while self.video.receive_frame(&mut decoded).is_ok() {
             if indices.iter().any(|x| x == &reducer.frame_index) {
+                if self.is_hwaccel {
+                    decoded = download_frame(&decoded)?;
+                }
                 let mut rgb_frame = Video::empty();
                 let mut nd_frame =
                     FrameArray::zeros((self.height as usize, self.width as usize, 3_usize));
@@ -319,15 +468,81 @@ impl VideoReader {
         let fps = f64::from(input.avg_frame_rate());
         let video_params = extract_video_params(&input);
 
-        let decoder_context = setup_decoder_context(&input, config.threads)?;
-        let video = decoder_context.decoder().video()?;
+        let (decoder_context, hwaccel_context) =
+            setup_decoder_context(&input, config.threads, config.hw_accel)?;
 
+        let mut video = decoder_context.decoder().video()?;
+        let (orig_h, orig_w, orig_fmt) = (video.height(), video.width(), video.format());
         let video_info = collect_video_metadata(&video, &video_params, &fps);
 
         let (height, width) = match config.resize_shorter_side {
-            Some(resize) => get_resized_dim(video.height() as f64, video.width() as f64, resize),
-            None => (video.height(), video.width()),
+            Some(resize) => get_resized_dim(orig_h as f64, orig_w as f64, resize),
+            None => (orig_h, orig_w),
         };
+
+        let pix_fmt = AvPixel::YUV420P;
+        let mut is_hwaccel = false;
+        let mut hw_format: Option<ffmpeg::util::format::Pixel> = None;
+
+        let filter_spec = match config.ff_filter {
+            None => {
+                let mut filter_spec = format!(
+                    "format={},scale=w={}:h={}:flags=fast_bilinear",
+                    pix_fmt.descriptor().unwrap().name(),
+                    width,
+                    height,
+                );
+
+                if let Some(hw_ctx) = hwaccel_context {
+                    is_hwaccel = true;
+                    hw_format = Some(hw_ctx.format());
+                    // Need a custom filter for hwaccel != cuda
+                    if hw_format != Some(ffmpeg::util::format::Pixel::CUDA) {
+                        // FIXME: proper error handling
+                        println!(
+                            "Using hwaccel other than cuda, you should provide a custom filter"
+                        );
+                        return Err(ffmpeg::error::Error::DecoderNotFound);
+                    }
+                    filter_spec = format!(
+                        "scale_cuda=w={}:h={}:passthrough=0,hwdownload,format={}",
+                        width,
+                        height,
+                        HWACCEL_PIXEL_FORMAT.descriptor().unwrap().name(),
+                    );
+                    codec_context_get_hw_frames_ctx(
+                        &mut video,
+                        hw_format.unwrap(),
+                        HWACCEL_PIXEL_FORMAT,
+                    )?;
+                }
+                filter_spec
+            }
+            Some(spec) => {
+                if let Some(hw_ctx) = hwaccel_context {
+                    is_hwaccel = true;
+                    hw_format = Some(hw_ctx.format());
+                    codec_context_get_hw_frames_ctx(
+                        &mut video,
+                        hw_format.unwrap(),
+                        HWACCEL_PIXEL_FORMAT,
+                    )?;
+                }
+                spec
+            }
+        };
+
+        debug!("Filter spec: {}", filter_spec);
+        let filter_cfg = FilterConfig {
+            height: orig_h,
+            width: orig_w,
+            vid_format: orig_fmt,
+            time_base: video_info.get("time_base_rational").unwrap(),
+            spec: &filter_spec,
+            is_hwaccel,
+        };
+
+        let graph = create_filters(&mut video, hw_format, filter_cfg)?;
 
         Ok(VideoDecoder {
             video,
@@ -335,12 +550,19 @@ impl VideoReader {
             width,
             fps,
             video_info,
+            is_hwaccel,
+            graph,
         })
     }
 
     pub fn get_scaler(&self, pix_fmt: AvPixel) -> Result<Context, ffmpeg::Error> {
+        let vid_format = if self.decoder.is_hwaccel {
+            HWACCEL_PIXEL_FORMAT
+        } else {
+            self.decoder.video.format()
+        };
         let scaler = Context::get(
-            self.decoder.video.format(),
+            vid_format,
             self.decoder.video.width(),
             self.decoder.video.height(),
             pix_fmt,
@@ -366,8 +588,6 @@ impl VideoReader {
             self.decoder.width,
         );
         let first_index = start_frame.unwrap_or(0);
-
-        let mut scaler = self.get_scaler(AvPixel::RGB24)?;
 
         // make sure we are at the begining of the stream
         self.seek_to_start()?;
@@ -395,7 +615,7 @@ impl VideoReader {
             if stream.index() == self.stream_index {
                 self.decoder.video.send_packet(&packet)?;
                 self.decoder
-                    .receive_and_process_decoded_frames(&mut scaler, &mut reducer)?;
+                    .receive_and_process_decoded_frames(&mut reducer)?;
             } else {
                 debug!("Packet for another stream");
             }
@@ -406,7 +626,7 @@ impl VideoReader {
             && (&reducer.frame_index <= reducer.indices.iter().max().unwrap_or(&0))
         {
             self.decoder
-                .receive_and_process_decoded_frames(&mut scaler, &mut reducer)?;
+                .receive_and_process_decoded_frames(&mut reducer)?;
         }
         Ok(reducer.full_video)
     }
@@ -425,8 +645,6 @@ impl VideoReader {
             self.decoder.width,
         );
         let first_index = start_frame.unwrap_or(0);
-
-        let mut scaler = self.get_scaler(AvPixel::YUV420P)?;
 
         // make sure we are at the begining of the stream
         self.seek_to_start()?;
@@ -456,11 +674,33 @@ impl VideoReader {
             let mut decoded = Video::empty();
             while decoder.receive_frame(&mut decoded).is_ok() {
                 if reducer.indices.iter().any(|x| x == &curr_frame) {
+                    self.decoder
+                        .graph
+                        .get("in")
+                        .unwrap()
+                        .source()
+                        .add(&decoded)
+                        .unwrap();
                     let mut rgb_frame = Video::empty();
-                    scaler.run(&decoded, &mut rgb_frame).unwrap();
-                    tasks.push(task::spawn(async move {
-                        convert_yuv_to_ndarray_rgb24(rgb_frame)
-                    }));
+                    if self
+                        .decoder
+                        .graph
+                        .get("out")
+                        .unwrap()
+                        .sink()
+                        .frame(&mut rgb_frame)
+                        .is_ok()
+                    {
+                        if self.decoder.is_hwaccel {
+                            tasks.push(task::spawn(async move {
+                                convert_nv12_to_ndarray_rgb24(rgb_frame)
+                            }));
+                        } else {
+                            tasks.push(task::spawn(async move {
+                                convert_yuv_to_ndarray_rgb24(rgb_frame)
+                            }));
+                        }
+                    }
                 }
                 curr_frame += 1;
             }
@@ -578,57 +818,6 @@ pub fn get_resized_dim(mut height: f64, mut width: f64, resize_shorter_side_to: 
     (height as u32, width as u32)
 }
 
-/// Encode frames to a video file with h264 codec.
-/// * `frames` - Video frames to encode.
-/// * `destination_path` - Path to save the video.
-/// * `fps` - Frames per second of the video.
-/// * `codec` - Codec to use for encoding the video, eg "h264".
-pub fn save_video(
-    frames: Array4<u8>,
-    destination_path: &str,
-    fps: usize,
-    codec: &str,
-) -> Result<(), ffmpeg::Error> {
-    video_rs::init().unwrap();
-    let shape = frames.shape();
-    let n_frames = shape[0];
-    let height = shape[1];
-    let width = shape[2];
-
-    let destination: Location = Location::File(PathBuf::from(destination_path));
-    let mut encoder = match codec {
-        "h264" => {
-            let settings = Settings::preset_h264_yuv420p(width, height, false);
-            Encoder::new(&destination, settings).expect("failed to create encoder")
-        }
-        _ => {
-            // encode with mpeg4 format, ie XviD
-            // FIXME: does not work, video is still encoded as h264
-            let mut opts = HashMap::new();
-            opts.insert("vcodec".to_string(), "libxvid".to_string());
-            opts.insert("vtag".to_string(), "xvid".to_string());
-            opts.insert("q:v".to_string(), "5".to_string());
-            let settings =
-                Settings::preset_h264_custom(width, height, AvPixel::YUV420P, opts.into());
-            Encoder::new(&destination, settings).expect("failed to create encoder")
-        }
-    };
-
-    let duration: Time = Time::from_nth_of_a_second(fps);
-    let mut position = Time::zero();
-    for i in 0..n_frames {
-        encoder
-            .encode(&frames.slice(s![i, .., .., ..]).to_owned(), position)
-            .expect("failed to encode frame");
-
-        // Update the current position and add the inter-frame duration to it.
-        position = position.aligned_with(duration).add();
-    }
-
-    encoder.finish().expect("failed to finish encoder");
-    Ok(())
-}
-
 /// Converts an RGB24 video `AVFrame` produced by ffmpeg to an `ndarray`.
 /// Copied from https://github.com/oddity-ai/video-rs
 /// * `frame` - Video frame to convert.
@@ -667,14 +856,48 @@ pub fn convert_frame_to_ndarray_rgb24(
 /// Converts a YUV420P video `AVFrame` produced by ffmpeg to an `ndarray`.
 /// * `frame` - Video frame to convert.
 /// * returns a three-dimensional `ndarray` with dimensions `(H, W, C)` and type byte.
-pub fn convert_yuv_to_ndarray_rgb24(mut frame: Video) -> Array3<u8> {
+pub fn convert_yuv_to_ndarray_rgb24(frame: Video) -> Array3<u8> {
+    let (buf_vec, frame_width, frame_height, bytes_copied) =
+        copy_image(frame, AVPixelFormat::AV_PIX_FMT_YUV420P);
+
+    let colorspace = get_colorspace(frame_height);
+
+    if bytes_copied == buf_vec.len() as i32 {
+        let mut rgb = vec![0_u8; (frame_width * frame_height * 3) as usize];
+        let cut_point1 = (frame_width * frame_height) as usize;
+        let cut_point2 = cut_point1 + cut_point1 / 4;
+        let yuv_planar = YuvPlanarImage {
+            y_plane: &buf_vec[..cut_point1],
+            y_stride: frame_width as u32,
+            u_plane: &buf_vec[cut_point1..cut_point2],
+            u_stride: (frame_width / 2) as u32,
+            v_plane: &buf_vec[cut_point2..],
+            v_stride: (frame_width / 2) as u32,
+            width: frame_width as u32,
+            height: frame_height as u32,
+        };
+        yuv420_to_rgb(
+            &yuv_planar,
+            &mut rgb,
+            (frame_width * 3) as u32,
+            YuvRange::Full,
+            colorspace,
+        )
+        .unwrap();
+        Array3::from_shape_vec((frame_height as usize, frame_width as usize, 3_usize), rgb).unwrap()
+    } else {
+        Array3::zeros((frame_height as usize, frame_width as usize, 3_usize))
+    }
+}
+
+fn copy_image(mut frame: Video, pix_fmt: AVPixelFormat) -> (Vec<u8>, i32, i32, i32) {
     unsafe {
         let frame_ptr = frame.as_mut_ptr();
         let frame_width: i32 = (*frame_ptr).width;
         let frame_height: i32 = (*frame_ptr).height;
         let frame_format =
             std::mem::transmute::<std::ffi::c_int, AVPixelFormat>((*frame_ptr).format);
-        assert_eq!(frame_format, AVPixelFormat::AV_PIX_FMT_YUV420P);
+        assert_eq!(frame_format, pix_fmt);
 
         let mut buf_vec = vec![0_u8; (frame_width * (frame_height + frame_height / 2)) as usize];
 
@@ -688,44 +911,54 @@ pub fn convert_yuv_to_ndarray_rgb24(mut frame: Video) -> Array3<u8> {
             frame_height,
             1,
         );
+        (buf_vec, frame_width, frame_height, bytes_copied)
+    }
+}
 
-        // By default assume HD color space
-        let mut colorspace = YuvStandardMatrix::Bt709;
-        if frame_height < 720 {
-            // SD color space
-            colorspace = YuvStandardMatrix::Bt601;
-        } else if frame_height > 1080 {
-            // UHD color space
-            colorspace = YuvStandardMatrix::Bt2020;
-        }
+fn get_colorspace(height: i32) -> YuvStandardMatrix {
+    // By default assume HD color space
+    let mut colorspace = YuvStandardMatrix::Bt709;
+    if height < 720 {
+        // SD color space
+        colorspace = YuvStandardMatrix::Bt601;
+    } else if height > 1080 {
+        // UHD color space
+        colorspace = YuvStandardMatrix::Bt2020;
+    }
+    colorspace
+}
 
-        if bytes_copied == buf_vec.len() as i32 {
-            let mut rgb = vec![0_u8; (frame_width * frame_height * 3) as usize];
-            let cut_point1 = (frame_width * frame_height) as usize;
-            let cut_point2 = cut_point1 + cut_point1 / 4;
-            let yuv_planar = YuvPlanarImage {
-                y_plane: &buf_vec[..cut_point1],
-                y_stride: frame_width as u32,
-                u_plane: &buf_vec[cut_point1..cut_point2],
-                u_stride: (frame_width / 2) as u32,
-                v_plane: &buf_vec[cut_point2..],
-                v_stride: (frame_width / 2) as u32,
-                width: frame_width as u32,
-                height: frame_height as u32,
-            };
-            yuv420_to_rgb(
-                &yuv_planar,
-                &mut rgb,
-                (frame_width * 3) as u32,
-                YuvRange::Full,
-                colorspace,
-            )
-            .unwrap();
-            Array3::from_shape_vec((frame_height as usize, frame_width as usize, 3_usize), rgb)
-                .unwrap()
-        } else {
-            Array3::zeros((frame_height as usize, frame_width as usize, 3_usize))
-        }
+/// Converts a NV12 video `AVFrame` produced by ffmpeg to an `ndarray`.
+/// * `frame` - Video frame to convert.
+/// * returns a three-dimensional `ndarray` with dimensions `(H, W, C)` and type byte.
+pub fn convert_nv12_to_ndarray_rgb24(frame: Video) -> Array3<u8> {
+    let (buf_vec, frame_width, frame_height, bytes_copied) =
+        copy_image(frame, AVPixelFormat::AV_PIX_FMT_NV12);
+
+    let colorspace = get_colorspace(frame_width);
+
+    if bytes_copied == buf_vec.len() as i32 {
+        let mut rgb = vec![0_u8; (frame_width * frame_height * 3) as usize];
+        let cut_point = (frame_width * frame_height) as usize;
+        let yuv_planar = YuvBiPlanarImage {
+            y_plane: &buf_vec[..cut_point],
+            y_stride: frame_width as u32,
+            uv_plane: &buf_vec[cut_point..],
+            uv_stride: frame_width as u32,
+            width: frame_width as u32,
+            height: frame_height as u32,
+        };
+        yuv_nv12_to_rgb(
+            &yuv_planar,
+            &mut rgb,
+            (frame_width * 3) as u32,
+            YuvRange::Full,
+            colorspace,
+        )
+        .unwrap();
+        Array3::from_shape_vec((frame_height as usize, frame_width as usize, 3_usize), rgb).unwrap()
+    } else {
+        Array3::zeros((frame_height as usize, frame_width as usize, 3_usize))
     }
 }
 
@@ -845,8 +1078,6 @@ impl VideoReader {
         // duration of a frame in micro seconds
         let frame_duration = (1. / fps * 1_000.0).round() as usize;
 
-        let mut scaler = self.get_scaler(AvPixel::RGB24)?;
-
         // make sure we are at the begining of the stream
         self.seek_to_start()?;
 
@@ -857,7 +1088,6 @@ impl VideoReader {
                 frame_index,
                 &frame_duration,
                 &mut video_frames.slice_mut(s![idx_counter, .., .., ..]),
-                &mut scaler,
             )?;
         }
         Ok(video_frames)
@@ -868,7 +1098,6 @@ impl VideoReader {
         frame_index: usize,
         frame_duration: &usize,
         frame_array: &mut ArrayViewMut3<u8>,
-        scaler: &mut Context,
     ) -> Result<(), ffmpeg::Error> {
         let key_pos = self.locate_keyframes(&frame_index, &self.stream_info.key_frames);
         debug!("    - Key pos: {}", key_pos);
@@ -878,7 +1107,7 @@ impl VideoReader {
             // we can directly skip until frame_index
             debug!("No need to seek, we can directly skip frames");
             let num_skip = self.get_num_skip(&frame_index);
-            self.skip_frames(num_skip, &frame_index, frame_array, scaler)?;
+            self.skip_frames(num_skip, &frame_index, frame_array)?;
         } else {
             if key_pos < curr_key_pos {
                 debug!("Seeking back to start");
@@ -887,7 +1116,7 @@ impl VideoReader {
             debug!("Seeking to key_pos: {}", key_pos);
             self.seek_frame(&key_pos, frame_duration)?;
             let num_skip = self.get_num_skip(&frame_index);
-            self.skip_frames(num_skip, &frame_index, frame_array, scaler)?;
+            self.skip_frames(num_skip, &frame_index, frame_array)?;
         }
         Ok(())
     }
@@ -923,7 +1152,6 @@ impl VideoReader {
         num: usize,
         frame_index: &usize,
         frame_array: &mut ArrayViewMut3<u8>,
-        scaler: &mut Context,
     ) -> Result<(), ffmpeg::Error> {
         let num_skip = num.min(self.stream_info.frame_count - 1);
         debug!(
@@ -941,9 +1169,33 @@ impl VideoReader {
                         let mut decoded = Video::empty();
                         while self.decoder.video.receive_frame(&mut decoded).is_ok() {
                             if &self.curr_frame == frame_index {
-                                let mut rgb_frame = Video::empty();
-                                scaler.run(&decoded, &mut rgb_frame)?;
-                                convert_frame_to_ndarray_rgb24(&mut rgb_frame, frame_array)?;
+                                self.decoder
+                                    .graph
+                                    .get("in")
+                                    .unwrap()
+                                    .source()
+                                    .add(&decoded)
+                                    .unwrap();
+
+                                let mut yuv_frame = Video::empty();
+                                if self
+                                    .decoder
+                                    .graph
+                                    .get("out")
+                                    .unwrap()
+                                    .sink()
+                                    .frame(&mut yuv_frame)
+                                    .is_ok()
+                                {
+                                    let rgb_frame: Array3<u8> = if self.decoder.is_hwaccel {
+                                        convert_nv12_to_ndarray_rgb24(yuv_frame)
+                                    } else {
+                                        convert_yuv_to_ndarray_rgb24(yuv_frame)
+                                    };
+                                    frame_array.zip_mut_with(&rgb_frame, |a, b| {
+                                        *a = *b;
+                                    });
+                                }
                                 self.update_indices();
                                 return Ok(());
                             }

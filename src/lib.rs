@@ -1,5 +1,9 @@
 use numpy::ndarray::Dim;
-use numpy::{IntoPyArray, PyArray, PyReadonlyArray4};
+mod ffi_hwaccel;
+use std::str::FromStr;
+mod hwaccel;
+use hwaccel::HardwareAccelerationDeviceType;
+use numpy::{IntoPyArray, PyArray};
 mod video_io;
 use log::debug;
 use pyo3::{
@@ -9,7 +13,7 @@ use pyo3::{
     Bound, PyResult, Python,
 };
 use std::sync::Mutex;
-use video_io::{rgb2gray, save_video, DecoderConfig, VideoReader};
+use video_io::{rgb2gray, DecoderConfig, VideoReader};
 
 use once_cell::sync::Lazy;
 use tokio::runtime::{self, Runtime};
@@ -31,19 +35,29 @@ struct PyVideoReader {
 #[pymethods]
 impl PyVideoReader {
     #[new]
-    #[pyo3(signature = (filename, threads=None, resize_shorter_side=None))]
+    #[pyo3(signature = (filename, threads=None, resize_shorter_side=None, device=None, filter=None))]
     /// create an instance of VideoReader
     /// * `filename` - path to the video file
     /// * `threads` - number of threads to use. If None, let ffmpeg choose the optimal number.
     /// * `resize_shorter_side - Optional, resize shorted side of the video to this value while
     /// preserving the aspect ratio.
+    /// * `device` - type of hardware acceleration, eg: 'cuda', 'vdpau', 'drm', etc.
+    /// * `filter` - custome ffmpeg filter to use, eg "format=rgb24,scale=w=256:h=256:flags=fast_bilinear"
+    /// If set to None (default) or 'cpu' then cpu is used.
     /// * returns a PyVideoReader instance.
     fn new(
         filename: &str,
         threads: Option<usize>,
         resize_shorter_side: Option<f64>,
+        device: Option<&str>,
+        filter: Option<String>,
     ) -> PyResult<Self> {
-        let decoder_config = DecoderConfig::new(threads.unwrap_or(0), resize_shorter_side);
+        let hwaccel = match device {
+            Some("cpu") | None => None,
+            Some(other) => Some(HardwareAccelerationDeviceType::from_str(other).unwrap()),
+        };
+        let decoder_config =
+            DecoderConfig::new(threads.unwrap_or(0), resize_shorter_side, hwaccel, filter);
         match VideoReader::new(filename.to_string(), decoder_config) {
             Ok(reader) => Ok(PyVideoReader {
                 inner: Mutex::new(reader),
@@ -239,31 +253,7 @@ impl PyVideoReader {
 #[pymodule]
 fn video_reader<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()> {
     env_logger::init();
-
     // Add the VideoReader class to the module
     m.add_class::<PyVideoReader>()?;
-
-    // wrapper of `save_video`
-    /// Save 4D np.ndarray of frames to video file
-    /// * `ndarray` - np.ndarray of shape (N, H, W, C)
-    /// * `output_filename` - Path to the output video file
-    /// * `fps` - Frames per second of the output video
-    /// * `codec` - Codec to use for the output video, eg "h264"
-    /// * Returns None
-    #[pyfn(m)]
-    #[pyo3(name = "save_video")]
-    fn save_video_py(
-        ndarray: PyReadonlyArray4<u8>,
-        output_filename: &str,
-        fps: usize,
-        codec: &str,
-    ) -> PyResult<()> {
-        let ndarray = ndarray.as_array().to_owned();
-        let res = save_video(ndarray, output_filename, fps, codec);
-        match res {
-            Ok(_) => Ok(()),
-            Err(e) => Err(PyRuntimeError::new_err(format!("Error: {}", e))),
-        }
-    }
     Ok(())
 }
