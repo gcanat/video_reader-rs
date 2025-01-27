@@ -123,6 +123,21 @@ for i in range(0, video_length, chunk_size):
     # do something with this chunk of 800 `frames`
 ```
 
+## Experimental support for Hardware Acceleration
+You need to install `video-reader-rs` from source by cloning this repo and running `maturin develop -r` or `maturin develop -r --features ffmpeg_6_0` if you have ffmpeg >= 6.0. Your ffmpeg installation should have support for cuda. Check with `ffmpeg -version | grep cuda` for example.
+
+```python
+from video_reader import PyVideoReader
+
+videoname = "/path/to/your/video.mp4"
+vr = PyVideoReader(videoname, device='cuda')
+```
+
+You can also pass your own ffmpeg [filter](https://ffmpeg.org/ffmpeg-filters.html#Video-Filters) if you feel adventurous enough. For example, this would be the default filter used when specifying `devide='cuda'` and `resize_shorter_side=512`.
+```python
+vr = PyVideoReader(videoname, device='cuda', filter='scale_cuda:h=512:w=-1:passthrough=0,hwdownload,format=nv12', resize_shorter_side=512)
+```
+In theory any hwaccel should work if you provide the correct filters, ie qsv, vaapi, vdpau, etc. It has not been tested though. Feel free to report.
 
 ## 🚀 Performance comparison
 Decoding a video with shape (2004, 1472, 1472, 3). Tested on a laptop (12 cores Intel i7-9750H CPU @ 2.60GHz), 15Gb of RAM with Ubuntu 22.04.
