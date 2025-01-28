@@ -139,6 +139,11 @@ vr = PyVideoReader(videoname, device='cuda', filter='scale_cuda:h=512:w=-1:passt
 ```
 In theory any hwaccel should work if you provide the correct filters, ie qsv, vaapi, vdpau, etc. It has not been tested though. Feel free to report.
 
+Another example with VAAPI hardware acceleration:
+```python
+vr = PyVideoReader(videoname, device='vaapi', filter='hwmap,format=nv12')
+```
+
 ## 🚀 Performance comparison
 Decoding a video with shape (2004, 1472, 1472, 3). Tested on a laptop (12 cores Intel i7-9750H CPU @ 2.60GHz), 15Gb of RAM with Ubuntu 22.04.
 
