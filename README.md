@@ -123,7 +123,7 @@ for i in range(0, video_length, chunk_size):
     # do something with this chunk of 800 `frames`
 ```
 
-## Experimental support for Hardware Acceleration
+## 🧪 Experimental support for Hardware Acceleration
 You need to install `video-reader-rs` from source by cloning this repo and running `maturin develop -r` or `maturin develop -r --features ffmpeg_6_0` if you have ffmpeg >= 6.0. Your ffmpeg installation should have support for cuda. Check with `ffmpeg -version | grep cuda` for example.
 
 ```python
