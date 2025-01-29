@@ -2,7 +2,9 @@
 extern crate ffmpeg_next as ffmpeg;
 
 use crate::hwaccel::HardwareAccelerationDeviceType;
+use crate::video_io::HWACCEL_PIXEL_FORMAT;
 use ffmpeg::ffi::*;
+use ffmpeg::util::frame::video::Video;
 
 pub struct HardwareDeviceContext {
     ptr: *mut ffmpeg::ffi::AVBufferRef,
@@ -148,4 +150,14 @@ unsafe extern "C" fn hwaccel_get_format(
         p = p.add(1);
     }
     ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_NONE
+}
+
+pub fn download_frame(frame: &Video) -> Result<Video, ffmpeg::Error> {
+    let mut frame_downloaded = Video::empty();
+    frame_downloaded.set_format(HWACCEL_PIXEL_FORMAT);
+    hwdevice_transfer_frame(&mut frame_downloaded, frame)?;
+    unsafe {
+        av_frame_copy_props(frame_downloaded.as_mut_ptr(), frame.as_ptr());
+    }
+    Ok(frame_downloaded)
 }

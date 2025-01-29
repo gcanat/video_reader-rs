@@ -5,6 +5,7 @@ use std::str::FromStr;
 mod hwaccel;
 use hwaccel::HardwareAccelerationDeviceType;
 use numpy::{IntoPyArray, PyArray};
+mod decoder;
 mod video_io;
 use convert::rgb2gray;
 use log::debug;

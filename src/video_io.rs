@@ -11,11 +11,9 @@ use log::debug;
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
-use crate::convert::{
-    convert_frame_to_ndarray_rgb24, convert_nv12_to_ndarray_rgb24, convert_yuv_to_ndarray_rgb24,
-};
+use crate::convert::{convert_nv12_to_ndarray_rgb24, convert_yuv_to_ndarray_rgb24};
+use crate::decoder::VideoDecoder;
 use crate::ffi_hwaccel::codec_context_get_hw_frames_ctx;
-use crate::ffi_hwaccel::hwdevice_transfer_frame;
 use crate::hwaccel::{HardwareAccelerationContext, HardwareAccelerationDeviceType};
 use ndarray::{s, Array, Array3, Array4, ArrayViewMut3};
 use tokio::task;
@@ -24,7 +22,7 @@ pub type FrameArray = Array3<u8>;
 pub type VideoArray = Array4<u8>;
 
 /// Always use NV12 pixel format with hardware acceleration, then rescale later.
-static HWACCEL_PIXEL_FORMAT: AvPixel = AvPixel::NV12;
+pub(crate) static HWACCEL_PIXEL_FORMAT: AvPixel = AvPixel::NV12;
 
 struct VideoParams {
     duration: f64,
@@ -267,38 +265,13 @@ impl VideoReader {
     }
 }
 
-/// Struct responsible for doing the actual decoding
-pub struct VideoDecoder {
-    video: ffmpeg::decoder::Video,
-    height: u32,
-    width: u32,
-    fps: f64,
-    video_info: HashMap<&'static str, String>,
-    is_hwaccel: bool,
-    graph: filter::Graph,
-}
-
-unsafe impl Send for VideoDecoder {}
-
-impl VideoDecoder {
-    pub fn video_info(&self) -> &HashMap<&'static str, String> {
-        &self.video_info
-    }
-    pub fn fps(&self) -> f64 {
-        self.fps
-    }
-    pub fn video(&self) -> &ffmpeg::decoder::Video {
-        &self.video
-    }
-}
-
 /// Struct used when we want to decode the whole video with a compression_factor
 #[derive(Clone)]
 pub struct VideoReducer {
-    indices: Vec<usize>,
-    frame_index: usize,
-    idx_counter: usize,
-    full_video: VideoArray,
+    pub indices: Vec<usize>,
+    pub frame_index: usize,
+    pub idx_counter: usize,
+    pub full_video: VideoArray,
 }
 
 /// Timing info for key frames
@@ -338,94 +311,6 @@ impl StreamInfo {
     }
     pub fn frame_times(&self) -> &BTreeMap<usize, FrameTime> {
         &self.frame_times
-    }
-}
-
-fn download_frame(frame: &Video) -> Result<Video, ffmpeg::Error> {
-    let mut frame_downloaded = Video::empty();
-    frame_downloaded.set_format(HWACCEL_PIXEL_FORMAT);
-    hwdevice_transfer_frame(&mut frame_downloaded, frame)?;
-    unsafe {
-        av_frame_copy_props(frame_downloaded.as_mut_ptr(), frame.as_ptr());
-    }
-    Ok(frame_downloaded)
-}
-
-impl VideoDecoder {
-    /// Decode all frames that match the frame indices
-    pub fn receive_and_process_decoded_frames(
-        &mut self,
-        reducer: &mut VideoReducer,
-    ) -> Result<(), ffmpeg::Error> {
-        let mut decoded = Video::empty();
-        while self.video.receive_frame(&mut decoded).is_ok() {
-            let match_index = reducer
-                .indices
-                .iter()
-                .position(|x| x == &reducer.frame_index);
-            if match_index.is_some() {
-                reducer.indices.remove(match_index.unwrap());
-                self.graph
-                    .get("in")
-                    .unwrap()
-                    .source()
-                    .add(&decoded)
-                    .unwrap();
-
-                let mut yuv_frame = Video::empty();
-                if self
-                    .graph
-                    .get("out")
-                    .unwrap()
-                    .sink()
-                    .frame(&mut yuv_frame)
-                    .is_ok()
-                {
-                    let mut slice_frame =
-                        reducer
-                            .full_video
-                            .slice_mut(s![reducer.idx_counter, .., .., ..]);
-
-                    let rgb_frame: Array3<u8> = if self.is_hwaccel {
-                        convert_nv12_to_ndarray_rgb24(yuv_frame)
-                    } else {
-                        convert_yuv_to_ndarray_rgb24(yuv_frame)
-                    };
-
-                    slice_frame.zip_mut_with(&rgb_frame, |a, b| {
-                        *a = *b;
-                    });
-                }
-                reducer.idx_counter += 1;
-            }
-            reducer.frame_index += 1;
-        }
-        Ok(())
-    }
-    /// Decode frames
-    pub fn skip_and_decode_frames(
-        &mut self,
-        scaler: &mut Context,
-        reducer: &mut VideoReducer,
-        indices: &[usize],
-        frame_map: &mut HashMap<usize, FrameArray>,
-    ) -> Result<(), ffmpeg::Error> {
-        let mut decoded = Video::empty();
-        while self.video.receive_frame(&mut decoded).is_ok() {
-            if indices.iter().any(|x| x == &reducer.frame_index) {
-                if self.is_hwaccel {
-                    decoded = download_frame(&decoded)?;
-                }
-                let mut rgb_frame = Video::empty();
-                let mut nd_frame =
-                    FrameArray::zeros((self.height as usize, self.width as usize, 3_usize));
-                scaler.run(&decoded, &mut rgb_frame)?;
-                convert_frame_to_ndarray_rgb24(&mut rgb_frame, &mut nd_frame.view_mut())?;
-                frame_map.insert(reducer.frame_index, nd_frame);
-            }
-            reducer.frame_index += 1;
-        }
-        Ok(())
     }
 }
 
