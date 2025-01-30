@@ -2,6 +2,7 @@ use numpy::ndarray::Dim;
 mod convert;
 mod ffi_hwaccel;
 use std::str::FromStr;
+mod filter;
 mod hwaccel;
 use hwaccel::HardwareAccelerationDeviceType;
 use numpy::{IntoPyArray, PyArray};

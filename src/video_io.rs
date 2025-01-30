@@ -1,6 +1,5 @@
 use ffmpeg::codec::threading;
 use ffmpeg::ffi::*;
-use ffmpeg::filter;
 use ffmpeg::format::{input, Pixel as AvPixel};
 use ffmpeg::media::Type;
 use ffmpeg::software::scaling::{context::Context, flag::Flags};
@@ -14,6 +13,7 @@ use std::path::Path;
 use crate::convert::{convert_nv12_to_ndarray_rgb24, convert_yuv_to_ndarray_rgb24};
 use crate::decoder::VideoDecoder;
 use crate::ffi_hwaccel::codec_context_get_hw_frames_ctx;
+use crate::filter::{create_filters, FilterConfig};
 use crate::hwaccel::{HardwareAccelerationContext, HardwareAccelerationDeviceType};
 use ndarray::{s, Array, Array3, Array4, ArrayViewMut3};
 use tokio::task;
@@ -60,15 +60,6 @@ impl DecoderConfig {
             ff_filter,
         }
     }
-}
-
-struct FilterConfig<'a> {
-    height: u32,
-    width: u32,
-    vid_format: ffmpeg::util::format::Pixel,
-    time_base: &'a str,
-    spec: &'a str,
-    is_hwaccel: bool,
 }
 
 fn extract_video_params(input: &ffmpeg::Stream) -> VideoParams {
@@ -171,76 +162,6 @@ fn create_video_reducer(
         Some(start),
         Some(end),
     )
-}
-
-fn create_filters(
-    decoder_ctx: &mut ffmpeg::codec::Context,
-    hw_fmt: Option<ffmpeg::util::format::Pixel>,
-    filter_cfg: FilterConfig,
-) -> Result<filter::Graph, ffmpeg::Error> {
-    let mut graph = filter::Graph::new();
-
-    let args = format!(
-        "video_size={}x{}:pix_fmt={}:time_base={}:pixel_aspect=1/1",
-        filter_cfg.width,
-        filter_cfg.height,
-        filter_cfg.vid_format.descriptor().unwrap().name(),
-        filter_cfg.time_base,
-    );
-    debug!("Buffer args: {}", args);
-
-    let mut buffersrc_ctx = graph.add(&filter::find("buffer").unwrap(), "in", args.as_str())?;
-    if let Some(hw_pix_fmt) = hw_fmt {
-        create_hwbuffer_src(
-            decoder_ctx,
-            &mut buffersrc_ctx,
-            filter_cfg.height,
-            filter_cfg.width,
-            hw_pix_fmt,
-            filter_cfg.time_base,
-            filter_cfg.is_hwaccel,
-        )?;
-    }
-    graph.add(&filter::find("buffersink").unwrap(), "out", "")?;
-    graph
-        .output("in", 0)?
-        .input("out", 0)?
-        .parse(filter_cfg.spec)?;
-    graph.validate()?;
-    Ok(graph)
-}
-
-pub fn create_hwbuffer_src(
-    codec_ctx: &mut ffmpeg::codec::context::Context,
-    filt_ctx: &mut filter::Context,
-    height: u32,
-    width: u32,
-    vid_format: ffmpeg::util::format::Pixel,
-    time_base: &str,
-    is_hwaccel: bool,
-) -> Result<filter::Context, ffmpeg::util::error::Error> {
-    let time_base = time_base.split_once('/').unwrap();
-
-    unsafe {
-        let params_ptr = av_buffersrc_parameters_alloc();
-        if let Some(params) = params_ptr.as_mut() {
-            params.format = Into::<AVPixelFormat>::into(vid_format) as i32;
-            params.width = width as i32;
-            params.height = height as i32;
-            params.time_base = Rational(
-                time_base.0.parse::<i32>().unwrap(),
-                time_base.1.parse::<i32>().unwrap(),
-            )
-            .into();
-            if is_hwaccel {
-                params.hw_frames_ctx = (*codec_ctx.as_mut_ptr()).hw_frames_ctx;
-            }
-        };
-        match av_buffersrc_parameters_set(filt_ctx.as_mut_ptr(), params_ptr) {
-            n if n >= 0 => Ok(filter::Context::wrap(filt_ctx.as_mut_ptr())),
-            e => Err(ffmpeg::Error::from(e)),
-        }
-    }
 }
 
 /// Struct responsible for reading the stream and getting the metadata
@@ -417,14 +338,14 @@ impl VideoReader {
         };
 
         debug!("Filter spec: {}", filter_spec);
-        let filter_cfg = FilterConfig {
-            height: orig_h,
-            width: orig_w,
-            vid_format: orig_fmt,
-            time_base: video_info.get("time_base_rational").unwrap(),
-            spec: &filter_spec,
+        let filter_cfg = FilterConfig::new(
+            orig_h,
+            orig_w,
+            orig_fmt,
+            video_info.get("time_base_rational").unwrap(),
+            &filter_spec,
             is_hwaccel,
-        };
+        );
 
         let graph = create_filters(&mut video, hw_format, filter_cfg)?;
 
