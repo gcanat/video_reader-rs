@@ -2,7 +2,7 @@ use ffmpeg::util::rational::Rational;
 use ffmpeg_next as ffmpeg;
 use std::collections::{BTreeMap, HashMap};
 
-struct VideoParams {
+pub struct VideoParams {
     duration: f64,
     start_time: i64,
     time_base: f64,
