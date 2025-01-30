@@ -317,7 +317,7 @@ impl VideoReader {
             && (first_index > 0)
         {
             let frame_duration = (1. / self.decoder.fps * 1_000.0).round() as usize;
-            let key_pos = self.locate_keyframes(&first_index, &self.stream_info.key_frames());
+            let key_pos = self.locate_keyframes(&first_index, self.stream_info.key_frames());
             self.seek_frame(&key_pos, &frame_duration)?;
             self.curr_frame = key_pos;
         }
@@ -372,7 +372,7 @@ impl VideoReader {
             .any(|k| &first_index >= k)
             && (first_index > 0)
         {
-            let key_pos = self.locate_keyframes(&first_index, &self.stream_info.key_frames());
+            let key_pos = self.locate_keyframes(&first_index, self.stream_info.key_frames());
             let fps = self.decoder.fps;
             // duration of a frame in micro seconds
             let frame_duration = (1. / fps * 1_000.0).round() as usize;
@@ -495,7 +495,7 @@ impl VideoReader {
         self.seek_to_start()?;
 
         // check if closest key frames to first_index is non zero, if so we can seek
-        let key_pos = self.locate_keyframes(first_index, &self.stream_info.key_frames());
+        let key_pos = self.locate_keyframes(first_index, self.stream_info.key_frames());
         if key_pos > 0 {
             let frame_duration = (1. / self.decoder.fps * 1_000.0).round() as usize;
             self.seek_frame(&key_pos, &frame_duration)?;
@@ -707,7 +707,7 @@ impl VideoReader {
         self.curr_frame = *self
             .stream_info
             .get_dec_idx(&self.curr_dec_idx)
-            .unwrap_or(&self.stream_info.frame_count());
+            .unwrap_or(self.stream_info.frame_count());
         debug!(
             "dec_idx: {}, curr_frame: {}",
             self.curr_dec_idx, self.curr_frame
