@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use crate::convert::{convert_nv12_to_ndarray_rgb24, convert_yuv_to_ndarray_rgb24};
-use crate::decoder::VideoDecoder;
+use crate::decoder::{VideoDecoder, VideoReducer};
 use crate::ffi_hwaccel::codec_context_get_hw_frames_ctx;
 use crate::filter::{create_filters, FilterConfig};
 use crate::hwaccel::{HardwareAccelerationContext, HardwareAccelerationDeviceType};
@@ -104,12 +104,7 @@ fn create_video_reducer(
     let full_video = Array::zeros((indices.len(), height as usize, width as usize, 3));
 
     (
-        Some(VideoReducer {
-            indices,
-            frame_index: 0,
-            full_video,
-            idx_counter: 0,
-        }),
+        Some(VideoReducer::new(indices, 0, 0, full_video)),
         Some(start),
         Some(end),
     )
@@ -135,15 +130,6 @@ impl VideoReader {
     pub fn stream_info(&self) -> &StreamInfo {
         &self.stream_info
     }
-}
-
-/// Struct used when we want to decode the whole video with a compression_factor
-#[derive(Clone)]
-pub struct VideoReducer {
-    pub indices: Vec<usize>,
-    pub frame_index: usize,
-    pub idx_counter: usize,
-    pub full_video: VideoArray,
 }
 
 impl VideoReader {
@@ -323,9 +309,9 @@ impl VideoReader {
         }
 
         let mut reducer = reducer.unwrap();
-        reducer.frame_index = self.curr_frame;
+        reducer.set_frame_index(self.curr_frame);
         for (stream, packet) in self.ictx.packets() {
-            if &reducer.frame_index > reducer.indices.iter().max().unwrap_or(&0) {
+            if &reducer.get_frame_index() > reducer.get_indices().iter().max().unwrap_or(&0) {
                 break;
             }
             if stream.index() == self.stream_index {
@@ -338,13 +324,13 @@ impl VideoReader {
         }
         self.decoder.video.send_eof()?;
         // only process the remaining frames if we haven't reached the last frame
-        if !reducer.indices.is_empty()
-            && (&reducer.frame_index <= reducer.indices.iter().max().unwrap_or(&0))
+        if !reducer.get_indices().is_empty()
+            && (&reducer.get_frame_index() <= reducer.get_indices().iter().max().unwrap_or(&0))
         {
             self.decoder
                 .receive_and_process_decoded_frames(&mut reducer)?;
         }
-        Ok(reducer.full_video)
+        Ok(reducer.get_full_video())
     }
     pub async fn decode_video_fast(
         &mut self,
@@ -381,7 +367,7 @@ impl VideoReader {
         }
 
         let mut reducer = reducer.unwrap();
-        reducer.frame_index = self.curr_frame;
+        reducer.set_frame_index(self.curr_frame);
         let mut tasks = vec![];
 
         let mut receive_and_process_decoded_frames = |decoder: &mut ffmpeg::decoder::Video,
@@ -389,7 +375,7 @@ impl VideoReader {
          -> Result<usize, ffmpeg::Error> {
             let mut decoded = Video::empty();
             while decoder.receive_frame(&mut decoded).is_ok() {
-                if reducer.indices.iter().any(|x| x == &curr_frame) {
+                if reducer.get_indices().iter().any(|x| x == &curr_frame) {
                     self.decoder
                         .graph
                         .get("in")
@@ -424,7 +410,7 @@ impl VideoReader {
         };
 
         for (stream, packet) in self.ictx.packets() {
-            if &self.curr_frame > reducer.indices.iter().max().unwrap_or(&0) {
+            if &self.curr_frame > reducer.get_indices().iter().max().unwrap_or(&0) {
                 break;
             }
             if stream.index() == self.stream_index {
@@ -438,8 +424,8 @@ impl VideoReader {
         }
         self.decoder.video.send_eof()?;
         // only process the remaining frames if we haven't reached the last frame
-        if !reducer.indices.is_empty()
-            && (&self.curr_frame <= reducer.indices.iter().max().unwrap_or(&0))
+        if !reducer.get_indices().is_empty()
+            && (&self.curr_frame <= reducer.get_indices().iter().max().unwrap_or(&0))
         {
             let upd_curr_frame =
                 receive_and_process_decoded_frames(&mut self.decoder.video, self.curr_frame)?;
@@ -504,7 +490,7 @@ impl VideoReader {
 
         let mut reducer = reducer.unwrap();
         if key_pos > 0 {
-            reducer.frame_index = self.curr_frame;
+            reducer.set_frame_index(self.curr_frame);
         }
 
         for (stream, packet) in self.ictx.packets() {
@@ -519,12 +505,12 @@ impl VideoReader {
             } else {
                 debug!("Packet for another stream");
             }
-            if &reducer.frame_index > last_index {
+            if &reducer.get_frame_index() > last_index {
                 break;
             }
         }
         self.decoder.video.send_eof()?;
-        if &reducer.frame_index <= last_index {
+        if &reducer.get_frame_index() <= last_index {
             self.decoder.skip_and_decode_frames(
                 &mut scaler,
                 &mut reducer,
