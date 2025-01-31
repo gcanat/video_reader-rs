@@ -10,6 +10,7 @@ use numpy::{IntoPyArray, PyArray};
 mod decoder;
 mod video_io;
 use convert::rgb2gray;
+use decoder::DecoderConfig;
 use log::debug;
 use pyo3::{
     exceptions::PyRuntimeError,
@@ -18,7 +19,7 @@ use pyo3::{
     Bound, PyResult, Python,
 };
 use std::sync::Mutex;
-use video_io::{DecoderConfig, VideoReader};
+use video_io::VideoReader;
 
 use once_cell::sync::Lazy;
 use tokio::runtime::{self, Runtime};

@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use crate::convert::{convert_nv12_to_ndarray_rgb24, convert_yuv_to_ndarray_rgb24};
-use crate::decoder::{VideoDecoder, VideoReducer};
+use crate::decoder::{DecoderConfig, VideoDecoder, VideoReducer};
 use crate::ffi_hwaccel::codec_context_get_hw_frames_ctx;
 use crate::filter::{create_filters, FilterConfig};
 use crate::hwaccel::{HardwareAccelerationContext, HardwareAccelerationDeviceType};
@@ -26,35 +26,22 @@ pub type VideoArray = Array4<u8>;
 /// Always use NV12 pixel format with hardware acceleration, then rescale later.
 pub(crate) static HWACCEL_PIXEL_FORMAT: AvPixel = AvPixel::NV12;
 
-/// Config to instantiate a Decoder
-/// * threads: number of threads to use
-/// * resize_shorter_side: resize shorter side of the video to this value
-///   (preserves aspect ratio)
-/// * hw_accel: hardware acceleration device type, eg cuda, qsv, etc
-/// * ff_filter: optional custom ffmpeg filter to use, eg:
-///   "format=rgb24,scale=w=256:h=256:flags=fast_bilinear"
-#[derive(Default)]
-pub struct DecoderConfig {
-    threads: usize,
-    resize_shorter_side: Option<f64>,
-    hw_accel: Option<HardwareAccelerationDeviceType>,
-    ff_filter: Option<String>,
-}
+pub fn get_init_context(
+    filename: &String,
+) -> Result<(ffmpeg::format::context::Input, usize), ffmpeg::Error> {
+    let input_file = Path::new(filename);
 
-impl DecoderConfig {
-    pub fn new(
-        threads: usize,
-        resize_shorter_side: Option<f64>,
-        hw_accel: Option<HardwareAccelerationDeviceType>,
-        ff_filter: Option<String>,
-    ) -> Self {
-        Self {
-            threads,
-            resize_shorter_side,
-            hw_accel,
-            ff_filter,
-        }
-    }
+    // Initialize the FFmpeg library
+    ffmpeg::init()?;
+
+    // Open the input file
+    let ictx = input(&input_file)?;
+    let stream_index = ictx
+        .streams()
+        .best(Type::Video)
+        .ok_or(ffmpeg::Error::StreamNotFound)?
+        .index();
+    Ok((ictx, stream_index))
 }
 
 fn setup_decoder_context(
@@ -81,33 +68,6 @@ fn setup_decoder_context(
         safe: true,
     });
     Ok((context, hwaccel_context))
-}
-
-fn create_video_reducer(
-    start_frame: Option<usize>,
-    end_frame: Option<usize>,
-    frame_count: usize,
-    compression_factor: Option<f64>,
-    height: u32,
-    width: u32,
-) -> (Option<VideoReducer>, Option<usize>, Option<usize>) {
-    let start = start_frame.unwrap_or(0);
-    let end = end_frame.unwrap_or(frame_count).min(frame_count);
-
-    let n_frames = ((end - start) as f64 * compression_factor.unwrap_or(1.0)).round() as usize;
-
-    let indices = Array::linspace(start as f64, end as f64 - 1., n_frames)
-        .iter()
-        .map(|x| x.round() as usize)
-        .collect::<Vec<_>>();
-
-    let full_video = Array::zeros((indices.len(), height as usize, width as usize, 3));
-
-    (
-        Some(VideoReducer::new(indices, 0, 0, full_video)),
-        Some(start),
-        Some(end),
-    )
 }
 
 /// Struct responsible for reading the stream and getting the metadata
@@ -171,13 +131,13 @@ impl VideoReader {
         let video_params = extract_video_params(&input);
 
         let (decoder_context, hwaccel_context) =
-            setup_decoder_context(&input, config.threads, config.hw_accel)?;
+            setup_decoder_context(&input, config.threads(), config.hwaccel())?;
 
         let mut video = decoder_context.decoder().video()?;
         let (orig_h, orig_w, orig_fmt) = (video.height(), video.width(), video.format());
         let video_info = collect_video_metadata(&video, &video_params, &fps);
 
-        let (height, width) = match config.resize_shorter_side {
+        let (height, width) = match config.resize_shorter_side() {
             Some(resize) => get_resized_dim(orig_h as f64, orig_w as f64, resize),
             None => (orig_h, orig_w),
         };
@@ -186,7 +146,7 @@ impl VideoReader {
         let mut is_hwaccel = false;
         let mut hw_format: Option<ffmpeg::util::format::Pixel> = None;
 
-        let filter_spec = match config.ff_filter {
+        let filter_spec = match config.ff_filter() {
             None => {
                 let mut filter_spec = format!(
                     "format={},scale=w={}:h={}:flags=fast_bilinear",
@@ -246,15 +206,9 @@ impl VideoReader {
 
         let graph = create_filters(&mut video, hw_format, filter_cfg)?;
 
-        Ok(VideoDecoder {
-            video,
-            height,
-            width,
-            fps,
-            video_info,
-            is_hwaccel,
-            graph,
-        })
+        Ok(VideoDecoder::new(
+            video, height, width, fps, video_info, is_hwaccel, graph,
+        ))
     }
 
     pub fn get_scaler(&self, pix_fmt: AvPixel) -> Result<Context, ffmpeg::Error> {
@@ -281,7 +235,7 @@ impl VideoReader {
         end_frame: Option<usize>,
         compression_factor: Option<f64>,
     ) -> Result<VideoArray, ffmpeg::Error> {
-        let (reducer, start_frame, _end_frame) = create_video_reducer(
+        let (reducer, start_frame, _end_frame) = VideoReducer::build(
             start_frame,
             end_frame,
             *self.stream_info.frame_count(),
@@ -324,7 +278,7 @@ impl VideoReader {
         }
         self.decoder.video.send_eof()?;
         // only process the remaining frames if we haven't reached the last frame
-        if !reducer.get_indices().is_empty()
+        if !reducer.no_indices()
             && (&reducer.get_frame_index() <= reducer.get_indices().iter().max().unwrap_or(&0))
         {
             self.decoder
@@ -338,7 +292,7 @@ impl VideoReader {
         end_frame: Option<usize>,
         compression_factor: Option<f64>,
     ) -> Result<Vec<FrameArray>, ffmpeg::Error> {
-        let (reducer, start_frame, _) = create_video_reducer(
+        let (reducer, start_frame, _) = VideoReducer::build(
             start_frame,
             end_frame,
             *self.stream_info.frame_count(),
@@ -424,7 +378,7 @@ impl VideoReader {
         }
         self.decoder.video.send_eof()?;
         // only process the remaining frames if we haven't reached the last frame
-        if !reducer.get_indices().is_empty()
+        if !reducer.no_indices()
             && (&self.curr_frame <= reducer.get_indices().iter().max().unwrap_or(&0))
         {
             let upd_curr_frame =
@@ -440,24 +394,6 @@ impl VideoReader {
     }
 }
 
-pub fn get_init_context(
-    filename: &String,
-) -> Result<(ffmpeg::format::context::Input, usize), ffmpeg::Error> {
-    let input_file = Path::new(filename);
-
-    // Initialize the FFmpeg library
-    ffmpeg::init()?;
-
-    // Open the input file
-    let ictx = input(&input_file)?;
-    let stream_index = ictx
-        .streams()
-        .best(Type::Video)
-        .ok_or(ffmpeg::Error::StreamNotFound)?
-        .index();
-    Ok((ictx, stream_index))
-}
-
 impl VideoReader {
     /// Safely get the batch of frames from the video by iterating over all frames and decoding
     /// only the ones we need. This can be more accurate when the video's metadata is not reliable,
@@ -466,7 +402,7 @@ impl VideoReader {
         let first_index = indices.iter().min().unwrap_or(&0);
         let max_index = self.stream_info.frame_count() - 1;
         let last_index = indices.iter().max().unwrap_or(&max_index);
-        let (reducer, _, _) = create_video_reducer(
+        let (reducer, _, _) = VideoReducer::build(
             Some(*first_index),
             Some(*last_index),
             *self.stream_info.frame_count(),

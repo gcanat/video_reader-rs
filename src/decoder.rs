@@ -2,12 +2,13 @@ use crate::convert::{
     convert_frame_to_ndarray_rgb24, convert_nv12_to_ndarray_rgb24, convert_yuv_to_ndarray_rgb24,
 };
 use crate::ffi_hwaccel::download_frame;
+use crate::hwaccel::HardwareAccelerationDeviceType;
 use crate::video_io::{FrameArray, VideoArray};
 use ffmpeg::filter;
 use ffmpeg::software::scaling::context::Context;
 use ffmpeg::util::frame::video::Video;
 use ffmpeg_next as ffmpeg;
-use ndarray::{s, Array3, Array4, ArrayViewMut3};
+use ndarray::{s, Array, Array3, Array4, ArrayViewMut3};
 use std::collections::HashMap;
 
 /// Struct used when we want to decode the whole video with a compression_factor
@@ -51,6 +52,9 @@ impl VideoReducer {
     pub fn get_indices(&self) -> &Vec<usize> {
         &self.indices
     }
+    pub fn no_indices(&self) -> bool {
+        self.indices.is_empty()
+    }
     pub fn remove_idx(&mut self, idx: usize) {
         self.indices.remove(idx);
     }
@@ -59,6 +63,75 @@ impl VideoReducer {
     }
     pub fn get_full_video(self) -> Array4<u8> {
         self.full_video
+    }
+    pub fn build(
+        start_frame: Option<usize>,
+        end_frame: Option<usize>,
+        frame_count: usize,
+        compression_factor: Option<f64>,
+        height: u32,
+        width: u32,
+    ) -> (Option<VideoReducer>, Option<usize>, Option<usize>) {
+        let start = start_frame.unwrap_or(0);
+        let end = end_frame.unwrap_or(frame_count).min(frame_count);
+
+        let n_frames = ((end - start) as f64 * compression_factor.unwrap_or(1.0)).round() as usize;
+
+        let indices = Array::linspace(start as f64, end as f64 - 1., n_frames)
+            .iter()
+            .map(|x| x.round() as usize)
+            .collect::<Vec<_>>();
+
+        let full_video = Array::zeros((indices.len(), height as usize, width as usize, 3));
+
+        (
+            Some(VideoReducer::new(indices, 0, 0, full_video)),
+            Some(start),
+            Some(end),
+        )
+    }
+}
+
+/// Config to instantiate a Decoder
+/// * threads: number of threads to use
+/// * resize_shorter_side: resize shorter side of the video to this value
+///   (preserves aspect ratio)
+/// * hw_accel: hardware acceleration device type, eg cuda, qsv, etc
+/// * ff_filter: optional custom ffmpeg filter to use, eg:
+///   "format=rgb24,scale=w=256:h=256:flags=fast_bilinear"
+#[derive(Default)]
+pub struct DecoderConfig {
+    threads: usize,
+    resize_shorter_side: Option<f64>,
+    hw_accel: Option<HardwareAccelerationDeviceType>,
+    ff_filter: Option<String>,
+}
+
+impl DecoderConfig {
+    pub fn new(
+        threads: usize,
+        resize_shorter_side: Option<f64>,
+        hw_accel: Option<HardwareAccelerationDeviceType>,
+        ff_filter: Option<String>,
+    ) -> Self {
+        Self {
+            threads,
+            resize_shorter_side,
+            hw_accel,
+            ff_filter,
+        }
+    }
+    pub fn threads(&self) -> usize {
+        self.threads
+    }
+    pub fn hwaccel(&self) -> Option<HardwareAccelerationDeviceType> {
+        self.hw_accel
+    }
+    pub fn resize_shorter_side(&self) -> Option<f64> {
+        self.resize_shorter_side
+    }
+    pub fn ff_filter(self) -> Option<String> {
+        self.ff_filter
     }
 }
 
@@ -76,6 +149,25 @@ pub struct VideoDecoder {
 unsafe impl Send for VideoDecoder {}
 
 impl VideoDecoder {
+    pub fn new(
+        video: ffmpeg::decoder::Video,
+        height: u32,
+        width: u32,
+        fps: f64,
+        video_info: HashMap<&'static str, String>,
+        is_hwaccel: bool,
+        graph: filter::Graph,
+    ) -> Self {
+        VideoDecoder {
+            video,
+            height,
+            width,
+            fps,
+            video_info,
+            is_hwaccel,
+            graph,
+        }
+    }
     pub fn video_info(&self) -> &HashMap<&'static str, String> {
         &self.video_info
     }
@@ -85,9 +177,7 @@ impl VideoDecoder {
     pub fn video(&self) -> &ffmpeg::decoder::Video {
         &self.video
     }
-}
 
-impl VideoDecoder {
     /// Decode all frames that match the frame indices
     pub fn receive_and_process_decoded_frames(
         &mut self,
