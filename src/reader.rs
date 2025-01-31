@@ -90,9 +90,6 @@ impl VideoReader {
     pub fn stream_info(&self) -> &StreamInfo {
         &self.stream_info
     }
-}
-
-impl VideoReader {
     /// Create a new VideoReader instance
     /// * `filename` - Path to the video file.
     /// * `decoder_config` - Config for the decoder see: [`DecoderConfig`]
@@ -392,9 +389,6 @@ impl VideoReader {
         }
         Ok(outputs)
     }
-}
-
-impl VideoReader {
     /// Safely get the batch of frames from the video by iterating over all frames and decoding
     /// only the ones we need. This can be more accurate when the video's metadata is not reliable,
     /// or when the video has B-frames.
