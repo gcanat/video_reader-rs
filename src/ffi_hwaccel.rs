@@ -2,7 +2,7 @@
 extern crate ffmpeg_next as ffmpeg;
 
 use crate::hwaccel::HardwareAccelerationDeviceType;
-use crate::video_io::HWACCEL_PIXEL_FORMAT;
+use crate::reader::HWACCEL_PIXEL_FORMAT;
 use ffmpeg::ffi::*;
 use ffmpeg::util::frame::video::Video;
 

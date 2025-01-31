@@ -8,7 +8,7 @@ mod info;
 use hwaccel::HardwareAccelerationDeviceType;
 use numpy::{IntoPyArray, PyArray};
 mod decoder;
-mod video_io;
+mod reader;
 use convert::rgb2gray;
 use decoder::DecoderConfig;
 use log::debug;
@@ -18,8 +18,8 @@ use pyo3::{
     types::{IntoPyDict, PyDict, PyFloat, PyList, PyModule, PyModuleMethods},
     Bound, PyResult, Python,
 };
+use reader::VideoReader;
 use std::sync::Mutex;
-use video_io::VideoReader;
 
 use once_cell::sync::Lazy;
 use tokio::runtime::{self, Runtime};

@@ -3,7 +3,7 @@ use crate::convert::{
 };
 use crate::ffi_hwaccel::download_frame;
 use crate::hwaccel::HardwareAccelerationDeviceType;
-use crate::video_io::{FrameArray, VideoArray};
+use crate::reader::{FrameArray, VideoArray};
 use ffmpeg::filter;
 use ffmpeg::software::scaling::context::Context;
 use ffmpeg::util::frame::video::Video;
