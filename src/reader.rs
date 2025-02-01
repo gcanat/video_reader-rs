@@ -11,8 +11,7 @@ use std::path::Path;
 
 use crate::convert::{convert_nv12_to_ndarray_rgb24, convert_yuv_to_ndarray_rgb24};
 use crate::decoder::{DecoderConfig, VideoDecoder, VideoReducer};
-use crate::ffi_hwaccel::codec_context_get_hw_frames_ctx;
-use crate::filter::{create_filters, FilterConfig};
+use crate::filter::{create_filter_spec, create_filters, FilterConfig};
 use crate::hwaccel::{HardwareAccelerationContext, HardwareAccelerationDeviceType};
 use crate::info::{
     collect_video_metadata, extract_video_params, get_frame_count, get_resized_dim, StreamInfo,
@@ -139,57 +138,15 @@ impl VideoReader {
             None => (orig_h, orig_w),
         };
 
-        let pix_fmt = AvPixel::YUV420P;
-        let mut is_hwaccel = false;
-        let mut hw_format: Option<ffmpeg::util::format::Pixel> = None;
-
-        let filter_spec = match config.ff_filter() {
-            None => {
-                let mut filter_spec = format!(
-                    "format={},scale=w={}:h={}:flags=fast_bilinear",
-                    pix_fmt.descriptor().unwrap().name(),
-                    width,
-                    height,
-                );
-
-                if let Some(hw_ctx) = hwaccel_context {
-                    is_hwaccel = true;
-                    hw_format = Some(hw_ctx.format());
-                    // Need a custom filter for hwaccel != cuda
-                    if hw_format != Some(ffmpeg::util::format::Pixel::CUDA) {
-                        // FIXME: proper error handling
-                        println!(
-                            "Using hwaccel other than cuda, you should provide a custom filter"
-                        );
-                        return Err(ffmpeg::error::Error::DecoderNotFound);
-                    }
-                    filter_spec = format!(
-                        "scale_cuda=w={}:h={}:passthrough=0,hwdownload,format={}",
-                        width,
-                        height,
-                        HWACCEL_PIXEL_FORMAT.descriptor().unwrap().name(),
-                    );
-                    codec_context_get_hw_frames_ctx(
-                        &mut video,
-                        hw_format.unwrap(),
-                        HWACCEL_PIXEL_FORMAT,
-                    )?;
-                }
-                filter_spec
-            }
-            Some(spec) => {
-                if let Some(hw_ctx) = hwaccel_context {
-                    is_hwaccel = true;
-                    hw_format = Some(hw_ctx.format());
-                    codec_context_get_hw_frames_ctx(
-                        &mut video,
-                        hw_format.unwrap(),
-                        HWACCEL_PIXEL_FORMAT,
-                    )?;
-                }
-                spec
-            }
-        };
+        let is_hwaccel = hwaccel_context.is_some();
+        let (filter_spec, hw_format) = create_filter_spec(
+            width,
+            height,
+            &mut video,
+            config.ff_filter(),
+            hwaccel_context,
+            HWACCEL_PIXEL_FORMAT,
+        )?;
 
         debug!("Filter spec: {}", filter_spec);
         let filter_cfg = FilterConfig::new(
@@ -197,7 +154,7 @@ impl VideoReader {
             orig_w,
             orig_fmt,
             video_info.get("time_base_rational").unwrap(),
-            &filter_spec,
+            filter_spec.as_str(),
             is_hwaccel,
         );
 

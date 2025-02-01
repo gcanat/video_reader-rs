@@ -1,5 +1,8 @@
+use crate::ffi_hwaccel::codec_context_get_hw_frames_ctx;
+use crate::hwaccel::HardwareAccelerationContext;
 use ffmpeg::ffi::{av_buffersrc_parameters_alloc, av_buffersrc_parameters_set, AVPixelFormat};
 use ffmpeg::filter;
+use ffmpeg::format::Pixel as AvPixel;
 use ffmpeg::util::rational::Rational;
 use ffmpeg_next as ffmpeg;
 use log::debug;
@@ -100,4 +103,53 @@ pub fn create_hwbuffer_src(
             e => Err(ffmpeg::Error::from(e)),
         }
     }
+}
+
+pub fn create_filter_spec(
+    width: u32,
+    height: u32,
+    video: &mut ffmpeg::decoder::Video,
+    ff_filter: Option<String>,
+    hwaccel_context: Option<HardwareAccelerationContext>,
+    hwaccel_fmt: AvPixel,
+) -> Result<(String, Option<AvPixel>), ffmpeg_next::Error> {
+    let pix_fmt = AvPixel::YUV420P;
+    let mut hw_format: Option<AvPixel> = None;
+
+    let filter_spec = match ff_filter {
+        None => {
+            let mut filter_spec = format!(
+                "format={},scale=w={}:h={}:flags=fast_bilinear",
+                pix_fmt.descriptor().unwrap().name(),
+                width,
+                height,
+            );
+
+            if let Some(hw_ctx) = hwaccel_context {
+                hw_format = Some(hw_ctx.format());
+                // Need a custom filter for hwaccel != cuda
+                if hw_format != Some(ffmpeg::util::format::Pixel::CUDA) {
+                    // FIXME: proper error handling
+                    println!("Using hwaccel other than cuda, you should provide a custom filter");
+                    return Err(ffmpeg::error::Error::DecoderNotFound);
+                }
+                filter_spec = format!(
+                    "scale_cuda=w={}:h={}:passthrough=0,hwdownload,format={}",
+                    width,
+                    height,
+                    hwaccel_fmt.descriptor().unwrap().name(),
+                );
+                codec_context_get_hw_frames_ctx(video, hw_format.unwrap(), hwaccel_fmt)?;
+            }
+            filter_spec
+        }
+        Some(spec) => {
+            if let Some(hw_ctx) = hwaccel_context {
+                hw_format = Some(hw_ctx.format());
+                codec_context_get_hw_frames_ctx(video, hw_format.unwrap(), hwaccel_fmt)?;
+            }
+            spec
+        }
+    };
+    Ok((filter_spec, hw_format))
 }
