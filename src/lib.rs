@@ -1,10 +1,16 @@
 use numpy::ndarray::Dim;
+mod convert;
 mod ffi_hwaccel;
 use std::str::FromStr;
+mod filter;
 mod hwaccel;
+mod info;
 use hwaccel::HardwareAccelerationDeviceType;
 use numpy::{IntoPyArray, PyArray};
-mod video_io;
+mod decoder;
+mod reader;
+use convert::rgb2gray;
+use decoder::DecoderConfig;
 use log::debug;
 use pyo3::{
     exceptions::PyRuntimeError,
@@ -12,8 +18,8 @@ use pyo3::{
     types::{IntoPyDict, PyDict, PyFloat, PyList, PyModule, PyModuleMethods},
     Bound, PyResult, Python,
 };
+use reader::VideoReader;
 use std::sync::Mutex;
-use video_io::{rgb2gray, DecoderConfig, VideoReader};
 
 use once_cell::sync::Lazy;
 use tokio::runtime::{self, Runtime};
