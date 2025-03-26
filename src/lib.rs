@@ -41,12 +41,14 @@ struct PyVideoReader {
 #[pymethods]
 impl PyVideoReader {
     #[new]
-    #[pyo3(signature = (filename, threads=None, resize_shorter_side=None, device=None, filter=None))]
+    #[pyo3(signature = (filename, threads=None, resize_shorter_side=None, resize_longer_side=None, device=None, filter=None))]
     /// create an instance of VideoReader
     /// * `filename` - path to the video file
     /// * `threads` - number of threads to use. If None, let ffmpeg choose the optimal number.
-    /// * `resize_shorter_side - Optional, resize shorted side of the video to this value while
-    /// preserving the aspect ratio.
+    /// * `resize_shorter_side - Optional, resize shorted side of the video to this value. If
+    /// resize_longer_side is set to None, will try to preserve original aspect ratio.
+    /// * `resize_longer_side - Optional, resize longer side of the video to this value. If
+    /// resize_shorter_side is set to None, will try to preserve aspect ratio.
     /// * `device` - type of hardware acceleration, eg: 'cuda', 'vdpau', 'drm', etc.
     /// * `filter` - custome ffmpeg filter to use, eg "format=rgb24,scale=w=256:h=256:flags=fast_bilinear"
     /// If set to None (default) or 'cpu' then cpu is used.
@@ -55,6 +57,7 @@ impl PyVideoReader {
         filename: &str,
         threads: Option<usize>,
         resize_shorter_side: Option<f64>,
+        resize_longer_side: Option<f64>,
         device: Option<&str>,
         filter: Option<String>,
     ) -> PyResult<Self> {
@@ -62,8 +65,13 @@ impl PyVideoReader {
             Some("cpu") | None => None,
             Some(other) => Some(HardwareAccelerationDeviceType::from_str(other).unwrap()),
         };
-        let decoder_config =
-            DecoderConfig::new(threads.unwrap_or(0), resize_shorter_side, hwaccel, filter);
+        let decoder_config = DecoderConfig::new(
+            threads.unwrap_or(0),
+            resize_shorter_side,
+            resize_longer_side,
+            hwaccel,
+            filter,
+        );
         match VideoReader::new(filename.to_string(), decoder_config) {
             Ok(reader) => Ok(PyVideoReader {
                 inner: Mutex::new(reader),
