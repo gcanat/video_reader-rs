@@ -56,7 +56,9 @@ from video_reader import PyVideoReader
 
 vr = PyVideoReader(filename)
 # or if you want to resize and use a specific number of threads
-vr = PyVideoReader(filename, threads=8, resize_shorter_side=512)
+vr = PyVideoReader(filename, threads=8, resize_shorter_side=480)
+# similar but by resizing longer side
+vr = PyVideoReader(filename, threads=8, resize_longer_side=640)
 # or to use GPU decoding:
 vr = PyVideoReader(filename, device='cuda')
 

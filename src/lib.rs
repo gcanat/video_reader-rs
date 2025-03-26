@@ -41,12 +41,14 @@ struct PyVideoReader {
 #[pymethods]
 impl PyVideoReader {
     #[new]
-    #[pyo3(signature = (filename, threads=None, resize_shorter_side=None, device=None, filter=None))]
+    #[pyo3(signature = (filename, threads=None, resize_shorter_side=None, resize_longer_side=None, device=None, filter=None))]
     /// create an instance of VideoReader
     /// * `filename` - path to the video file
     /// * `threads` - number of threads to use. If None, let ffmpeg choose the optimal number.
-    /// * `resize_shorter_side - Optional, resize shorted side of the video to this value while
-    /// preserving the aspect ratio.
+    /// * `resize_shorter_side - Optional, resize shorted side of the video to this value. If
+    /// resize_longer_side is set to None, will try to preserve original aspect ratio.
+    /// * `resize_longer_side - Optional, resize longer side of the video to this value. If
+    /// resize_shorter_side is set to None, will try to preserve aspect ratio.
     /// * `device` - type of hardware acceleration, eg: 'cuda', 'vdpau', 'drm', etc.
     /// * `filter` - custome ffmpeg filter to use, eg "format=rgb24,scale=w=256:h=256:flags=fast_bilinear"
     /// If set to None (default) or 'cpu' then cpu is used.
@@ -55,6 +57,7 @@ impl PyVideoReader {
         filename: &str,
         threads: Option<usize>,
         resize_shorter_side: Option<f64>,
+        resize_longer_side: Option<f64>,
         device: Option<&str>,
         filter: Option<String>,
     ) -> PyResult<Self> {
@@ -62,8 +65,13 @@ impl PyVideoReader {
             Some("cpu") | None => None,
             Some(other) => Some(HardwareAccelerationDeviceType::from_str(other).unwrap()),
         };
-        let decoder_config =
-            DecoderConfig::new(threads.unwrap_or(0), resize_shorter_side, hwaccel, filter);
+        let decoder_config = DecoderConfig::new(
+            threads.unwrap_or(0),
+            resize_shorter_side,
+            resize_longer_side,
+            hwaccel,
+            filter,
+        );
         match VideoReader::new(filename.to_string(), decoder_config) {
             Ok(reader) => Ok(PyVideoReader {
                 inner: Mutex::new(reader),
@@ -79,7 +87,7 @@ impl PyVideoReader {
             Ok(vr) => {
                 let mut info_dict = vr.decoder().video_info().clone();
                 info_dict.insert("frame_count", vr.stream_info().frame_count().to_string());
-                Ok(info_dict.into_py_dict_bound(py))
+                Ok(info_dict.into_py_dict(py)?)
             }
             Err(e) => Err(PyRuntimeError::new_err(format!("Lock error: {}", e))),
         }
@@ -90,7 +98,7 @@ impl PyVideoReader {
         match self.inner.lock() {
             Ok(vr) => {
                 let fps = vr.decoder().fps();
-                Ok(PyFloat::new_bound(py, fps))
+                Ok(PyFloat::new(py, fps))
             }
             Err(e) => Err(PyRuntimeError::new_err(format!("Lock error: {}", e))),
         }
@@ -103,8 +111,8 @@ impl PyVideoReader {
                 let width = vr.decoder().video().width() as usize;
                 let height = vr.decoder().video().height() as usize;
                 let num_frames = vr.stream_info().frame_count();
-                let list = PyList::new_bound(py, [*num_frames, height, width]);
-                Ok(list)
+                let list = PyList::new(py, [*num_frames, height, width]);
+                Ok(list?)
             }
             Err(e) => Err(PyRuntimeError::new_err(format!("Lock error: {}", e))),
         }
@@ -127,7 +135,7 @@ impl PyVideoReader {
         match self.inner.lock() {
             Ok(mut reader) => match reader.decode_video(start_frame, end_frame, compression_factor)
             {
-                Ok(video) => Ok(video.into_pyarray_bound(py)),
+                Ok(video) => Ok(video.into_pyarray(py)),
                 Err(e) => Err(PyRuntimeError::new_err(format!("Error: {}", e))),
             },
             Err(e) => Err(PyRuntimeError::new_err(format!("Lock error: {}", e))),
@@ -159,7 +167,7 @@ impl PyVideoReader {
                 });
                 Ok(res_decode
                     .into_iter()
-                    .map(|x| x.into_pyarray_bound(py))
+                    .map(|x| x.into_pyarray(py))
                     .collect::<Vec<_>>())
             }
             Err(e) => Err(PyRuntimeError::new_err(format!("Lock error: {}", e))),
@@ -185,7 +193,7 @@ impl PyVideoReader {
             {
                 Ok(video) => {
                     let gray_video = rgb2gray(video);
-                    Ok(gray_video.into_pyarray_bound(py))
+                    Ok(gray_video.into_pyarray(py))
                 }
                 Err(e) => Err(PyRuntimeError::new_err(format!("Error: {}", e))),
             },
@@ -241,12 +249,12 @@ impl PyVideoReader {
                 {
                     debug!("Switching to get_batch_safe!");
                     match vr.get_batch_safe(indices) {
-                        Ok(batch) => Ok(batch.into_pyarray_bound(py)),
+                        Ok(batch) => Ok(batch.into_pyarray(py)),
                         Err(e) => Err(PyRuntimeError::new_err(format!("Error: {}", e))),
                     }
                 } else {
                     match vr.get_batch(indices) {
-                        Ok(batch) => Ok(batch.into_pyarray_bound(py)),
+                        Ok(batch) => Ok(batch.into_pyarray(py)),
                         Err(e) => Err(PyRuntimeError::new_err(format!("Error: {}", e))),
                     }
                 }

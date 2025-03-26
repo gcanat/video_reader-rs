@@ -133,10 +133,12 @@ impl VideoReader {
         let (orig_h, orig_w, orig_fmt) = (video.height(), video.width(), video.format());
         let video_info = collect_video_metadata(&video, &video_params, &fps);
 
-        let (height, width) = match config.resize_shorter_side() {
-            Some(resize) => get_resized_dim(orig_h as f64, orig_w as f64, resize),
-            None => (orig_h, orig_w),
-        };
+        let (height, width) = get_resized_dim(
+            orig_h as f64,
+            orig_w as f64,
+            config.resize_shorter_side(),
+            config.resize_longer_side(),
+        );
 
         let is_hwaccel = hwaccel_context.is_some();
         let (filter_spec, hw_format) = create_filter_spec(

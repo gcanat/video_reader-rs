@@ -151,20 +151,62 @@ pub fn get_frame_count(
 /// if the shorter side of the frame is bigger than resize_shorter_side_to.
 /// * height (f64): Height of the frame
 /// * width (f64): Width of the frame
-/// * resize_shorter_side_to (f64): Resize the shorter side of the frame to this value.
+/// * resize_shorter_side_to (Option<f64>): Resize the shorter side of the frame to this value.
+/// * resize_longer_side_to (Option<f64>): Resize the longer side of the frame to this value.
 ///
-/// Returns: Option<(f64, f64)>: Option of the resized height and width
-pub fn get_resized_dim(mut height: f64, mut width: f64, resize_shorter_side_to: f64) -> (u32, u32) {
-    let mut short_side_res = height;
+/// Returns: Option<(u32, u32)>: Option of the resized height and width
+pub fn get_resized_dim(
+    height: f64,
+    width: f64,
+    resize_shorter_side_to: Option<f64>,
+    resize_longer_side_to: Option<f64>,
+) -> (u32, u32) {
+    let mut respect_aspect_ratio = true;
+    // early return when nothing to do
+    if resize_shorter_side_to.is_none() && resize_longer_side_to.is_none() {
+        return (height as u32, width as u32);
+    } else if resize_shorter_side_to.is_some() && resize_longer_side_to.is_some() {
+        respect_aspect_ratio = false;
+    }
+
+    let mut shorter_is_height: bool = true;
+    let new_height: f64;
+    let new_width: f64;
+
     if width < height {
-        short_side_res = width;
+        shorter_is_height = false;
     }
-    if height == short_side_res {
-        width = (width * resize_shorter_side_to / height).round();
-        height = resize_shorter_side_to;
+
+    if !respect_aspect_ratio {
+        // in this case both values are Some so it should be safe to unwrap
+        if shorter_is_height {
+            new_height = resize_shorter_side_to.unwrap();
+            new_width = resize_longer_side_to.unwrap();
+        } else {
+            new_height = resize_longer_side_to.unwrap();
+            new_width = resize_shorter_side_to.unwrap();
+        }
+        return (new_height as u32, new_width as u32);
+    }
+
+    // Only case remaining is one is None and the other is Some
+    if resize_shorter_side_to.is_some() {
+        if shorter_is_height {
+            new_height = resize_shorter_side_to.unwrap();
+            new_width = (width * new_height / height).round();
+        } else {
+            new_width = resize_shorter_side_to.unwrap();
+            new_height = (height * new_width / width).round();
+        }
     } else {
-        height = (height * resize_shorter_side_to / width).round();
-        width = resize_shorter_side_to;
+        // resize_longer_side_to can only be Some at this point
+        if shorter_is_height {
+            new_width = resize_longer_side_to.unwrap();
+            new_height = (height * new_width / width).round();
+        } else {
+            new_height = resize_longer_side_to.unwrap();
+            new_width = (width * new_height / height).round();
+        }
     }
-    (height as u32, width as u32)
+    (new_height as u32, new_width as u32)
 }

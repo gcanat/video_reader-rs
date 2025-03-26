@@ -95,7 +95,9 @@ impl VideoReducer {
 /// Config to instantiate a Decoder
 /// * threads: number of threads to use
 /// * resize_shorter_side: resize shorter side of the video to this value
-///   (preserves aspect ratio)
+///   (preserves aspect ratio if resize_longer_side is None)
+/// * resize_longer_side: resize longer side of the video to this value
+///   (preserves aspect ratio if resize_shorter_side is None)
 /// * hw_accel: hardware acceleration device type, eg cuda, qsv, etc
 /// * ff_filter: optional custom ffmpeg filter to use, eg:
 ///   "format=rgb24,scale=w=256:h=256:flags=fast_bilinear"
@@ -103,6 +105,7 @@ impl VideoReducer {
 pub struct DecoderConfig {
     threads: usize,
     resize_shorter_side: Option<f64>,
+    resize_longer_side: Option<f64>,
     hw_accel: Option<HardwareAccelerationDeviceType>,
     ff_filter: Option<String>,
 }
@@ -111,12 +114,14 @@ impl DecoderConfig {
     pub fn new(
         threads: usize,
         resize_shorter_side: Option<f64>,
+        resize_longer_side: Option<f64>,
         hw_accel: Option<HardwareAccelerationDeviceType>,
         ff_filter: Option<String>,
     ) -> Self {
         Self {
             threads,
             resize_shorter_side,
+            resize_longer_side,
             hw_accel,
             ff_filter,
         }
@@ -129,6 +134,9 @@ impl DecoderConfig {
     }
     pub fn resize_shorter_side(&self) -> Option<f64> {
         self.resize_shorter_side
+    }
+    pub fn resize_longer_side(&self) -> Option<f64> {
+        self.resize_longer_side
     }
     pub fn ff_filter(self) -> Option<String> {
         self.ff_filter
