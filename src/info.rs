@@ -208,5 +208,5 @@ pub fn get_resized_dim(
             new_width = (width * new_height / height).round();
         }
     }
-    return (new_height as u32, new_width as u32);
+    (new_height as u32, new_width as u32)
 }
