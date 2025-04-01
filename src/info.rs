@@ -210,3 +210,57 @@ pub fn get_resized_dim(
     }
     (new_height as u32, new_width as u32)
 }
+
+#[test]
+fn test_get_resized_dim() {
+    // No resize
+    assert_eq!(get_resized_dim(720.0, 1280.0, None, None), (720, 1280));
+
+    // Resize shorter side (height)
+    assert_eq!(
+        get_resized_dim(720.0, 1280.0, Some(360.0), None),
+        (360, 640)
+    );
+
+    // Resize shorter side (width)
+    assert_eq!(
+        get_resized_dim(1280.0, 720.0, Some(360.0), None),
+        (640, 360)
+    );
+
+    // Resize longer side (width)
+    assert_eq!(
+        get_resized_dim(720.0, 1280.0, None, Some(640.0)),
+        (360, 640)
+    );
+
+    // Resize longer side (height)
+    assert_eq!(
+        get_resized_dim(1280.0, 720.0, None, Some(640.0)),
+        (640, 360)
+    );
+
+    // Both dimensions specified (no aspect ratio)
+    assert_eq!(
+        get_resized_dim(720.0, 1280.0, Some(360.0), Some(640.0)),
+        (360, 640)
+    );
+    assert_eq!(
+        get_resized_dim(1280.0, 720.0, Some(360.0), Some(640.0)),
+        (640, 360)
+    );
+
+    // Square image
+    assert_eq!(
+        get_resized_dim(1000.0, 1000.0, Some(500.0), None),
+        (500, 500)
+    );
+    assert_eq!(
+        get_resized_dim(1000.0, 1000.0, None, Some(500.0)),
+        (500, 500)
+    );
+
+    // Edge cases with small numbers
+    assert_eq!(get_resized_dim(10.0, 20.0, Some(5.0), None), (5, 10));
+    assert_eq!(get_resized_dim(20.0, 10.0, Some(5.0), None), (10, 5));
+}

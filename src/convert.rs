@@ -174,3 +174,36 @@ fn rgb2gray_2d(frames: ArrayView3<u8>) -> Array2<u8> {
             .clamp(0.0, 255.0) as u8
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ndarray::{arr2, arr3, array};
+
+    #[test]
+    fn test_rgb2gray() {
+        let input = array!(
+            [[[255, 0, 0], [0, 255, 0]], [[0, 0, 255], [255, 255, 255]]],
+            [[[128, 128, 128], [0, 0, 0]], [[255, 0, 255], [0, 255, 255]]],
+        );
+        let expected = arr3(&[[[54, 182], [18, 255]], [[128, 0], [73, 201]]]);
+        let result = rgb2gray(input);
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_rgb2gray_2d() {
+        let input = arr3(&[[[255, 0, 0], [0, 255, 0]], [[0, 0, 255], [255, 255, 255]]]);
+        let expected = arr2(&[[54, 182], [18, 255]]);
+        let result = rgb2gray_2d(input.view());
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_get_colorspace() {
+        assert_eq!(get_colorspace(480), YuvStandardMatrix::Bt601);
+        assert_eq!(get_colorspace(720), YuvStandardMatrix::Bt709);
+        assert_eq!(get_colorspace(1080), YuvStandardMatrix::Bt709);
+        assert_eq!(get_colorspace(2160), YuvStandardMatrix::Bt2020);
+    }
+}
