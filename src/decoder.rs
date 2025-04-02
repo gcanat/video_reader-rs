@@ -1,6 +1,5 @@
 use crate::convert::{
     convert_frame_to_ndarray_rgb24, convert_nv12_to_ndarray_rgb24, convert_yuv_to_ndarray_rgb24,
-    get_colorspace,
 };
 use crate::ffi_hwaccel::download_frame;
 use crate::hwaccel::HardwareAccelerationDeviceType;
