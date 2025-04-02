@@ -45,12 +45,13 @@ pub fn convert_frame_to_ndarray_rgb24(
 
 /// Converts a YUV420P video `AVFrame` produced by ffmpeg to an `ndarray`.
 /// * `frame` - Video frame to convert.
+/// * `color_space` - Color space matrix for yuv to rgb conversion, eg BT601, BT709, etc.
 /// * returns a three-dimensional `ndarray` with dimensions `(H, W, C)` and type byte.
-pub fn convert_yuv_to_ndarray_rgb24(frame: Video) -> Array3<u8> {
+pub fn convert_yuv_to_ndarray_rgb24(frame: Video, color_space: YuvStandardMatrix) -> Array3<u8> {
     let (buf_vec, frame_width, frame_height, bytes_copied) =
         copy_image(frame, AVPixelFormat::AV_PIX_FMT_YUV420P);
 
-    let colorspace = get_colorspace(frame_height);
+    // let colorspace = get_colorspace(frame_height, color_space.as_str());
 
     if bytes_copied == buf_vec.len() as i32 {
         let mut rgb = vec![0_u8; (frame_width * frame_height * 3) as usize];
@@ -71,7 +72,7 @@ pub fn convert_yuv_to_ndarray_rgb24(frame: Video) -> Array3<u8> {
             &mut rgb,
             (frame_width * 3) as u32,
             YuvRange::Full,
-            colorspace,
+            color_space,
         )
         .unwrap();
         Array3::from_shape_vec((frame_height as usize, frame_width as usize, 3_usize), rgb).unwrap()
@@ -83,11 +84,11 @@ pub fn convert_yuv_to_ndarray_rgb24(frame: Video) -> Array3<u8> {
 /// Converts a NV12 video `AVFrame` produced by ffmpeg to an `ndarray`.
 /// * `frame` - Video frame to convert.
 /// * returns a three-dimensional `ndarray` with dimensions `(H, W, C)` and type byte.
-pub fn convert_nv12_to_ndarray_rgb24(frame: Video) -> Array3<u8> {
+pub fn convert_nv12_to_ndarray_rgb24(frame: Video, color_space: YuvStandardMatrix) -> Array3<u8> {
     let (buf_vec, frame_width, frame_height, bytes_copied) =
         copy_image(frame, AVPixelFormat::AV_PIX_FMT_NV12);
 
-    let colorspace = get_colorspace(frame_width);
+    // let colorspace = get_colorspace(frame_width, color_space.as_str());
 
     if bytes_copied == buf_vec.len() as i32 {
         let mut rgb = vec![0_u8; (frame_width * frame_height * 3) as usize];
@@ -105,7 +106,7 @@ pub fn convert_nv12_to_ndarray_rgb24(frame: Video) -> Array3<u8> {
             &mut rgb,
             (frame_width * 3) as u32,
             YuvRange::Full,
-            colorspace,
+            color_space,
             YuvConversionMode::Balanced,
         )
         .unwrap();
@@ -140,17 +141,26 @@ fn copy_image(mut frame: Video, pix_fmt: AVPixelFormat) -> (Vec<u8>, i32, i32, i
     }
 }
 
-fn get_colorspace(height: i32) -> YuvStandardMatrix {
-    // By default assume HD color space
-    let mut colorspace = YuvStandardMatrix::Bt709;
-    if height < 720 {
-        // SD color space
-        colorspace = YuvStandardMatrix::Bt601;
-    } else if height > 1080 {
-        // UHD color space
-        colorspace = YuvStandardMatrix::Bt2020;
+pub fn get_colorspace(height: i32, color_space: &str) -> YuvStandardMatrix {
+    match color_space {
+        "BT709" => YuvStandardMatrix::Bt709,
+        "BT601" => YuvStandardMatrix::Bt601,
+        "BT2020" => YuvStandardMatrix::Bt2020,
+        "SMPTE240" => YuvStandardMatrix::Smpte240,
+        "BT470_6" => YuvStandardMatrix::Bt470_6,
+        _ => {
+            // By default assume HD color space
+            let mut colorspace = YuvStandardMatrix::Bt709;
+            if height < 720 {
+                // SD color space
+                colorspace = YuvStandardMatrix::Bt601;
+            } else if height > 1080 {
+                // UHD color space
+                colorspace = YuvStandardMatrix::Bt2020;
+            }
+            colorspace
+        }
     }
-    colorspace
 }
 
 /// Convert RGB video (N, H, W, C) to Grayscale video (N, H, W).
@@ -201,9 +211,15 @@ mod tests {
 
     #[test]
     fn test_get_colorspace() {
-        assert_eq!(get_colorspace(480), YuvStandardMatrix::Bt601);
-        assert_eq!(get_colorspace(720), YuvStandardMatrix::Bt709);
-        assert_eq!(get_colorspace(1080), YuvStandardMatrix::Bt709);
-        assert_eq!(get_colorspace(2160), YuvStandardMatrix::Bt2020);
+        assert_eq!(get_colorspace(480, "BT601"), YuvStandardMatrix::Bt601);
+        assert_eq!(get_colorspace(480, ""), YuvStandardMatrix::Bt601);
+        assert_eq!(get_colorspace(480, "BT709"), YuvStandardMatrix::Bt709);
+        assert_eq!(get_colorspace(720, "BT709"), YuvStandardMatrix::Bt709);
+        assert_eq!(get_colorspace(1080, "BT2020"), YuvStandardMatrix::Bt2020);
+        assert_eq!(get_colorspace(1080, "blabla"), YuvStandardMatrix::Bt709);
+        assert_eq!(get_colorspace(2160, "BT2020"), YuvStandardMatrix::Bt2020);
+        assert_eq!(get_colorspace(2160, ""), YuvStandardMatrix::Bt2020);
+        assert_eq!(get_colorspace(2160, "$éà'é"), YuvStandardMatrix::Bt2020);
+        assert_eq!(get_colorspace(2160, "BT601"), YuvStandardMatrix::Bt601);
     }
 }

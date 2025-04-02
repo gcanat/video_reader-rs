@@ -97,7 +97,8 @@ pub fn collect_video_metadata(
     info.insert("bit_rate", video.bit_rate().to_string());
     info.insert("vid_format", format!("{:?}", video.format()));
     info.insert("aspect_ratio", format!("{:?}", video.aspect_ratio()));
-    info.insert("color_space", format!("{:?}", video.color_space()));
+    let color_space = format!("{:?}", video.color_space());
+    info.insert("color_space", color_space.to_uppercase());
     info.insert("color_range", format!("{:?}", video.color_range()));
     info.insert("color_primaries", format!("{:?}", video.color_primaries()));
     info.insert(

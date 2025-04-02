@@ -1,5 +1,6 @@
 use crate::convert::{
     convert_frame_to_ndarray_rgb24, convert_nv12_to_ndarray_rgb24, convert_yuv_to_ndarray_rgb24,
+    get_colorspace,
 };
 use crate::ffi_hwaccel::download_frame;
 use crate::hwaccel::HardwareAccelerationDeviceType;
@@ -10,6 +11,7 @@ use ffmpeg::util::frame::video::Video;
 use ffmpeg_next as ffmpeg;
 use ndarray::{s, Array, Array3, Array4, ArrayViewMut3};
 use std::collections::HashMap;
+use yuvutils_rs::YuvStandardMatrix;
 
 /// Struct used when we want to decode the whole video with a compression_factor
 #[derive(Clone)]
@@ -190,6 +192,7 @@ impl VideoDecoder {
     pub fn receive_and_process_decoded_frames(
         &mut self,
         reducer: &mut VideoReducer,
+        color_space: YuvStandardMatrix,
     ) -> Result<(), ffmpeg::Error> {
         let mut decoded = Video::empty();
         while self.video.receive_frame(&mut decoded).is_ok() {
@@ -218,9 +221,9 @@ impl VideoDecoder {
                     let mut slice_frame = reducer.slice_mut(reducer.get_idx_counter());
 
                     let rgb_frame: Array3<u8> = if self.is_hwaccel {
-                        convert_nv12_to_ndarray_rgb24(yuv_frame)
+                        convert_nv12_to_ndarray_rgb24(yuv_frame, color_space)
                     } else {
-                        convert_yuv_to_ndarray_rgb24(yuv_frame)
+                        convert_yuv_to_ndarray_rgb24(yuv_frame, color_space)
                     };
 
                     slice_frame.zip_mut_with(&rgb_frame, |a, b| {

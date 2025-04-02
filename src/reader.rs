@@ -9,7 +9,7 @@ use log::debug;
 use std::collections::HashMap;
 use std::path::Path;
 
-use crate::convert::{convert_nv12_to_ndarray_rgb24, convert_yuv_to_ndarray_rgb24};
+use crate::convert::{convert_nv12_to_ndarray_rgb24, convert_yuv_to_ndarray_rgb24, get_colorspace};
 use crate::decoder::{DecoderConfig, VideoDecoder, VideoReducer};
 use crate::filter::{create_filter_spec, create_filters, FilterConfig};
 use crate::hwaccel::{HardwareAccelerationContext, HardwareAccelerationDeviceType};
@@ -18,6 +18,7 @@ use crate::info::{
 };
 use ndarray::{s, Array, Array3, Array4, ArrayViewMut3};
 use tokio::task;
+use yuvutils_rs::YuvStandardMatrix;
 
 pub type FrameArray = Array3<u8>;
 pub type VideoArray = Array4<u8>;
@@ -218,6 +219,9 @@ impl VideoReader {
             self.curr_frame = key_pos;
         }
 
+        let cspace_string = self.decoder.video_info.get("color_space").unwrap();
+        let color_space = get_colorspace(self.decoder.height as i32, cspace_string);
+
         let mut reducer = reducer.unwrap();
         reducer.set_frame_index(self.curr_frame);
         for (stream, packet) in self.ictx.packets() {
@@ -227,7 +231,7 @@ impl VideoReader {
             if stream.index() == self.stream_index {
                 self.decoder.video.send_packet(&packet)?;
                 self.decoder
-                    .receive_and_process_decoded_frames(&mut reducer)?;
+                    .receive_and_process_decoded_frames(&mut reducer, color_space)?;
             } else {
                 debug!("Packet for another stream");
             }
@@ -238,7 +242,7 @@ impl VideoReader {
             && (&reducer.get_frame_index() <= reducer.get_indices().iter().max().unwrap_or(&0))
         {
             self.decoder
-                .receive_and_process_decoded_frames(&mut reducer)?;
+                .receive_and_process_decoded_frames(&mut reducer, color_space)?;
         }
         Ok(reducer.get_full_video())
     }
@@ -276,12 +280,16 @@ impl VideoReader {
             self.seek_frame(&key_pos, &frame_duration)?;
         }
 
+        let cspace_string = self.decoder.video_info.get("color_space").unwrap();
+        let color_space = get_colorspace(self.decoder.height as i32, cspace_string);
+
         let mut reducer = reducer.unwrap();
         reducer.set_frame_index(self.curr_frame);
         let mut tasks = vec![];
 
         let mut receive_and_process_decoded_frames = |decoder: &mut ffmpeg::decoder::Video,
-                                                      mut curr_frame: usize|
+                                                      mut curr_frame: usize,
+                                                      color_space: YuvStandardMatrix|
          -> Result<usize, ffmpeg::Error> {
             let mut decoded = Video::empty();
             while decoder.receive_frame(&mut decoded).is_ok() {
@@ -305,11 +313,11 @@ impl VideoReader {
                     {
                         if self.decoder.is_hwaccel {
                             tasks.push(task::spawn(async move {
-                                convert_nv12_to_ndarray_rgb24(rgb_frame)
+                                convert_nv12_to_ndarray_rgb24(rgb_frame, color_space)
                             }));
                         } else {
                             tasks.push(task::spawn(async move {
-                                convert_yuv_to_ndarray_rgb24(rgb_frame)
+                                convert_yuv_to_ndarray_rgb24(rgb_frame, color_space)
                             }));
                         }
                     }
@@ -325,8 +333,11 @@ impl VideoReader {
             }
             if stream.index() == self.stream_index {
                 self.decoder.video.send_packet(&packet)?;
-                let upd_curr_frame =
-                    receive_and_process_decoded_frames(&mut self.decoder.video, self.curr_frame)?;
+                let upd_curr_frame = receive_and_process_decoded_frames(
+                    &mut self.decoder.video,
+                    self.curr_frame,
+                    color_space,
+                )?;
                 self.curr_frame = upd_curr_frame;
             } else {
                 debug!("Packet for another stream");
@@ -337,8 +348,11 @@ impl VideoReader {
         if !reducer.no_indices()
             && (&self.curr_frame <= reducer.get_indices().iter().max().unwrap_or(&0))
         {
-            let upd_curr_frame =
-                receive_and_process_decoded_frames(&mut self.decoder.video, self.curr_frame)?;
+            let upd_curr_frame = receive_and_process_decoded_frames(
+                &mut self.decoder.video,
+                self.curr_frame,
+                color_space,
+            )?;
             self.curr_frame = upd_curr_frame;
         }
 
@@ -440,6 +454,9 @@ impl VideoReader {
         let fps = self.decoder.fps;
         // duration of a frame in micro seconds
         let frame_duration = (1. / fps * 1_000.0).round() as usize;
+        // get the color space matrix
+        let cspace_string = self.decoder.video_info.get("color_space").unwrap();
+        let color_space = get_colorspace(self.decoder.height as i32, cspace_string);
 
         // make sure we are at the begining of the stream
         self.seek_to_start()?;
@@ -451,6 +468,7 @@ impl VideoReader {
                 frame_index,
                 &frame_duration,
                 &mut video_frames.slice_mut(s![idx_counter, .., .., ..]),
+                color_space,
             )?;
         }
         Ok(video_frames)
@@ -461,6 +479,7 @@ impl VideoReader {
         frame_index: usize,
         frame_duration: &usize,
         frame_array: &mut ArrayViewMut3<u8>,
+        color_space: YuvStandardMatrix,
     ) -> Result<(), ffmpeg::Error> {
         let key_pos = self.locate_keyframes(&frame_index, self.stream_info.key_frames());
         debug!("    - Key pos: {}", key_pos);
@@ -470,7 +489,7 @@ impl VideoReader {
             // we can directly skip until frame_index
             debug!("No need to seek, we can directly skip frames");
             let num_skip = self.get_num_skip(&frame_index);
-            self.skip_frames(num_skip, &frame_index, frame_array)?;
+            self.skip_frames(num_skip, &frame_index, frame_array, color_space)?;
         } else {
             if key_pos < curr_key_pos {
                 debug!("Seeking back to start");
@@ -479,7 +498,7 @@ impl VideoReader {
             debug!("Seeking to key_pos: {}", key_pos);
             self.seek_frame(&key_pos, frame_duration)?;
             let num_skip = self.get_num_skip(&frame_index);
-            self.skip_frames(num_skip, &frame_index, frame_array)?;
+            self.skip_frames(num_skip, &frame_index, frame_array, color_space)?;
         }
         Ok(())
     }
@@ -515,6 +534,7 @@ impl VideoReader {
         num: usize,
         frame_index: &usize,
         frame_array: &mut ArrayViewMut3<u8>,
+        color_space: YuvStandardMatrix,
     ) -> Result<(), ffmpeg::Error> {
         let num_skip = num.min(self.stream_info.frame_count() - 1);
         debug!(
@@ -524,6 +544,7 @@ impl VideoReader {
         // dont retry more than 2x the number of frames we are supposed to skip
         // just to make sure we get out of the loop
         let mut failsafe = (num_skip * 2) as i32;
+
         while failsafe > -1 {
             match self.ictx.packets().next() {
                 Some((stream, packet)) => {
@@ -551,9 +572,9 @@ impl VideoReader {
                                     .is_ok()
                                 {
                                     let rgb_frame: Array3<u8> = if self.decoder.is_hwaccel {
-                                        convert_nv12_to_ndarray_rgb24(yuv_frame)
+                                        convert_nv12_to_ndarray_rgb24(yuv_frame, color_space)
                                     } else {
-                                        convert_yuv_to_ndarray_rgb24(yuv_frame)
+                                        convert_yuv_to_ndarray_rgb24(yuv_frame, color_space)
                                     };
                                     frame_array.zip_mut_with(&rgb_frame, |a, b| {
                                         *a = *b;
