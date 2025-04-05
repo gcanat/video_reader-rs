@@ -48,7 +48,11 @@ pub fn convert_frame_to_ndarray_rgb24(
 /// * `color_space` - Color space matrix for yuv to rgb conversion, eg BT601, BT709, etc.
 /// * `color_range` - color range of the frame: Full or Limited.
 /// * returns a three-dimensional `ndarray` with dimensions `(H, W, C)` and type byte.
-pub fn convert_yuv_to_ndarray_rgb24(frame: Video, color_space: YuvStandardMatrix, color_range: YuvRange) -> Array3<u8> {
+pub fn convert_yuv_to_ndarray_rgb24(
+    frame: Video,
+    color_space: YuvStandardMatrix,
+    color_range: YuvRange,
+) -> Array3<u8> {
     let (buf_vec, frame_width, frame_height, bytes_copied) =
         copy_image(frame, AVPixelFormat::AV_PIX_FMT_YUV420P);
 
@@ -87,7 +91,11 @@ pub fn convert_yuv_to_ndarray_rgb24(frame: Video, color_space: YuvStandardMatrix
 /// * `color_space` - color space of the frame, eg BT601, BT709, etc.
 /// * `color_range` - color range of the frame: Full or Limited.
 /// * returns a three-dimensional `ndarray` with dimensions `(H, W, C)` and type byte.
-pub fn convert_nv12_to_ndarray_rgb24(frame: Video, color_space: YuvStandardMatrix, color_range: YuvRange) -> Array3<u8> {
+pub fn convert_nv12_to_ndarray_rgb24(
+    frame: Video,
+    color_space: YuvStandardMatrix,
+    color_range: YuvRange,
+) -> Array3<u8> {
     let (buf_vec, frame_width, frame_height, bytes_copied) =
         copy_image(frame, AVPixelFormat::AV_PIX_FMT_NV12);
 

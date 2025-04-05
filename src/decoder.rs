@@ -10,7 +10,7 @@ use ffmpeg::util::frame::video::Video;
 use ffmpeg_next as ffmpeg;
 use ndarray::{s, Array, Array3, Array4, ArrayViewMut3};
 use std::collections::HashMap;
-use yuvutils_rs::{YuvStandardMatrix, YuvRange};
+use yuvutils_rs::{YuvRange, YuvStandardMatrix};
 
 /// Struct used when we want to decode the whole video with a compression_factor
 #[derive(Clone)]

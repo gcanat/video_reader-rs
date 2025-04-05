@@ -9,7 +9,9 @@ use log::debug;
 use std::collections::HashMap;
 use std::path::Path;
 
-use crate::convert::{convert_nv12_to_ndarray_rgb24, convert_yuv_to_ndarray_rgb24, get_colorspace, get_colorrange};
+use crate::convert::{
+    convert_nv12_to_ndarray_rgb24, convert_yuv_to_ndarray_rgb24, get_colorrange, get_colorspace,
+};
 use crate::decoder::{DecoderConfig, VideoDecoder, VideoReducer};
 use crate::filter::{create_filter_spec, create_filters, FilterConfig};
 use crate::hwaccel::{HardwareAccelerationContext, HardwareAccelerationDeviceType};
@@ -18,7 +20,7 @@ use crate::info::{
 };
 use ndarray::{s, Array, Array3, Array4, ArrayViewMut3};
 use tokio::task;
-use yuvutils_rs::{YuvStandardMatrix, YuvRange};
+use yuvutils_rs::{YuvRange, YuvStandardMatrix};
 
 pub type FrameArray = Array3<u8>;
 pub type VideoArray = Array4<u8>;
@@ -232,8 +234,11 @@ impl VideoReader {
             }
             if stream.index() == self.stream_index {
                 self.decoder.video.send_packet(&packet)?;
-                self.decoder
-                    .receive_and_process_decoded_frames(&mut reducer, color_space, color_range)?;
+                self.decoder.receive_and_process_decoded_frames(
+                    &mut reducer,
+                    color_space,
+                    color_range,
+                )?;
             } else {
                 debug!("Packet for another stream");
             }
@@ -243,8 +248,11 @@ impl VideoReader {
         if !reducer.no_indices()
             && (&reducer.get_frame_index() <= reducer.get_indices().iter().max().unwrap_or(&0))
         {
-            self.decoder
-                .receive_and_process_decoded_frames(&mut reducer, color_space, color_range)?;
+            self.decoder.receive_and_process_decoded_frames(
+                &mut reducer,
+                color_space,
+                color_range,
+            )?;
         }
         Ok(reducer.get_full_video())
     }
@@ -293,7 +301,8 @@ impl VideoReader {
 
         let mut receive_and_process_decoded_frames = |decoder: &mut ffmpeg::decoder::Video,
                                                       mut curr_frame: usize,
-                                                      color_space: YuvStandardMatrix, color_range: YuvRange|
+                                                      color_space: YuvStandardMatrix,
+                                                      color_range: YuvRange|
          -> Result<usize, ffmpeg::Error> {
             let mut decoded = Video::empty();
             while decoder.receive_frame(&mut decoded).is_ok() {
@@ -499,7 +508,13 @@ impl VideoReader {
             // we can directly skip until frame_index
             debug!("No need to seek, we can directly skip frames");
             let num_skip = self.get_num_skip(&frame_index);
-            self.skip_frames(num_skip, &frame_index, frame_array, color_space, color_range)?;
+            self.skip_frames(
+                num_skip,
+                &frame_index,
+                frame_array,
+                color_space,
+                color_range,
+            )?;
         } else {
             if key_pos < curr_key_pos {
                 debug!("Seeking back to start");
@@ -508,7 +523,13 @@ impl VideoReader {
             debug!("Seeking to key_pos: {}", key_pos);
             self.seek_frame(&key_pos, frame_duration)?;
             let num_skip = self.get_num_skip(&frame_index);
-            self.skip_frames(num_skip, &frame_index, frame_array, color_space, color_range)?;
+            self.skip_frames(
+                num_skip,
+                &frame_index,
+                frame_array,
+                color_space,
+                color_range,
+            )?;
         }
         Ok(())
     }
@@ -583,9 +604,17 @@ impl VideoReader {
                                     .is_ok()
                                 {
                                     let rgb_frame: Array3<u8> = if self.decoder.is_hwaccel {
-                                        convert_nv12_to_ndarray_rgb24(yuv_frame, color_space, color_range)
+                                        convert_nv12_to_ndarray_rgb24(
+                                            yuv_frame,
+                                            color_space,
+                                            color_range,
+                                        )
                                     } else {
-                                        convert_yuv_to_ndarray_rgb24(yuv_frame, color_space, color_range)
+                                        convert_yuv_to_ndarray_rgb24(
+                                            yuv_frame,
+                                            color_space,
+                                            color_range,
+                                        )
                                     };
                                     frame_array.zip_mut_with(&rgb_frame, |a, b| {
                                         *a = *b;
