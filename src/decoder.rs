@@ -10,7 +10,7 @@ use ffmpeg::util::frame::video::Video;
 use ffmpeg_next as ffmpeg;
 use ndarray::{s, Array, Array3, Array4, ArrayViewMut3};
 use std::collections::HashMap;
-use yuvutils_rs::YuvStandardMatrix;
+use yuvutils_rs::{YuvStandardMatrix, YuvRange};
 
 /// Struct used when we want to decode the whole video with a compression_factor
 #[derive(Clone)]
@@ -192,6 +192,7 @@ impl VideoDecoder {
         &mut self,
         reducer: &mut VideoReducer,
         color_space: YuvStandardMatrix,
+        color_range: YuvRange,
     ) -> Result<(), ffmpeg::Error> {
         let mut decoded = Video::empty();
         while self.video.receive_frame(&mut decoded).is_ok() {
@@ -220,9 +221,9 @@ impl VideoDecoder {
                     let mut slice_frame = reducer.slice_mut(reducer.get_idx_counter());
 
                     let rgb_frame: Array3<u8> = if self.is_hwaccel {
-                        convert_nv12_to_ndarray_rgb24(yuv_frame, color_space)
+                        convert_nv12_to_ndarray_rgb24(yuv_frame, color_space, color_range)
                     } else {
-                        convert_yuv_to_ndarray_rgb24(yuv_frame, color_space)
+                        convert_yuv_to_ndarray_rgb24(yuv_frame, color_space, color_range)
                     };
 
                     slice_frame.zip_mut_with(&rgb_frame, |a, b| {

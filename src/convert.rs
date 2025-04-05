@@ -46,8 +46,9 @@ pub fn convert_frame_to_ndarray_rgb24(
 /// Converts a YUV420P video `AVFrame` produced by ffmpeg to an `ndarray`.
 /// * `frame` - Video frame to convert.
 /// * `color_space` - Color space matrix for yuv to rgb conversion, eg BT601, BT709, etc.
+/// * `color_range` - color range of the frame: Full or Limited.
 /// * returns a three-dimensional `ndarray` with dimensions `(H, W, C)` and type byte.
-pub fn convert_yuv_to_ndarray_rgb24(frame: Video, color_space: YuvStandardMatrix) -> Array3<u8> {
+pub fn convert_yuv_to_ndarray_rgb24(frame: Video, color_space: YuvStandardMatrix, color_range: YuvRange) -> Array3<u8> {
     let (buf_vec, frame_width, frame_height, bytes_copied) =
         copy_image(frame, AVPixelFormat::AV_PIX_FMT_YUV420P);
 
@@ -71,7 +72,7 @@ pub fn convert_yuv_to_ndarray_rgb24(frame: Video, color_space: YuvStandardMatrix
             &yuv_planar,
             &mut rgb,
             (frame_width * 3) as u32,
-            YuvRange::Full,
+            color_range,
             color_space,
         )
         .unwrap();
@@ -83,8 +84,10 @@ pub fn convert_yuv_to_ndarray_rgb24(frame: Video, color_space: YuvStandardMatrix
 
 /// Converts a NV12 video `AVFrame` produced by ffmpeg to an `ndarray`.
 /// * `frame` - Video frame to convert.
+/// * `color_space` - color space of the frame, eg BT601, BT709, etc.
+/// * `color_range` - color range of the frame: Full or Limited.
 /// * returns a three-dimensional `ndarray` with dimensions `(H, W, C)` and type byte.
-pub fn convert_nv12_to_ndarray_rgb24(frame: Video, color_space: YuvStandardMatrix) -> Array3<u8> {
+pub fn convert_nv12_to_ndarray_rgb24(frame: Video, color_space: YuvStandardMatrix, color_range: YuvRange) -> Array3<u8> {
     let (buf_vec, frame_width, frame_height, bytes_copied) =
         copy_image(frame, AVPixelFormat::AV_PIX_FMT_NV12);
 
@@ -105,7 +108,7 @@ pub fn convert_nv12_to_ndarray_rgb24(frame: Video, color_space: YuvStandardMatri
             &yuv_planar,
             &mut rgb,
             (frame_width * 3) as u32,
-            YuvRange::Full,
+            color_range,
             color_space,
             YuvConversionMode::Balanced,
         )
@@ -160,6 +163,13 @@ pub fn get_colorspace(height: i32, color_space: &str) -> YuvStandardMatrix {
             }
             colorspace
         }
+    }
+}
+
+pub fn get_colorrange(color_range: &str) -> YuvRange {
+    match color_range {
+        "FULL" | "PC" | "JPEG" => YuvRange::Full,
+        _ => YuvRange::Limited,
     }
 }
 
@@ -221,5 +231,19 @@ mod tests {
         assert_eq!(get_colorspace(2160, ""), YuvStandardMatrix::Bt2020);
         assert_eq!(get_colorspace(2160, "$éà'é"), YuvStandardMatrix::Bt2020);
         assert_eq!(get_colorspace(2160, "BT601"), YuvStandardMatrix::Bt601);
+    }
+
+    #[test]
+    fn test_get_colorrange_full() {
+        assert_eq!(get_colorrange("FULL"), YuvRange::Full);
+        assert_eq!(get_colorrange("PC"), YuvRange::Full);
+        assert_eq!(get_colorrange("JPEG"), YuvRange::Full);
+    }
+
+    #[test]
+    fn test_get_colorrange_limited() {
+        assert_eq!(get_colorrange(""), YuvRange::Limited);
+        assert_eq!(get_colorrange("LIMITED"), YuvRange::Limited);
+        assert_eq!(get_colorrange("unknown"), YuvRange::Limited);
     }
 }
