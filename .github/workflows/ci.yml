@@ -47,11 +47,9 @@ jobs:
 
       - name: Install dependencies
         run: |
-          # DEBIAN_FRONTEND=noninteractive apt update
-          # DEBIAN_FRONTEND=noninteractive apt install -y --no-install-recommends ca-certificates clang curl pkg-config python3
-          # update-ca-certificates
-          apt update
-          apt install -y --no-install-recommends clang curl pkg-config python3
+          DEBIAN_FRONTEND=noninteractive apt update
+          DEBIAN_FRONTEND=noninteractive apt install -y --no-install-recommends ca-certificates clang curl pkg-config python3
+          update-ca-certificates
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@v1
