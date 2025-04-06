@@ -10,7 +10,7 @@ jobs:
   lints:
     name: Lints
     runs-on: ubuntu-latest
-    container: jrottenberg/ffmpeg:5.1-ubuntu
+    container: jrottenberg/ffmpeg:7.1-ubuntu
 
     steps:
       - name: Checkout
@@ -18,8 +18,9 @@ jobs:
 
       - name: Install dependencies
         run: |
-          apt update
-          apt install -y --no-install-recommends clang curl pkg-config python3
+          DEBIAN_FRONTEND=noninteractive apt update
+          DEBIAN_FRONTEND=noninteractive apt install -y --no-install-recommends ca-certificates clang curl pkg-config python3
+          update-ca-certificates
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@v1
@@ -34,4 +35,31 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Clippy
-        run: cargo clippy --all -- -D warnings
+        run: cargo clippy --all --features ffmpeg_6_0 -- -D warnings
+  tests:
+    name: Tests
+    runs-on: ubuntu-latest
+    container: jrottenberg/ffmpeg:7.1-ubuntu
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          # DEBIAN_FRONTEND=noninteractive apt update
+          # DEBIAN_FRONTEND=noninteractive apt install -y --no-install-recommends ca-certificates clang curl pkg-config python3
+          # update-ca-certificates
+          apt update
+          apt install -y --no-install-recommends clang curl pkg-config python3
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: stable
+
+      - name: Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: tests
+        run: cargo test --features ffmpeg_6_0
