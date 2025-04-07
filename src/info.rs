@@ -99,7 +99,8 @@ pub fn collect_video_metadata(
     info.insert("aspect_ratio", format!("{:?}", video.aspect_ratio()));
     let color_space = format!("{:?}", video.color_space());
     info.insert("color_space", color_space.to_uppercase());
-    info.insert("color_range", format!("{:?}", video.color_range()));
+    let color_range = format!("{:?}", video.color_range());
+    info.insert("color_range", color_range.to_uppercase());
     info.insert("color_primaries", format!("{:?}", video.color_primaries()));
     info.insert(
         "color_xfer_charac",
