@@ -742,10 +742,11 @@ mod tests {
         let path = Path::new(TEST_VIDEO);
         ffmpeg::init().unwrap();
         let ictx = input(&path).unwrap();
-        let stream = ictx.streams()
+        let stream = ictx
+            .streams()
             .best(Type::Video)
             .expect("No video stream found");
-        
+
         // test with multiple threads
         let result = setup_decoder_context(&stream, 4, None);
         assert!(result.is_ok());
