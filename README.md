@@ -28,7 +28,7 @@ At least on the intended ML uses cases where video resolution remains reasonable
 ```bash
 pip install video-reader-rs
 ```
-Should work with python >= 3.8 on recent linux x86_64, macos and windows.
+Should work with python >= 3.8 on recent linux x86_64 and macos.
 
 ### Manual installation
 You need to have ffmpeg installed on your system.
