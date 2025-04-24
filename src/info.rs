@@ -99,7 +99,8 @@ pub fn collect_video_metadata(
     info.insert("aspect_ratio", format!("{:?}", video.aspect_ratio()));
     let color_space = format!("{:?}", video.color_space());
     info.insert("color_space", color_space.to_uppercase());
-    info.insert("color_range", format!("{:?}", video.color_range()));
+    let color_range = format!("{:?}", video.color_range());
+    info.insert("color_range", color_range.to_uppercase());
     info.insert("color_primaries", format!("{:?}", video.color_primaries()));
     info.insert(
         "color_xfer_charac",
@@ -212,56 +213,109 @@ pub fn get_resized_dim(
     (new_height as u32, new_width as u32)
 }
 
-#[test]
-fn test_get_resized_dim() {
-    // No resize
-    assert_eq!(get_resized_dim(720.0, 1280.0, None, None), (720, 1280));
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    // Resize shorter side (height)
-    assert_eq!(
-        get_resized_dim(720.0, 1280.0, Some(360.0), None),
-        (360, 640)
-    );
+    #[test]
+    fn test_no_resize_needed() {
+        let height = 720.0;
+        let width = 1280.0;
+        let result = get_resized_dim(height, width, None, None);
 
-    // Resize shorter side (width)
-    assert_eq!(
-        get_resized_dim(1280.0, 720.0, Some(360.0), None),
-        (640, 360)
-    );
+        assert_eq!(result, (720, 1280));
+    }
 
-    // Resize longer side (width)
-    assert_eq!(
-        get_resized_dim(720.0, 1280.0, None, Some(640.0)),
-        (360, 640)
-    );
+    #[test]
+    fn test_resize_shorter_side_height() {
+        let height = 720.0;
+        let width = 1280.0;
+        let resize_to = 480.0;
 
-    // Resize longer side (height)
-    assert_eq!(
-        get_resized_dim(1280.0, 720.0, None, Some(640.0)),
-        (640, 360)
-    );
+        let result = get_resized_dim(height, width, Some(resize_to), None);
 
-    // Both dimensions specified (no aspect ratio)
-    assert_eq!(
-        get_resized_dim(720.0, 1280.0, Some(360.0), Some(640.0)),
-        (360, 640)
-    );
-    assert_eq!(
-        get_resized_dim(1280.0, 720.0, Some(360.0), Some(640.0)),
-        (640, 360)
-    );
+        assert_eq!(result.0, 480);
+        assert_eq!(result.1, 853);
+    }
 
-    // Square image
-    assert_eq!(
-        get_resized_dim(1000.0, 1000.0, Some(500.0), None),
-        (500, 500)
-    );
-    assert_eq!(
-        get_resized_dim(1000.0, 1000.0, None, Some(500.0)),
-        (500, 500)
-    );
+    #[test]
+    fn test_resize_shorter_side_width() {
+        let height = 1080.0;
+        let width = 720.0;
+        let resize_to = 480.0;
 
-    // Edge cases with small numbers
-    assert_eq!(get_resized_dim(10.0, 20.0, Some(5.0), None), (5, 10));
-    assert_eq!(get_resized_dim(20.0, 10.0, Some(5.0), None), (10, 5));
+        let result = get_resized_dim(height, width, Some(resize_to), None);
+
+        assert_eq!(result.1, 480);
+        assert_eq!(result.0, 720);
+    }
+
+    #[test]
+    fn test_resize_longer_side_height() {
+        let height = 1080.0;
+        let width = 720.0;
+        let resize_to = 720.0;
+
+        let result = get_resized_dim(height, width, None, Some(resize_to));
+
+        assert_eq!(result.0, 720);
+        assert_eq!(result.1, 480);
+    }
+
+    #[test]
+    fn test_resize_longer_side_width() {
+        let height = 720.0;
+        let width = 1280.0;
+        let resize_to = 854.0;
+
+        let result = get_resized_dim(height, width, None, Some(resize_to));
+
+        assert_eq!(result.1, 854);
+        assert_eq!(result.0, 480);
+    }
+
+    #[test]
+    fn test_both_dimensions_specified() {
+        let height = 720.0;
+        let width = 1280.0;
+
+        let result = get_resized_dim(height, width, Some(480.0), Some(800.0));
+
+        // Should ignore aspect ratio and use the provided dimensions
+        assert_eq!(result, (480, 800));
+    }
+
+    #[test]
+    fn test_both_dimensions_specified_width_smaller() {
+        let height = 1080.0;
+        let width = 720.0;
+
+        let result = get_resized_dim(height, width, Some(480.0), Some(800.0));
+
+        // Should set width to shorter_side value and height to longer_side value
+        assert_eq!(result, (800, 480));
+    }
+
+    #[test]
+    fn test_resize_equal_dimensions() {
+        let height = 1000.0;
+        let width = 1000.0;
+
+        let result = get_resized_dim(height, width, Some(500.0), None);
+
+        assert_eq!(result, (500, 500));
+    }
+
+    #[test]
+    fn test_rounding_behavior() {
+        let height = 723.0;
+        let width = 1283.0;
+        let resize_to = 483.0;
+
+        let result = get_resized_dim(height, width, Some(resize_to), None);
+
+        assert_eq!(result.0, 483);
+        // 1283 * (483/723) = 857.1 which should round to 857
+        assert_eq!(result.1, 857);
+    }
 }

@@ -694,3 +694,78 @@ impl VideoReader {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    // use ffmpeg::codec::context::Context;
+    use ffmpeg::format::input;
+    use ffmpeg::media::Type;
+    use std::path::Path;
+
+    const TEST_VIDEO: &'static str = "./assets/input.mp4";
+    const TEST_AUDIO: &'static str = "./assets/audio_only.mp3";
+    const NO_FILE: &'static str = "./assets/non_existent_file.mp4";
+
+    #[test]
+    fn test_get_init_context_success() {
+        let filename = String::from(TEST_VIDEO);
+        let result = get_init_context(&filename);
+        assert!(result.is_ok());
+
+        let (ctx, stream_index) = result.unwrap();
+        assert!(stream_index < ctx.streams().count());
+
+        let stream = ctx.streams().find(|s| s.index() == stream_index);
+        assert!(stream.is_some());
+        let stream = stream.unwrap();
+        assert_eq!(stream.parameters().medium(), Type::Video);
+    }
+
+    #[test]
+    fn test_get_init_context_file_not_found() {
+        let filename = String::from(NO_FILE);
+        let result = get_init_context(&filename);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_get_init_context_no_video_stream() {
+        // This test requires a file with no video streams, like an audio-only file
+        let filename = String::from(TEST_AUDIO);
+        let result = get_init_context(&filename);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_setup_decoder_context_no_hwaccel() {
+        let path = Path::new(TEST_VIDEO);
+        ffmpeg::init().unwrap();
+        let ictx = input(&path).unwrap();
+        let stream = ictx
+            .streams()
+            .best(Type::Video)
+            .expect("No video stream found");
+
+        // test with multiple threads
+        let result = setup_decoder_context(&stream, 4, None);
+        assert!(result.is_ok());
+        let (context, hwaccel) = result.unwrap();
+        assert!(hwaccel.is_none());
+        assert!(context.decoder().video().is_ok());
+
+        // Test with 1 thread
+        let result = setup_decoder_context(&stream, 1, None);
+        assert!(result.is_ok());
+        let (context, hwaccel) = result.unwrap();
+        assert!(hwaccel.is_none());
+        assert!(context.decoder().video().is_ok());
+
+        // Test with threads set to 0
+        let result = setup_decoder_context(&stream, 0, None);
+        assert!(result.is_ok());
+        let (context, hwaccel) = result.unwrap();
+        assert!(hwaccel.is_none());
+        assert!(context.decoder().video().is_ok());
+    }
+}
