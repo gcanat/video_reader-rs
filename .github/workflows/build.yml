@@ -126,6 +126,7 @@ jobs:
           7z x -y -o"$env:FFMPEG_INSTALL_PATH" "$tempFile"
           $ffmpegDir = (Get-ChildItem -Directory "$env:FFMPEG_INSTALL_PATH").FullName
           Add-Content $env:GITHUB_ENV "FFMPEG_DIR=$ffmpegDir"
+          # Add FFmpeg bin to PATH so delvewheel can find the DLLs
           Add-Content $env:GITHUB_PATH "$ffmpegDir/bin"
 
       - uses: actions/setup-python@v5
@@ -133,18 +134,30 @@ jobs:
           python-version: '3.11'
           architecture: ${{ matrix.platform.target }}
 
-      - name: Build wheels
+      # Install delvewheel
+      - name: Install build dependencies
+        run: pip install delvewheel
+
+      - name: Build wheel
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.platform.target }}
           args: --release --features ffmpeg_6_0 --out dist --find-interpreter
           sccache: 'true'
 
+      - name: Repair wheel with delvewheel
+        shell: bash
+        run: |
+          # delvewheel needs the DLLs in PATH, which was done in the 'Install FFmpeg' step
+          delvewheel repair dist/*.whl
+
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
           name: wheels-windows-${{ matrix.platform.target }}
-          path: dist
+          path: wheelhouse/
+  
+  # ... existing code ...
 
   macos:
     runs-on: ${{ matrix.platform.runner }}
