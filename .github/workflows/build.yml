@@ -133,18 +133,26 @@ jobs:
           python-version: '3.11'
           architecture: ${{ matrix.platform.target }}
 
-      - name: Build wheels
+      - name: Install build dependencies
+        run: pip install delvewheel
+
+      - name: Build wheel
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.platform.target }}
           args: --release --features ffmpeg_6_0 --out dist --find-interpreter
           sccache: 'true'
 
+      - name: Repair wheel with delvewheel
+        shell: bash
+        run: |
+          delvewheel repair dist/*.whl
+
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
           name: wheels-windows-${{ matrix.platform.target }}
-          path: dist
+          path: wheelhouse/
 
   macos:
     runs-on: ${{ matrix.platform.runner }}
