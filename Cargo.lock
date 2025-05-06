@@ -797,7 +797,7 @@ checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
 
 [[package]]
 name = "video_reader-rs"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "env_logger",
  "ffmpeg-next",
@@ -807,7 +807,7 @@ dependencies = [
  "once_cell",
  "pyo3",
  "tokio",
- "yuvutils-rs",
+ "yuv",
 ]
 
 [[package]]
@@ -899,10 +899,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "589f6da84c646204747d1270a2a5661ea66ed1cced2631d546fdfb155959f9ec"
 
 [[package]]
-name = "yuvutils-rs"
-version = "0.8.1"
+name = "yuv"
+version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "45d853a7816ee95dd912b6345d93dd5f8e6165858d97484389955f6ce1cb1f37"
+checksum = "2d03c082fceb319b53bc35ddb2c8bf9c7f9a64f34090f18a0f05737def94c48d"
 dependencies = [
  "num-traits",
 ]
