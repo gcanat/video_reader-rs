@@ -170,13 +170,20 @@ jobs:
           python-version: '3.11'
       - name: Install dependencies
         run: |
-          brew install ffmpeg
+          brew install ffmpeg &&
+          pip install delocate
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.platform.target }}
           args: --release --features ffmpeg_6_0 --out dist --find-interpreter
           sccache: 'true'
+
+      - name: Repair wheel with delocate
+        shell: bash
+        run: |
+          delocate-wheel dist/*.whl
+
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:

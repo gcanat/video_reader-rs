@@ -20,7 +20,7 @@ use crate::info::{
 };
 use ndarray::{s, Array, Array3, Array4, ArrayViewMut3};
 use tokio::task;
-use yuvutils_rs::{YuvRange, YuvStandardMatrix};
+use yuv::{YuvRange, YuvStandardMatrix};
 
 pub type FrameArray = Array3<u8>;
 pub type VideoArray = Array4<u8>;

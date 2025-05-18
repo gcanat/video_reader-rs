@@ -3,7 +3,7 @@ use ffmpeg::util::frame::video::Video;
 use ffmpeg_next as ffmpeg;
 use ndarray::parallel::prelude::*;
 use ndarray::{stack, Array2, Array3, Array4, ArrayView3, ArrayViewMut3, Axis};
-use yuvutils_rs::{
+use yuv::{
     yuv420_to_rgb, yuv_nv12_to_rgb, YuvBiPlanarImage, YuvConversionMode, YuvPlanarImage, YuvRange,
     YuvStandardMatrix,
 };
