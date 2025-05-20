@@ -109,7 +109,7 @@ jobs:
     env:
       FFMPEG_DOWNLOAD_URL: "https://github.com/GyanD/codexffmpeg/releases/download/VER/ffmpeg-VER-full_build-shared.7z"
       FFMPEG_INSTALL_PATH: "C:/ffmpeg"
-      FFMPEG_VERSION: "7.1.1"
+      FFMPEG_VERSION: "7.1"
 
     steps:
       - uses: actions/checkout@v4
