@@ -7,7 +7,7 @@ try:
     import numpy as np
     from decord import VideoReader
 except ImportError:
-    raise ImportError("Please install the required packages: `pip install numpy decord tqdm opencv-python`")
+    raise ImportError("Please install the required packages: `pip install numpy decord`")
 
 
 def parse_args():
