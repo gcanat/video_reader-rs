@@ -13,7 +13,7 @@ use convert::rgb2gray;
 use decoder::DecoderConfig;
 use log::debug;
 use pyo3::{
-    exceptions::PyRuntimeError, PyRef, PyStopIteration,
+    exceptions::{PyRuntimeError, PyStopIteration}, PyRef,
     pyclass, pymethods, pymodule,
     types::{IntoPyDict, PyDict, PyFloat, PyList, PyModule, PyModuleMethods},
     Bound, PyResult, Python,
@@ -97,7 +97,7 @@ impl PyVideoReader {
                     return Err(PyStopIteration::new_err("No more frames"));
                 }
                 
-                match vr.get_batch(vec![self.current_frame], false) {
+                match vr.get_batch(vec![self.current_frame]) {
                     Ok(batch) => {
                         let frame = batch.slice(s![0, .., .., ..]).to_owned();
                         self.current_frame += 1;
