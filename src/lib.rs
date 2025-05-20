@@ -13,11 +13,12 @@ use convert::rgb2gray;
 use decoder::DecoderConfig;
 use log::debug;
 use pyo3::{
-    exceptions::PyRuntimeError,
+    exceptions::PyRuntimeError, PyRef, PyStopIteration,
     pyclass, pymethods, pymodule,
     types::{IntoPyDict, PyDict, PyFloat, PyList, PyModule, PyModuleMethods},
     Bound, PyResult, Python,
 };
+use ndarray::s;
 use reader::VideoReader;
 use std::sync::Mutex;
 
@@ -36,6 +37,7 @@ type Frame = PyArray<u8, Dim<[usize; 3]>>;
 #[pyclass]
 struct PyVideoReader {
     inner: Mutex<VideoReader>,
+    current_frame: usize,
 }
 
 #[pymethods]
@@ -75,8 +77,36 @@ impl PyVideoReader {
         match VideoReader::new(filename.to_string(), decoder_config) {
             Ok(reader) => Ok(PyVideoReader {
                 inner: Mutex::new(reader),
+                current_frame: 0, // Initialize current frame index
             }),
             Err(e) => Err(PyRuntimeError::new_err(format!("Error: {}", e))),
+        }
+    }
+
+    fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+    
+    fn __next__<'a>(&mut self, py: Python<'a>) -> PyResult<Bound<'a, PyArray<u8, Dim<[usize; 3]>>>> {
+        match self.inner.lock() {
+            Ok(mut vr) => {
+                let total_frames = *vr.stream_info().frame_count();
+                
+                if self.current_frame >= total_frames {
+                    self.current_frame = 0; // Reset for next iteration
+                    return Err(PyStopIteration::new_err("No more frames"));
+                }
+                
+                match vr.get_batch(vec![self.current_frame], false) {
+                    Ok(batch) => {
+                        let frame = batch.slice(s![0, .., .., ..]).to_owned();
+                        self.current_frame += 1;
+                        Ok(frame.into_pyarray(py))
+                    },
+                    Err(e) => Err(PyRuntimeError::new_err(format!("Error getting frame: {}", e))),
+                }
+            },
+            Err(e) => Err(PyRuntimeError::new_err(format!("Lock error: {}", e))),
         }
     }
 
@@ -267,7 +297,6 @@ impl PyVideoReader {
 #[pymodule]
 fn video_reader<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()> {
     env_logger::init();
-    // Add the VideoReader class to the module
     m.add_class::<PyVideoReader>()?;
     Ok(())
 }
