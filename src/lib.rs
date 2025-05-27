@@ -12,14 +12,16 @@ mod reader;
 use convert::rgb2gray;
 use decoder::DecoderConfig;
 use log::debug;
+use ndarray::{s, Array4};
 use pyo3::{
-    exceptions::PyRuntimeError,
+    exceptions::{PyRuntimeError, PyStopIteration},
     pyclass, pymethods, pymodule,
     types::{IntoPyDict, PyDict, PyFloat, PyList, PyModule, PyModuleMethods},
-    Bound, PyResult, Python,
+    Bound, PyRef, PyResult, Python,
 };
 use reader::VideoReader;
 use std::sync::Mutex;
+use std::collections::VecDeque;
 
 use once_cell::sync::Lazy;
 use tokio::runtime::{self, Runtime};
@@ -32,16 +34,20 @@ static RUNTIME: Lazy<Runtime> = Lazy::new(|| {
 });
 
 type Frame = PyArray<u8, Dim<[usize; 3]>>;
+type FrameArray = Array4<u8>;
 
 #[pyclass]
 struct PyVideoReader {
     inner: Mutex<VideoReader>,
+    current_frame: usize,
+    frame_buffer: VecDeque<FrameArray>,
+    chunk_size: usize,
 }
 
 #[pymethods]
 impl PyVideoReader {
     #[new]
-    #[pyo3(signature = (filename, threads=None, resize_shorter_side=None, resize_longer_side=None, device=None, filter=None))]
+    #[pyo3(signature = (filename, threads=None, resize_shorter_side=None, resize_longer_side=None, device=None, filter=None, chunk_size=None))]
     /// create an instance of VideoReader
     /// * `filename` - path to the video file
     /// * `threads` - number of threads to use. If None, let ffmpeg choose the optimal number.
@@ -52,6 +58,7 @@ impl PyVideoReader {
     /// * `device` - type of hardware acceleration, eg: 'cuda', 'vdpau', 'drm', etc.
     /// * `filter` - custome ffmpeg filter to use, eg "format=rgb24,scale=w=256:h=256:flags=fast_bilinear"
     /// If set to None (default) or 'cpu' then cpu is used.
+    /// * `chunk_size` - number of frames to decode in each batch for iterator (default: 32)
     /// * returns a PyVideoReader instance.
     fn new(
         filename: &str,
@@ -60,6 +67,7 @@ impl PyVideoReader {
         resize_longer_side: Option<f64>,
         device: Option<&str>,
         filter: Option<String>,
+        chunk_size: Option<usize>,
     ) -> PyResult<Self> {
         let hwaccel = match device {
             Some("cpu") | None => None,
@@ -75,8 +83,35 @@ impl PyVideoReader {
         match VideoReader::new(filename.to_string(), decoder_config) {
             Ok(reader) => Ok(PyVideoReader {
                 inner: Mutex::new(reader),
+                current_frame: 0,
+                frame_buffer: VecDeque::new(),
+                chunk_size: chunk_size.unwrap_or(32),
             }),
             Err(e) => Err(PyRuntimeError::new_err(format!("Error: {}", e))),
+        }
+    }
+
+    fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    fn __next__<'a>(
+        &mut self,
+        py: Python<'a>,
+    ) -> PyResult<Bound<'a, PyArray<u8, Dim<[usize; 3]>>>> {
+        // Refill buffer if empty
+        if self.frame_buffer.is_empty() {
+            self.refill_buffer()?;
+        }
+
+        if let Some(frame) = self.frame_buffer.pop_front() {
+            self.current_frame += 1;
+            Ok(frame.into_pyarray(py))
+        } else {
+            // Should reset for next iteration
+            self.current_frame = 0;
+            self.frame_buffer.clear();
+            Err(PyStopIteration::new_err("No more frames"))
         }
     }
 
@@ -214,7 +249,6 @@ impl PyVideoReader {
     ) -> PyResult<Bound<'a, PyArray<u8, Dim<[usize; 4]>>>> {
         match self.inner.lock() {
             Ok(mut vr) => {
-                // let video: Array4<u8>;
                 let start_time: i32 = vr
                     .decoder()
                     .video_info()
@@ -262,12 +296,42 @@ impl PyVideoReader {
             Err(e) => Err(PyRuntimeError::new_err(format!("Lock error: {}", e))),
         }
     }
+
+    /// Reset the iterator to start from the beginning
+    fn reset(&mut self) -> PyResult<()> {
+        self.current_frame = 0;
+        self.frame_buffer.clear();
+        Ok(())
+    }
 }
 
-#[pymodule]
-fn video_reader<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()> {
-    env_logger::init();
-    // Add the VideoReader class to the module
-    m.add_class::<PyVideoReader>()?;
-    Ok(())
+impl PyVideoReader {
+    /// Refill the frame buffer with the next chunk of frames
+    fn refill_buffer(&mut self) -> PyResult<()> {
+        match self.inner.lock() {
+            Ok(mut vr) => {
+                let total_frames = *vr.stream_info().frame_count();
+                
+                if self.current_frame >= total_frames {
+                    return Ok(()); // No more frames to load
+                }
+
+                let end_frame = (self.current_frame + self.chunk_size).min(total_frames);
+                let indices: Vec<usize> = (self.current_frame..end_frame).collect();
+
+                match vr.get_batch(indices) {
+                    Ok(batch) => {
+                        // Convert 4D batch to individual 3D frames and add to buffer
+                        for i in 0..(end_frame - self.current_frame) {
+                            let frame = batch.slice(s![i, .., .., ..]).to_owned();
+                            self.frame_buffer.push_back(frame);
+                        }
+                        Ok(())
+                    }
+                    Err(e) => Err(PyRuntimeError::new_err(format!("Error loading chunk: {}", e)))
+                }
+            }
+            Err(e) => Err(PyRuntimeError::new_err(format!("Lock error: {}", e)))
+        }
+    }
 }
