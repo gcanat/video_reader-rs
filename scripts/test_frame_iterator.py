@@ -1,4 +1,5 @@
 import argparse
+import time
 from pathlib import Path
 from video_reader import PyVideoReader
 
@@ -7,7 +8,7 @@ try:
     import numpy as np
     from decord import VideoReader
 except ImportError:
-    raise ImportError("Please install the required packages: `pip install numpy decord`")
+    raise ImportError("Please install the required packages: `pip install numpy decord tqdm opencv-python`")
 
 
 def parse_args():
@@ -15,7 +16,77 @@ def parse_args():
     parser.add_argument("--filename", "-f", type=str, help="Path to the video file or directory containing video files")
     parser.add_argument("--batch_size", "-b", type=int, default=32, help="Number of frames in each batch")
     parser.add_argument("--num_batches", "-n", type=int, default=5, help="Number of batches to test")
+    parser.add_argument("--num_runs", "-r", type=int, default=3, help="Number of runs for performance testing")
+    parser.add_argument(
+        "--skip_comparison", "-s", action="store_true", help="Skip frame comparison, only run performance test"
+    )
     return parser.parse_args()
+
+
+def test_decoding_performance(filename: str, num_runs: int = 3):
+    """
+    Test and compare the decoding performance between PyVideoReader and Decord.
+    """
+    print("\n===== Performance Testing =====")
+
+    print("Testing PyVideoReader performance...")
+    vr_times = []
+    vr_frame_count = 0
+
+    for run in range(num_runs):
+        start_time = time.time()
+        vr_reader = PyVideoReader(filename)
+        frame_count = 0
+        for frame in vr_reader:
+            frame_count += 1
+        end_time = time.time()
+        elapsed = end_time - start_time
+        vr_times.append(elapsed)
+        if run == 0:
+            vr_frame_count = frame_count
+        print(f"  Run {run + 1}: {elapsed:.3f}s, {frame_count} frames, {frame_count / elapsed:.1f} fps")
+
+    vr_avg_time = np.mean(vr_times)
+    vr_std_time = np.std(vr_times)
+    vr_avg_fps = vr_frame_count / vr_avg_time
+
+    print("\nTesting Decord performance...")
+    decord_times = []
+    decord_frame_count = 0
+
+    for run in range(num_runs):
+        start_time = time.time()
+        decord_reader = VideoReader(filename, num_threads=1)
+        frame_count = len(decord_reader)
+        for i in range(frame_count):
+            _ = decord_reader[i].asnumpy()
+        end_time = time.time()
+        elapsed = end_time - start_time
+        decord_times.append(elapsed)
+        if run == 0:
+            decord_frame_count = frame_count
+        print(f"  Run {run + 1}: {elapsed:.3f}s, {frame_count} frames, {frame_count / elapsed:.1f} fps")
+
+    decord_avg_time = np.mean(decord_times)
+    decord_std_time = np.std(decord_times)
+    decord_avg_fps = decord_frame_count / decord_avg_time
+
+    print("\n===== Performance Summary =====")
+    print(f"PyVideoReader:")
+    print(f"  Average time: {vr_avg_time:.3f}s ± {vr_std_time:.3f}s")
+    print(f"  Average FPS: {vr_avg_fps:.1f}")
+    print(f"  Frame count: {vr_frame_count}")
+
+    print(f"\nDecord:")
+    print(f"  Average time: {decord_avg_time:.3f}s ± {decord_std_time:.3f}s")
+    print(f"  Average FPS: {decord_avg_fps:.1f}")
+    print(f"  Frame count: {decord_frame_count}")
+
+    speedup = decord_avg_time / vr_avg_time
+    if speedup > 1:
+        print(f"\nPyVideoReader is {speedup:.2f}x faster than Decord")
+    else:
+        print(f"\nDecord is {1 / speedup:.2f}x faster than PyVideoReader")
 
 
 def compare_videoreader_with_decord(filename: str):
@@ -100,4 +171,8 @@ def compare_videoreader_with_decord(filename: str):
 if __name__ == "__main__":
     args = parse_args()
     filename = Path(args.filename)
-    compare_videoreader_with_decord(str(filename))
+
+    test_decoding_performance(str(filename), args.num_runs)
+
+    if not args.skip_comparison:
+        compare_videoreader_with_decord(str(filename))
