@@ -81,6 +81,7 @@ pub struct VideoReader {
     curr_dec_idx: usize,
     n_fails: usize,
     decoder: VideoDecoder,
+    draining: bool,
 }
 
 unsafe impl Send for VideoReader {}
@@ -114,6 +115,7 @@ impl VideoReader {
             curr_dec_idx: 0,
             n_fails: 0,
             decoder,
+            draining: false,
         })
     }
 
@@ -188,12 +190,12 @@ impl VideoReader {
         Ok(scaler)
     }
 
-    pub fn decode_video(
+    pub fn decoder_start(
         &mut self,
         start_frame: Option<usize>,
         end_frame: Option<usize>,
         compression_factor: Option<f64>,
-    ) -> Result<VideoArray, ffmpeg::Error> {
+    ) -> Result<(VideoReducer, usize, YuvStandardMatrix, YuvRange), ffmpeg::Error> {
         let (reducer, start_frame, _end_frame) = VideoReducer::build(
             start_frame,
             end_frame,
@@ -221,41 +223,112 @@ impl VideoReader {
             self.curr_frame = key_pos;
         }
 
+        let (color_space, color_range) = self.get_color_info();
+
+        let mut reducer = reducer.unwrap();
+        reducer.set_frame_index(self.curr_frame);
+        let max_idx = reducer.get_indices().iter().max().unwrap_or(&0).to_owned();
+        Ok((reducer, max_idx, color_space, color_range))
+    }
+
+    pub fn get_color_info(&self) -> (YuvStandardMatrix, YuvRange) {
         let cspace_string = self.decoder.video_info.get("color_space").unwrap();
         let crange_string = self.decoder.video_info.get("color_range").unwrap();
         let color_space = get_colorspace(self.decoder.height as i32, cspace_string);
         let color_range = get_colorrange(crange_string);
+        (color_space, color_range)
+    }
 
-        let mut reducer = reducer.unwrap();
-        reducer.set_frame_index(self.curr_frame);
+    // pub fn decode_iter(&mut self) -> impl Iterator<Item = Result<Array3<u8>, ffmpeg::Error>> + '_ {
+    //     let (color_space, color_range) = self.get_color_info();
+    //     std::iter::from_fn(move || Some(self.decode_next(color_space, color_range)))
+    // }
+
+    pub fn decode_next(
+        &mut self,
+        color_space: YuvStandardMatrix,
+        color_range: YuvRange,
+    ) -> Result<Array3<u8>, ffmpeg::Error> {
+        loop {
+            match self.ictx.packets().next() {
+                Some((stream, packet)) => {
+                    if stream.index() == self.stream_index {
+                        self.decoder.video.send_packet(&packet)?;
+                        match self.decoder.decode_frames(color_space, color_range)? {
+                            Some(rgb_frame) => break Ok(rgb_frame),
+                            None => continue,
+                        };
+                    }
+                }
+                None => {
+                    if !self.draining {
+                        self.decoder.video.send_eof()?;
+                        self.draining = true;
+                    }
+                    match self.decoder.decode_frames(color_space, color_range)? {
+                        Some(rgb_frame) => break Ok(rgb_frame),
+                        None => {
+                            self.draining = false;
+                            self.decoder.video.flush();
+                            break Err(ffmpeg::Error::Eof);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn decode_video(
+        &mut self,
+        start_frame: Option<usize>,
+        end_frame: Option<usize>,
+        compression_factor: Option<f64>,
+    ) -> Result<VideoArray, ffmpeg::Error> {
+        let (mut reducer, max_idx, color_space, color_range) =
+            self.decoder_start(start_frame, end_frame, compression_factor)?;
         for (stream, packet) in self.ictx.packets() {
-            if &reducer.get_frame_index() > reducer.get_indices().iter().max().unwrap_or(&0) {
+            if reducer.get_frame_index() > max_idx {
                 break;
             }
             if stream.index() == self.stream_index {
                 self.decoder.video.send_packet(&packet)?;
-                self.decoder.receive_and_process_decoded_frames(
+                match self.decoder.receive_and_process_decoded_frames(
                     &mut reducer,
                     color_space,
                     color_range,
-                )?;
+                )? {
+                    Some(rgb_frame) => {
+                        let mut slice_frame = reducer.slice_mut(reducer.get_idx_counter());
+                        slice_frame.zip_mut_with(&rgb_frame, |a, b| {
+                            *a = *b;
+                        });
+                    }
+                    None => debug!("No frame received!"),
+                }
             } else {
                 debug!("Packet for another stream");
             }
         }
         self.decoder.video.send_eof()?;
         // only process the remaining frames if we haven't reached the last frame
-        if !reducer.no_indices()
-            && (&reducer.get_frame_index() <= reducer.get_indices().iter().max().unwrap_or(&0))
-        {
-            self.decoder.receive_and_process_decoded_frames(
+        if !reducer.no_indices() && (reducer.get_frame_index() <= max_idx) {
+            match self.decoder.receive_and_process_decoded_frames(
                 &mut reducer,
                 color_space,
                 color_range,
-            )?;
+            )? {
+                Some(rgb_frame) => {
+                    let mut slice_frame = reducer.slice_mut(reducer.get_idx_counter());
+                    slice_frame.zip_mut_with(&rgb_frame, |a, b| {
+                        *a = *b;
+                    });
+                }
+                None => debug!("No frame received!"),
+            }
         }
         Ok(reducer.get_full_video())
     }
+
     pub async fn decode_video_fast(
         &mut self,
         start_frame: Option<usize>,
@@ -692,6 +765,17 @@ impl VideoReader {
     pub fn avflushbuf(&mut self) -> Result<(), ffmpeg::Error> {
         unsafe { avcodec_flush_buffers(self.decoder.video.as_mut_ptr()) };
         Ok(())
+    }
+}
+
+impl Iterator for VideoReader {
+    type Item = Array3<u8>;
+    fn next(&mut self) -> Option<Self::Item> {
+        let (color_space, color_range) = self.get_color_info();
+        match self.decode_next(color_space, color_range) {
+            Ok(rgb_frame) => Some(rgb_frame),
+            Err(_) => None,
+        }
     }
 }
 

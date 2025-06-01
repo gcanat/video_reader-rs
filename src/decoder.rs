@@ -187,54 +187,73 @@ impl VideoDecoder {
         &self.video
     }
 
+    pub fn decode_frames(
+        &mut self,
+        color_space: YuvStandardMatrix,
+        color_range: YuvRange,
+    ) -> Result<Option<Array3<u8>>, ffmpeg::Error> {
+        let mut decoded = Video::empty();
+        while self.video.receive_frame(&mut decoded).is_ok() {
+            let rgb_frame = self.process_frame(&decoded, color_space, color_range);
+            return Ok(rgb_frame);
+        }
+        Ok(None)
+    }
+
+    pub fn process_frame(
+        &mut self,
+        decoded: &Video,
+        color_space: YuvStandardMatrix,
+        color_range: YuvRange,
+    ) -> Option<Array3<u8>> {
+        self.graph
+            .get("in")
+            .unwrap()
+            .source()
+            .add(&decoded)
+            .unwrap();
+
+        let mut yuv_frame = Video::empty();
+        if self
+            .graph
+            .get("out")
+            .unwrap()
+            .sink()
+            .frame(&mut yuv_frame)
+            .is_ok()
+        {
+            let rgb_frame: Array3<u8> = if self.is_hwaccel {
+                convert_nv12_to_ndarray_rgb24(yuv_frame, color_space, color_range)
+            } else {
+                convert_yuv_to_ndarray_rgb24(yuv_frame, color_space, color_range)
+            };
+            return Some(rgb_frame);
+        }
+        None
+    }
+
     /// Decode all frames that match the frame indices
     pub fn receive_and_process_decoded_frames(
         &mut self,
         reducer: &mut VideoReducer,
         color_space: YuvStandardMatrix,
         color_range: YuvRange,
-    ) -> Result<(), ffmpeg::Error> {
+    ) -> Result<Option<Array3<u8>>, ffmpeg::Error> {
         let mut decoded = Video::empty();
         while self.video.receive_frame(&mut decoded).is_ok() {
             let match_index = reducer
                 .get_indices()
                 .iter()
                 .position(|x| x == &reducer.get_frame_index());
+            reducer.incr_frame_index(1);
             if match_index.is_some() {
                 reducer.remove_idx(match_index.unwrap());
-                self.graph
-                    .get("in")
-                    .unwrap()
-                    .source()
-                    .add(&decoded)
-                    .unwrap();
-
-                let mut yuv_frame = Video::empty();
-                if self
-                    .graph
-                    .get("out")
-                    .unwrap()
-                    .sink()
-                    .frame(&mut yuv_frame)
-                    .is_ok()
-                {
-                    let mut slice_frame = reducer.slice_mut(reducer.get_idx_counter());
-
-                    let rgb_frame: Array3<u8> = if self.is_hwaccel {
-                        convert_nv12_to_ndarray_rgb24(yuv_frame, color_space, color_range)
-                    } else {
-                        convert_yuv_to_ndarray_rgb24(yuv_frame, color_space, color_range)
-                    };
-
-                    slice_frame.zip_mut_with(&rgb_frame, |a, b| {
-                        *a = *b;
-                    });
-                }
                 reducer.incr_idx_counter(1);
+                let rgb_frame = self.process_frame(&decoded, color_space, color_range);
+                return Ok(rgb_frame);
             }
-            reducer.incr_frame_index(1);
         }
-        Ok(())
+        Ok(None)
     }
     /// Decode frames
     pub fn skip_and_decode_frames(
