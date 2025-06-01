@@ -87,10 +87,11 @@ impl PyVideoReader {
         slf: PyRefMut<'_, Self>,
         py: Python<'a>,
     ) -> Option<Bound<'a, PyArray<u8, Dim<[usize; 3]>>>> {
-        match slf.inner.lock().unwrap().next() {
-            Some(rgb_frame) => Some(rgb_frame.into_pyarray(py)),
-            None => None,
-        }
+        slf.inner
+            .lock()
+            .unwrap()
+            .next()
+            .map(|rgb_frame| rgb_frame.into_pyarray(py))
     }
 
     /// Returns the dict with metadata information of the video. All values in the dict

@@ -193,7 +193,7 @@ impl VideoDecoder {
         color_range: YuvRange,
     ) -> Result<Option<Array3<u8>>, ffmpeg::Error> {
         let mut decoded = Video::empty();
-        while self.video.receive_frame(&mut decoded).is_ok() {
+        if self.video.receive_frame(&mut decoded).is_ok() {
             let rgb_frame = self.process_frame(&decoded, color_space, color_range);
             return Ok(rgb_frame);
         }
@@ -206,12 +206,7 @@ impl VideoDecoder {
         color_space: YuvStandardMatrix,
         color_range: YuvRange,
     ) -> Option<Array3<u8>> {
-        self.graph
-            .get("in")
-            .unwrap()
-            .source()
-            .add(&decoded)
-            .unwrap();
+        self.graph.get("in").unwrap().source().add(decoded).unwrap();
 
         let mut yuv_frame = Video::empty();
         if self

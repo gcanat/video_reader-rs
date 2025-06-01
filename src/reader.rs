@@ -772,10 +772,7 @@ impl Iterator for VideoReader {
     type Item = Array3<u8>;
     fn next(&mut self) -> Option<Self::Item> {
         let (color_space, color_range) = self.get_color_info();
-        match self.decode_next(color_space, color_range) {
-            Ok(rgb_frame) => Some(rgb_frame),
-            Err(_) => None,
-        }
+        self.decode_next(color_space, color_range).ok()
     }
 }
 
