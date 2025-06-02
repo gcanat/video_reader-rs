@@ -280,6 +280,7 @@ impl VideoReader {
                         slice_frame.zip_mut_with(&rgb_frame, |a, b| {
                             *a = *b;
                         });
+                        reducer.incr_idx_counter(1);
                     }
                     None => debug!("No frame received!"),
                 }
@@ -299,6 +300,7 @@ impl VideoReader {
                     slice_frame.zip_mut_with(&rgb_frame, |a, b| {
                         *a = *b;
                     });
+                    reducer.incr_idx_counter(1);
                 }
                 None => debug!("No frame received!"),
             }

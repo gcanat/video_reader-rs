@@ -243,7 +243,6 @@ impl VideoDecoder {
             reducer.incr_frame_index(1);
             if match_index.is_some() {
                 reducer.remove_idx(match_index.unwrap());
-                reducer.incr_idx_counter(1);
                 let rgb_frame = self.process_frame(&decoded);
                 return Ok(rgb_frame);
             }
