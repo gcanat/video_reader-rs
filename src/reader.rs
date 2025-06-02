@@ -239,11 +239,6 @@ impl VideoReader {
         (color_space, color_range)
     }
 
-    // pub fn decode_iter(&mut self) -> impl Iterator<Item = Result<Array3<u8>, ffmpeg::Error>> + '_ {
-    //     let (color_space, color_range) = self.get_color_info();
-    //     std::iter::from_fn(move || Some(self.decode_next(color_space, color_range)))
-    // }
-
     pub fn decode_next(
         &mut self,
         color_space: YuvStandardMatrix,
@@ -270,6 +265,7 @@ impl VideoReader {
                         None => {
                             self.draining = false;
                             self.decoder.video.flush();
+                            self.seek_to_start()?;
                             break Err(ffmpeg::Error::Eof);
                         }
                     }
