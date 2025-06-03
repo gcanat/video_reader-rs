@@ -9,9 +9,7 @@ use log::debug;
 use std::collections::HashMap;
 use std::path::Path;
 
-use crate::convert::{
-    convert_nv12_to_ndarray_rgb24, convert_yuv_to_ndarray_rgb24, get_colorrange, get_colorspace,
-};
+use crate::convert::{convert_nv12_to_ndarray_rgb24, convert_yuv_to_ndarray_rgb24};
 use crate::decoder::{DecoderConfig, VideoDecoder, VideoReducer};
 use crate::filter::{create_filter_spec, create_filters, FilterConfig};
 use crate::hwaccel::{HardwareAccelerationContext, HardwareAccelerationDeviceType};
@@ -20,7 +18,6 @@ use crate::info::{
 };
 use ndarray::{s, Array, Array3, Array4, ArrayViewMut3};
 use tokio::task;
-use yuv::{YuvRange, YuvStandardMatrix};
 
 pub type FrameArray = Array3<u8>;
 pub type VideoArray = Array4<u8>;
@@ -81,6 +78,7 @@ pub struct VideoReader {
     curr_dec_idx: usize,
     n_fails: usize,
     decoder: VideoDecoder,
+    draining: bool,
 }
 
 unsafe impl Send for VideoReader {}
@@ -114,6 +112,7 @@ impl VideoReader {
             curr_dec_idx: 0,
             n_fails: 0,
             decoder,
+            draining: false,
         })
     }
 
@@ -188,12 +187,12 @@ impl VideoReader {
         Ok(scaler)
     }
 
-    pub fn decode_video(
+    pub fn decoder_start(
         &mut self,
         start_frame: Option<usize>,
         end_frame: Option<usize>,
         compression_factor: Option<f64>,
-    ) -> Result<VideoArray, ffmpeg::Error> {
+    ) -> Result<(VideoReducer, usize), ffmpeg::Error> {
         let (reducer, start_frame, _end_frame) = VideoReducer::build(
             start_frame,
             end_frame,
@@ -221,41 +220,102 @@ impl VideoReader {
             self.curr_frame = key_pos;
         }
 
-        let cspace_string = self.decoder.video_info.get("color_space").unwrap();
-        let crange_string = self.decoder.video_info.get("color_range").unwrap();
-        let color_space = get_colorspace(self.decoder.height as i32, cspace_string);
-        let color_range = get_colorrange(crange_string);
-
         let mut reducer = reducer.unwrap();
         reducer.set_frame_index(self.curr_frame);
+        let max_idx = reducer.get_indices().iter().max().unwrap_or(&0).to_owned();
+        Ok((reducer, max_idx))
+    }
+
+    pub fn decode_next(&mut self) -> Result<FrameArray, ffmpeg::Error> {
+        loop {
+            match self.ictx.packets().next() {
+                Some((stream, packet)) => {
+                    if stream.index() == self.stream_index {
+                        self.decoder.video.send_packet(&packet)?;
+                        match self.decoder.decode_frames()? {
+                            Some(rgb_frame) => break Ok(rgb_frame),
+                            None => continue,
+                        };
+                    }
+                }
+                None => {
+                    if !self.draining {
+                        self.decoder.video.send_eof()?;
+                        self.draining = true;
+                    }
+                    match self.decoder.decode_frames()? {
+                        Some(rgb_frame) => break Ok(rgb_frame),
+                        None => {
+                            self.draining = false;
+                            self.decoder.video.flush();
+                            self.seek_to_start()?;
+                            break Err(ffmpeg::Error::Eof);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn decode_video(
+        &mut self,
+        start_frame: Option<usize>,
+        end_frame: Option<usize>,
+        compression_factor: Option<f64>,
+    ) -> Result<VideoArray, ffmpeg::Error> {
+        let (mut reducer, max_idx) =
+            self.decoder_start(start_frame, end_frame, compression_factor)?;
         for (stream, packet) in self.ictx.packets() {
-            if &reducer.get_frame_index() > reducer.get_indices().iter().max().unwrap_or(&0) {
+            if reducer.get_frame_index() > max_idx {
                 break;
             }
             if stream.index() == self.stream_index {
                 self.decoder.video.send_packet(&packet)?;
-                self.decoder.receive_and_process_decoded_frames(
-                    &mut reducer,
-                    color_space,
-                    color_range,
-                )?;
+                match self
+                    .decoder
+                    .receive_and_process_decoded_frames(&mut reducer)?
+                {
+                    Some(rgb_frame) => {
+                        let mut slice_frame = reducer.slice_mut(reducer.get_idx_counter());
+                        slice_frame.zip_mut_with(&rgb_frame, |a, b| {
+                            *a = *b;
+                        });
+                        reducer.incr_idx_counter(1);
+                    }
+                    None => debug!("No frame received!"),
+                }
             } else {
                 debug!("Packet for another stream");
             }
         }
         self.decoder.video.send_eof()?;
         // only process the remaining frames if we haven't reached the last frame
-        if !reducer.no_indices()
-            && (&reducer.get_frame_index() <= reducer.get_indices().iter().max().unwrap_or(&0))
-        {
-            self.decoder.receive_and_process_decoded_frames(
-                &mut reducer,
-                color_space,
-                color_range,
-            )?;
+        while !reducer.no_indices() && (reducer.get_frame_index() <= max_idx) {
+            match self
+                .decoder
+                .receive_and_process_decoded_frames(&mut reducer)?
+            {
+                Some(rgb_frame) => {
+                    let mut slice_frame = reducer.slice_mut(reducer.get_idx_counter());
+                    slice_frame.zip_mut_with(&rgb_frame, |a, b| {
+                        *a = *b;
+                    });
+                    reducer.incr_idx_counter(1);
+                }
+                None => {
+                    debug!("No frame received!");
+                    break;
+                }
+            }
         }
+
+        // reset decoder
+        self.decoder.video.flush();
+        self.seek_to_start()?;
+
         Ok(reducer.get_full_video())
     }
+
     pub async fn decode_video_fast(
         &mut self,
         start_frame: Option<usize>,
@@ -290,19 +350,12 @@ impl VideoReader {
             self.seek_frame(&key_pos, &frame_duration)?;
         }
 
-        let cspace_string = self.decoder.video_info.get("color_space").unwrap();
-        let crange_string = self.decoder.video_info.get("color_range").unwrap();
-        let color_space = get_colorspace(self.decoder.height as i32, cspace_string);
-        let color_range = get_colorrange(crange_string);
-
         let mut reducer = reducer.unwrap();
         reducer.set_frame_index(self.curr_frame);
         let mut tasks = vec![];
 
         let mut receive_and_process_decoded_frames = |decoder: &mut ffmpeg::decoder::Video,
-                                                      mut curr_frame: usize,
-                                                      color_space: YuvStandardMatrix,
-                                                      color_range: YuvRange|
+                                                      mut curr_frame: usize|
          -> Result<usize, ffmpeg::Error> {
             let mut decoded = Video::empty();
             while decoder.receive_frame(&mut decoded).is_ok() {
@@ -324,13 +377,15 @@ impl VideoReader {
                         .frame(&mut rgb_frame)
                         .is_ok()
                     {
+                        let cspace = self.decoder.color_space;
+                        let crange = self.decoder.color_range;
                         if self.decoder.is_hwaccel {
                             tasks.push(task::spawn(async move {
-                                convert_nv12_to_ndarray_rgb24(rgb_frame, color_space, color_range)
+                                convert_nv12_to_ndarray_rgb24(rgb_frame, cspace, crange)
                             }));
                         } else {
                             tasks.push(task::spawn(async move {
-                                convert_yuv_to_ndarray_rgb24(rgb_frame, color_space, color_range)
+                                convert_yuv_to_ndarray_rgb24(rgb_frame, cspace, crange)
                             }));
                         }
                     }
@@ -346,12 +401,8 @@ impl VideoReader {
             }
             if stream.index() == self.stream_index {
                 self.decoder.video.send_packet(&packet)?;
-                let upd_curr_frame = receive_and_process_decoded_frames(
-                    &mut self.decoder.video,
-                    self.curr_frame,
-                    color_space,
-                    color_range,
-                )?;
+                let upd_curr_frame =
+                    receive_and_process_decoded_frames(&mut self.decoder.video, self.curr_frame)?;
                 self.curr_frame = upd_curr_frame;
             } else {
                 debug!("Packet for another stream");
@@ -362,12 +413,8 @@ impl VideoReader {
         if !reducer.no_indices()
             && (&self.curr_frame <= reducer.get_indices().iter().max().unwrap_or(&0))
         {
-            let upd_curr_frame = receive_and_process_decoded_frames(
-                &mut self.decoder.video,
-                self.curr_frame,
-                color_space,
-                color_range,
-            )?;
+            let upd_curr_frame =
+                receive_and_process_decoded_frames(&mut self.decoder.video, self.curr_frame)?;
             self.curr_frame = upd_curr_frame;
         }
 
@@ -375,6 +422,11 @@ impl VideoReader {
         for task_ in tasks {
             outputs.push(task_.await.unwrap());
         }
+
+        // flush and go back to start
+        self.decoder.video.flush();
+        self.seek_to_start()?;
+
         Ok(outputs)
     }
     /// Safely get the batch of frames from the video by iterating over all frames and decoding
@@ -469,11 +521,6 @@ impl VideoReader {
         let fps = self.decoder.fps;
         // duration of a frame in micro seconds
         let frame_duration = (1. / fps * 1_000.0).round() as usize;
-        // get the color space matrix
-        let cspace_string = self.decoder.video_info.get("color_space").unwrap();
-        let crange_string = self.decoder.video_info.get("color_range").unwrap();
-        let color_space = get_colorspace(self.decoder.height as i32, cspace_string);
-        let color_range = get_colorrange(crange_string);
 
         // make sure we are at the begining of the stream
         self.seek_to_start()?;
@@ -485,8 +532,6 @@ impl VideoReader {
                 frame_index,
                 &frame_duration,
                 &mut video_frames.slice_mut(s![idx_counter, .., .., ..]),
-                color_space,
-                color_range,
             )?;
         }
         Ok(video_frames)
@@ -497,8 +542,6 @@ impl VideoReader {
         frame_index: usize,
         frame_duration: &usize,
         frame_array: &mut ArrayViewMut3<u8>,
-        color_space: YuvStandardMatrix,
-        color_range: YuvRange,
     ) -> Result<(), ffmpeg::Error> {
         let key_pos = self.locate_keyframes(&frame_index, self.stream_info.key_frames());
         debug!("    - Key pos: {}", key_pos);
@@ -508,13 +551,7 @@ impl VideoReader {
             // we can directly skip until frame_index
             debug!("No need to seek, we can directly skip frames");
             let num_skip = self.get_num_skip(&frame_index);
-            self.skip_frames(
-                num_skip,
-                &frame_index,
-                frame_array,
-                color_space,
-                color_range,
-            )?;
+            self.skip_frames(num_skip, &frame_index, frame_array)?;
         } else {
             if key_pos < curr_key_pos {
                 debug!("Seeking back to start");
@@ -523,13 +560,7 @@ impl VideoReader {
             debug!("Seeking to key_pos: {}", key_pos);
             self.seek_frame(&key_pos, frame_duration)?;
             let num_skip = self.get_num_skip(&frame_index);
-            self.skip_frames(
-                num_skip,
-                &frame_index,
-                frame_array,
-                color_space,
-                color_range,
-            )?;
+            self.skip_frames(num_skip, &frame_index, frame_array)?;
         }
         Ok(())
     }
@@ -565,8 +596,6 @@ impl VideoReader {
         num: usize,
         frame_index: &usize,
         frame_array: &mut ArrayViewMut3<u8>,
-        color_space: YuvStandardMatrix,
-        color_range: YuvRange,
     ) -> Result<(), ffmpeg::Error> {
         let num_skip = num.min(self.stream_info.frame_count() - 1);
         debug!(
@@ -603,18 +632,12 @@ impl VideoReader {
                                     .frame(&mut yuv_frame)
                                     .is_ok()
                                 {
-                                    let rgb_frame: Array3<u8> = if self.decoder.is_hwaccel {
-                                        convert_nv12_to_ndarray_rgb24(
-                                            yuv_frame,
-                                            color_space,
-                                            color_range,
-                                        )
+                                    let cspace = self.decoder.color_space;
+                                    let crange = self.decoder.color_range;
+                                    let rgb_frame: FrameArray = if self.decoder.is_hwaccel {
+                                        convert_nv12_to_ndarray_rgb24(yuv_frame, cspace, crange)
                                     } else {
-                                        convert_yuv_to_ndarray_rgb24(
-                                            yuv_frame,
-                                            color_space,
-                                            color_range,
-                                        )
+                                        convert_yuv_to_ndarray_rgb24(yuv_frame, cspace, crange)
                                     };
                                     frame_array.zip_mut_with(&rgb_frame, |a, b| {
                                         *a = *b;
@@ -695,10 +718,16 @@ impl VideoReader {
     }
 }
 
+impl Iterator for VideoReader {
+    type Item = FrameArray;
+    fn next(&mut self) -> Option<Self::Item> {
+        self.decode_next().ok()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    // use ffmpeg::codec::context::Context;
     use ffmpeg::format::input;
     use ffmpeg::media::Type;
     use std::path::Path;

@@ -1,6 +1,7 @@
 use crate::convert::{
     convert_frame_to_ndarray_rgb24, convert_nv12_to_ndarray_rgb24, convert_yuv_to_ndarray_rgb24,
 };
+use crate::convert::{get_colorrange, get_colorspace};
 use crate::ffi_hwaccel::download_frame;
 use crate::hwaccel::HardwareAccelerationDeviceType;
 use crate::reader::{FrameArray, VideoArray};
@@ -8,7 +9,7 @@ use ffmpeg::filter;
 use ffmpeg::software::scaling::context::Context;
 use ffmpeg::util::frame::video::Video;
 use ffmpeg_next as ffmpeg;
-use ndarray::{s, Array, Array3, Array4, ArrayViewMut3};
+use ndarray::{s, Array, Array4, ArrayViewMut3};
 use std::collections::HashMap;
 use yuv::{YuvRange, YuvStandardMatrix};
 
@@ -153,6 +154,8 @@ pub struct VideoDecoder {
     pub video_info: HashMap<&'static str, String>,
     pub is_hwaccel: bool,
     pub graph: filter::Graph,
+    pub color_space: YuvStandardMatrix,
+    pub color_range: YuvRange,
 }
 
 unsafe impl Send for VideoDecoder {}
@@ -167,6 +170,10 @@ impl VideoDecoder {
         is_hwaccel: bool,
         graph: filter::Graph,
     ) -> Self {
+        let cspace_string = video_info.get("color_space").unwrap();
+        let crange_string = video_info.get("color_range").unwrap();
+        let color_space = get_colorspace(height as i32, cspace_string);
+        let color_range = get_colorrange(crange_string);
         VideoDecoder {
             video,
             height,
@@ -175,6 +182,8 @@ impl VideoDecoder {
             video_info,
             is_hwaccel,
             graph,
+            color_space,
+            color_range,
         }
     }
     pub fn video_info(&self) -> &HashMap<&'static str, String> {
@@ -187,54 +196,58 @@ impl VideoDecoder {
         &self.video
     }
 
+    pub fn decode_frames(&mut self) -> Result<Option<FrameArray>, ffmpeg::Error> {
+        let mut decoded = Video::empty();
+        if self.video.receive_frame(&mut decoded).is_ok() {
+            let rgb_frame = self.process_frame(&decoded);
+            return Ok(rgb_frame);
+        }
+        Ok(None)
+    }
+
+    pub fn process_frame(&mut self, decoded: &Video) -> Option<FrameArray> {
+        self.graph.get("in").unwrap().source().add(decoded).unwrap();
+        let cspace = self.color_space;
+        let crange = self.color_range;
+
+        let mut yuv_frame = Video::empty();
+        if self
+            .graph
+            .get("out")
+            .unwrap()
+            .sink()
+            .frame(&mut yuv_frame)
+            .is_ok()
+        {
+            let rgb_frame: FrameArray = if self.is_hwaccel {
+                convert_nv12_to_ndarray_rgb24(yuv_frame, cspace, crange)
+            } else {
+                convert_yuv_to_ndarray_rgb24(yuv_frame, cspace, crange)
+            };
+            return Some(rgb_frame);
+        }
+        None
+    }
+
     /// Decode all frames that match the frame indices
     pub fn receive_and_process_decoded_frames(
         &mut self,
         reducer: &mut VideoReducer,
-        color_space: YuvStandardMatrix,
-        color_range: YuvRange,
-    ) -> Result<(), ffmpeg::Error> {
+    ) -> Result<Option<FrameArray>, ffmpeg::Error> {
         let mut decoded = Video::empty();
         while self.video.receive_frame(&mut decoded).is_ok() {
             let match_index = reducer
                 .get_indices()
                 .iter()
                 .position(|x| x == &reducer.get_frame_index());
+            reducer.incr_frame_index(1);
             if match_index.is_some() {
                 reducer.remove_idx(match_index.unwrap());
-                self.graph
-                    .get("in")
-                    .unwrap()
-                    .source()
-                    .add(&decoded)
-                    .unwrap();
-
-                let mut yuv_frame = Video::empty();
-                if self
-                    .graph
-                    .get("out")
-                    .unwrap()
-                    .sink()
-                    .frame(&mut yuv_frame)
-                    .is_ok()
-                {
-                    let mut slice_frame = reducer.slice_mut(reducer.get_idx_counter());
-
-                    let rgb_frame: Array3<u8> = if self.is_hwaccel {
-                        convert_nv12_to_ndarray_rgb24(yuv_frame, color_space, color_range)
-                    } else {
-                        convert_yuv_to_ndarray_rgb24(yuv_frame, color_space, color_range)
-                    };
-
-                    slice_frame.zip_mut_with(&rgb_frame, |a, b| {
-                        *a = *b;
-                    });
-                }
-                reducer.incr_idx_counter(1);
+                let rgb_frame = self.process_frame(&decoded);
+                return Ok(rgb_frame);
             }
-            reducer.incr_frame_index(1);
         }
-        Ok(())
+        Ok(None)
     }
     /// Decode frames
     pub fn skip_and_decode_frames(

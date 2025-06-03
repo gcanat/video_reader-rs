@@ -16,7 +16,7 @@ use pyo3::{
     exceptions::PyRuntimeError,
     pyclass, pymethods, pymodule,
     types::{IntoPyDict, PyDict, PyFloat, PyList, PyModule, PyModuleMethods},
-    Bound, PyResult, Python,
+    Bound, PyRef, PyRefMut, PyResult, Python,
 };
 use reader::VideoReader;
 use std::sync::Mutex;
@@ -78,6 +78,20 @@ impl PyVideoReader {
             }),
             Err(e) => Err(PyRuntimeError::new_err(format!("Error: {}", e))),
         }
+    }
+
+    fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+    fn __next__<'a>(
+        slf: PyRefMut<'_, Self>,
+        py: Python<'a>,
+    ) -> Option<Bound<'a, PyArray<u8, Dim<[usize; 3]>>>> {
+        slf.inner
+            .lock()
+            .unwrap()
+            .next()
+            .map(|rgb_frame| rgb_frame.into_pyarray(py))
     }
 
     /// Returns the dict with metadata information of the video. All values in the dict

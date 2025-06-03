@@ -66,6 +66,10 @@ vr = PyVideoReader(filename, device='cuda')
 frames = vr.decode()
 # or decode a subset of frames
 frames = vr.decode(start_frame=100, end_frame=300, compression_factor=0.5)
+# alternatively one can iterate over frames
+for frame in vr:
+    # do something with a single frame
+    print("top left red pixel value:", frame[0, 0, 0])
 ```
 * **filename**: path to the video file to decode
 * **resize**: optional resizing for the video.
