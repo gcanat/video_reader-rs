@@ -290,7 +290,7 @@ impl VideoReader {
         }
         self.decoder.video.send_eof()?;
         // only process the remaining frames if we haven't reached the last frame
-        if !reducer.no_indices() && (reducer.get_frame_index() <= max_idx) {
+        while !reducer.no_indices() && (reducer.get_frame_index() <= max_idx) {
             match self
                 .decoder
                 .receive_and_process_decoded_frames(&mut reducer)?
@@ -302,7 +302,10 @@ impl VideoReader {
                     });
                     reducer.incr_idx_counter(1);
                 }
-                None => debug!("No frame received!"),
+                None => {
+                    debug!("No frame received!");
+                    break;
+                }
             }
         }
 
