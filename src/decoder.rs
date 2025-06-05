@@ -1,12 +1,8 @@
-use crate::convert::{
-    convert_frame_to_ndarray_rgb24, convert_nv12_to_ndarray_rgb24, convert_yuv_to_ndarray_rgb24,
-};
+use crate::convert::{convert_nv12_to_ndarray_rgb24, convert_yuv_to_ndarray_rgb24};
 use crate::convert::{get_colorrange, get_colorspace};
-use crate::ffi_hwaccel::download_frame;
 use crate::hwaccel::HardwareAccelerationDeviceType;
-use crate::reader::{FrameArray, VideoArray};
+use crate::utils::{FrameArray, VideoArray};
 use ffmpeg::filter;
-use ffmpeg::software::scaling::context::Context;
 use ffmpeg::util::frame::video::Video;
 use ffmpeg_next as ffmpeg;
 use ndarray::{s, Array, Array4, ArrayViewMut3};
@@ -252,7 +248,6 @@ impl VideoDecoder {
     /// Decode frames
     pub fn skip_and_decode_frames(
         &mut self,
-        scaler: &mut Context,
         reducer: &mut VideoReducer,
         indices: &[usize],
         frame_map: &mut HashMap<usize, FrameArray>,
@@ -260,15 +255,9 @@ impl VideoDecoder {
         let mut decoded = Video::empty();
         while self.video.receive_frame(&mut decoded).is_ok() {
             if indices.iter().any(|x| x == &reducer.get_frame_index()) {
-                if self.is_hwaccel {
-                    decoded = download_frame(&decoded)?;
+                if let Some(rgb_frame) = self.process_frame(&decoded) {
+                    frame_map.insert(reducer.get_frame_index(), rgb_frame);
                 }
-                let mut rgb_frame = Video::empty();
-                let mut nd_frame =
-                    FrameArray::zeros((self.height as usize, self.width as usize, 3_usize));
-                scaler.run(&decoded, &mut rgb_frame)?;
-                convert_frame_to_ndarray_rgb24(&mut rgb_frame, &mut nd_frame.view_mut())?;
-                frame_map.insert(reducer.get_frame_index(), nd_frame);
             }
             reducer.incr_frame_index(1);
         }

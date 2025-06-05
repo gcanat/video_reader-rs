@@ -2,46 +2,11 @@ use ffmpeg::ffi::{av_image_copy_to_buffer, AVPixelFormat};
 use ffmpeg::util::frame::video::Video;
 use ffmpeg_next as ffmpeg;
 use ndarray::parallel::prelude::*;
-use ndarray::{stack, Array2, Array3, Array4, ArrayView3, ArrayViewMut3, Axis};
+use ndarray::{stack, Array2, Array3, Array4, ArrayView3, Axis};
 use yuv::{
     yuv420_to_rgb, yuv_nv12_to_rgb, YuvBiPlanarImage, YuvConversionMode, YuvPlanarImage, YuvRange,
     YuvStandardMatrix,
 };
-
-/// Converts an RGB24 video `AVFrame` produced by ffmpeg to an `ndarray`.
-/// Copied from https://github.com/oddity-ai/video-rs
-/// * `frame` - Video frame to convert.
-/// * `frame_array` mutable reference to the ndarray where the data will be copied
-pub fn convert_frame_to_ndarray_rgb24(
-    frame: &mut Video,
-    frame_array: &mut ArrayViewMut3<u8>,
-) -> Result<(), ffmpeg::Error> {
-    unsafe {
-        let frame_ptr = frame.as_mut_ptr();
-        let frame_width: i32 = (*frame_ptr).width;
-        let frame_height: i32 = (*frame_ptr).height;
-        let frame_format =
-            std::mem::transmute::<std::ffi::c_int, AVPixelFormat>((*frame_ptr).format);
-        assert_eq!(frame_format, AVPixelFormat::AV_PIX_FMT_RGB24);
-
-        let bytes_copied = av_image_copy_to_buffer(
-            frame_array.as_mut_ptr(),
-            frame_array.len() as i32,
-            (*frame_ptr).data.as_ptr() as *const *const u8,
-            (*frame_ptr).linesize.as_ptr(),
-            frame_format,
-            frame_width,
-            frame_height,
-            1,
-        );
-
-        if bytes_copied == frame_array.len() as i32 {
-            Ok(())
-        } else {
-            Err(ffmpeg::Error::InvalidData)
-        }
-    }
-}
 
 /// Converts a YUV420P video `AVFrame` produced by ffmpeg to an `ndarray`.
 /// * `frame` - Video frame to convert.
