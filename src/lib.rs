@@ -9,6 +9,7 @@ use hwaccel::HardwareAccelerationDeviceType;
 use numpy::{IntoPyArray, PyArray};
 mod decoder;
 mod reader;
+mod utils;
 use convert::rgb2gray;
 use decoder::DecoderConfig;
 use log::debug;

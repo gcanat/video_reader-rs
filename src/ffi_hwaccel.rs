@@ -2,9 +2,7 @@
 extern crate ffmpeg_next as ffmpeg;
 
 use crate::hwaccel::HardwareAccelerationDeviceType;
-use crate::reader::HWACCEL_PIXEL_FORMAT;
 use ffmpeg::ffi::*;
-use ffmpeg::util::frame::video::Video;
 
 pub struct HardwareDeviceContext {
     ptr: *mut ffmpeg::ffi::AVBufferRef,
@@ -53,22 +51,6 @@ pub fn hwdevice_list_available_device_types() -> Vec<HardwareAccelerationDeviceT
         hwdevice_type = unsafe { ffmpeg::ffi::av_hwdevice_iterate_types(hwdevice_type) };
     }
     hwdevice_types
-}
-
-pub fn hwdevice_transfer_frame(
-    target_frame: &mut ffmpeg::frame::Frame,
-    hwdevice_frame: &ffmpeg::frame::Frame,
-) -> Result<(), ffmpeg::error::Error> {
-    unsafe {
-        match ffmpeg::ffi::av_hwframe_transfer_data(
-            target_frame.as_mut_ptr(),
-            hwdevice_frame.as_ptr(),
-            0,
-        ) {
-            0 => Ok(()),
-            e => Err(ffmpeg::error::Error::from(e)),
-        }
-    }
 }
 
 pub fn codec_find_corresponding_hwaccel_pixfmt(
@@ -150,14 +132,4 @@ unsafe extern "C" fn hwaccel_get_format(
         p = p.add(1);
     }
     ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_NONE
-}
-
-pub fn download_frame(frame: &Video) -> Result<Video, ffmpeg::Error> {
-    let mut frame_downloaded = Video::empty();
-    frame_downloaded.set_format(HWACCEL_PIXEL_FORMAT);
-    hwdevice_transfer_frame(&mut frame_downloaded, frame)?;
-    unsafe {
-        av_frame_copy_props(frame_downloaded.as_mut_ptr(), frame.as_ptr());
-    }
-    Ok(frame_downloaded)
 }

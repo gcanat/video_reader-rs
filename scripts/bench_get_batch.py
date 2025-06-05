@@ -18,7 +18,7 @@ def parse_args():
 
 def bench_get_batch(filename: str, indices: np.ndarray):
     start = time()
-    vr = PyVideoReader(filename, threads=1)
+    vr = PyVideoReader(filename, threads=0)
     vid = vr.get_batch(indices, with_fallback=True)
     duration = time() - start
     return vid, duration
@@ -34,11 +34,11 @@ def bench_get_batch_dec(filename: str, indices: np.ndarray):
 
 def test_single_file(filename: str, batch_size: int = 32, num_batches: int = 5):
     vr = VideoReader(filename, num_threads=1)
+    vr_rs = PyVideoReader(filename)
     num_frames = len(vr)
     batch_sizes = [batch_size] * num_batches
     batch_indices = [np.random.randint(0, num_frames, x) for x in batch_sizes]
-    ground_truth = vr[:].asnumpy()
-    # ground_truth = video_reader.decode(filename)
+    ground_truth = np.array([frame for frame in vr_rs])
 
     dec_durations = []
     vidrs_durations = []
