@@ -93,6 +93,14 @@ frames = vr.get_batch(indices)
 * **indices**: list of indices of the frames to get
 * **with_fallback**: False by default, if True will fallback to iterating over all packets of the video and only decoding the frames that match in `indices`. It is safer to use when the video contains B-frames and you really need to get the frames exactly corresponding to the given indices. It can also be faster in some use cases if you have many cpu cores available.
 
+It is also possible to directly use slicing or indexing:
+```python
+last_frame = vr[-1]
+n = vr.get_shape()[0]
+odd_frames = vr[1:n:2]
+sub_clip = vr[128:337]
+```
+
 We can also get the shape of the raw video
 ```python
 (n, h, w) = vr.get_shape()
