@@ -139,7 +139,7 @@ impl PyVideoReader {
     }
 
     /// Returns the number of frames in the video
-    fn __len__<'a>(&'a self) -> PyResult<usize> {
+    fn __len__(&self) -> PyResult<usize> {
         match self.inner.lock() {
             Ok(vr) => {
                 let num_frames = vr.stream_info().frame_count().to_owned();
