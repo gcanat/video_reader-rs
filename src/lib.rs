@@ -1,4 +1,4 @@
-use numpy::ndarray::Dim;
+use numpy::ndarray::{Dim, IxDyn};
 mod convert;
 mod ffi_hwaccel;
 use std::str::FromStr;
@@ -13,11 +13,14 @@ mod utils;
 use convert::rgb2gray;
 use decoder::DecoderConfig;
 use log::debug;
+use ndarray::Array;
 use pyo3::{
     exceptions::PyRuntimeError,
     pyclass, pymethods, pymodule,
-    types::{IntoPyDict, PyDict, PyFloat, PyList, PyModule, PyModuleMethods},
-    Bound, PyRef, PyRefMut, PyResult, Python,
+    types::{
+        IntoPyDict, PyAnyMethods, PyDict, PyFloat, PyList, PyModule, PyModuleMethods, PySlice,
+    },
+    Bound, FromPyObject, PyRef, PyRefMut, PyResult, Python,
 };
 use reader::VideoReader;
 use std::sync::Mutex;
@@ -33,6 +36,13 @@ static RUNTIME: Lazy<Runtime> = Lazy::new(|| {
 });
 
 type Frame = PyArray<u8, Dim<[usize; 3]>>;
+type FrameOrVid = PyArray<u8, IxDyn>;
+
+#[derive(FromPyObject)]
+enum IntOrSlice<'py> {
+    Int(i32),
+    Slice(Bound<'py, PySlice>),
+}
 
 #[pyclass]
 struct PyVideoReader {
@@ -93,6 +103,50 @@ impl PyVideoReader {
             .unwrap()
             .next()
             .map(|rgb_frame| rgb_frame.into_pyarray(py))
+    }
+
+    fn __getitem__<'a>(&self, py: Python<'a>, key: IntOrSlice) -> PyResult<Bound<'a, FrameOrVid>> {
+        match key {
+            IntOrSlice::Int(index) => {
+                let mut vr = self.inner.lock().unwrap();
+                let n_frames = vr.stream_info().frame_count();
+                let pos_index = if index < 0 {
+                    (*n_frames as i32 + index) as usize
+                } else {
+                    index as usize
+                };
+                let indices: Vec<usize> = vec![pos_index];
+                let res_array = vr.get_batch(indices).unwrap().into_dyn();
+                Ok(res_array.squeeze().into_pyarray(py))
+            }
+            IntOrSlice::Slice(slice) => {
+                let mut vr = self.inner.lock().unwrap();
+                let n_frames = vr.stream_info().frame_count();
+                let start: i32 = slice.getattr("start")?.extract().unwrap_or(0_i32);
+                let stop: i32 = slice.getattr("stop")?.extract().unwrap_or(*n_frames as i32);
+                let step: i32 = slice.getattr("step")?.extract().unwrap_or(1_i32);
+                if ((step < 0) && (stop - start > 0)) || ((step > 0) && (stop - start < 0)) {
+                    return Err(PyRuntimeError::new_err(
+                        "Incompatible values in slice. step and (stop - start) must have the same sign.",
+                    ));
+                }
+                let indices = Array::range(start as f32, stop as f32, step as f32);
+                let indices = indices.mapv(|x| x as usize);
+                let res_array = vr.get_batch(indices.to_vec()).unwrap().into_dyn();
+                Ok(res_array.into_pyarray(py))
+            }
+        }
+    }
+
+    /// Returns the number of frames in the video
+    fn __len__(&self) -> PyResult<usize> {
+        match self.inner.lock() {
+            Ok(vr) => {
+                let num_frames = vr.stream_info().frame_count().to_owned();
+                Ok(num_frames)
+            }
+            Err(e) => Err(PyRuntimeError::new_err(format!("Lock error: {}", e))),
+        }
     }
 
     /// Returns the dict with metadata information of the video. All values in the dict
