@@ -97,13 +97,16 @@ It is also possible to directly use slicing or indexing:
 ```python
 last_frame = vr[-1]
 n = vr.get_shape()[0]
-odd_frames = vr[1:n:2]
+odd_frames = vr[1::2]
 sub_clip = vr[128:337]
 ```
 
 We can also get the shape of the raw video
 ```python
+# (number of frames, height, width)
 (n, h, w) = vr.get_shape()
+# if we only want the number of frames
+n = len(vr)
 ```
 
 Or get a dict with information about the video, returned as Dict[str, str]

@@ -120,8 +120,10 @@ impl PyVideoReader {
                 Ok(res_array.squeeze().into_pyarray(py))
             }
             IntOrSlice::Slice(slice) => {
-                let start: i32 = slice.getattr("start")?.extract()?;
-                let stop: i32 = slice.getattr("stop")?.extract()?;
+                let mut vr = self.inner.lock().unwrap();
+                let n_frames = vr.stream_info().frame_count();
+                let start: i32 = slice.getattr("start")?.extract().unwrap_or(0_i32);
+                let stop: i32 = slice.getattr("stop")?.extract().unwrap_or(*n_frames as i32);
                 let step: i32 = slice.getattr("step")?.extract().unwrap_or(1_i32);
                 if ((step < 0) && (stop - start > 0)) || ((step > 0) && (stop - start < 0)) {
                     return Err(PyRuntimeError::new_err(
@@ -130,10 +132,20 @@ impl PyVideoReader {
                 }
                 let indices = Array::range(start as f32, stop as f32, step as f32);
                 let indices = indices.mapv(|x| x as usize);
-                let mut vr = self.inner.lock().unwrap();
                 let res_array = vr.get_batch(indices.to_vec()).unwrap().into_dyn();
                 Ok(res_array.into_pyarray(py))
             }
+        }
+    }
+
+    /// Returns the number of frames in the video
+    fn __len__<'a>(&'a self) -> PyResult<usize> {
+        match self.inner.lock() {
+            Ok(vr) => {
+                let num_frames = vr.stream_info().frame_count().to_owned();
+                Ok(num_frames)
+            }
+            Err(e) => Err(PyRuntimeError::new_err(format!("Lock error: {}", e))),
         }
     }
 
