@@ -96,7 +96,6 @@ frames = vr.get_batch(indices)
 It is also possible to directly use slicing or indexing:
 ```python
 last_frame = vr[-1]
-n = vr.get_shape()[0]
 odd_frames = vr[1::2]
 sub_clip = vr[128:337]
 ```
