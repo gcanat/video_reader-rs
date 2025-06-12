@@ -15,17 +15,11 @@ pub struct FrameTime {
     pts: i64,
     dur: i64,
     dts: i64,
-    didx: usize,
 }
 
 impl FrameTime {
-    pub fn new(pts: i64, dur: i64, dts: i64, didx: usize) -> Self {
-        FrameTime {
-            pts,
-            dur,
-            dts,
-            didx,
-        }
+    pub fn new(pts: i64, dur: i64, dts: i64) -> Self {
+        FrameTime { pts, dur, dts }
     }
     pub fn pts(&self) -> &i64 {
         &self.pts
@@ -140,7 +134,7 @@ pub fn get_frame_count(
             let pts = packet.pts().unwrap_or(0);
             let dur = packet.duration();
             let dts = packet.dts().unwrap_or(0);
-            frame_times.insert(didx, FrameTime::new(pts, dur, dts, didx));
+            frame_times.insert(didx, FrameTime::new(pts, dur, dts));
             if packet.is_key() {
                 key_frames.push(didx);
             }
