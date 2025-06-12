@@ -43,8 +43,6 @@ pub struct StreamInfo {
     frame_count: usize,
     key_frames: Vec<usize>,
     frame_times: BTreeMap<usize, FrameTime>,
-    decidx_to_ptsidx: HashMap<usize, usize>,
-    ptsidx_to_decidx: HashMap<usize, usize>,
 }
 
 impl StreamInfo {
@@ -52,15 +50,11 @@ impl StreamInfo {
         frame_count: usize,
         key_frames: Vec<usize>,
         frame_times: BTreeMap<usize, FrameTime>,
-        ptsidx_to_decidx: HashMap<usize, usize>,
-        decidx_to_ptsidx: HashMap<usize, usize>,
     ) -> Self {
         StreamInfo {
             frame_count,
             key_frames,
             frame_times,
-            ptsidx_to_decidx,
-            decidx_to_ptsidx,
         }
     }
     pub fn frame_count(&self) -> &usize {
@@ -72,11 +66,17 @@ impl StreamInfo {
     pub fn frame_times(&self) -> &BTreeMap<usize, FrameTime> {
         &self.frame_times
     }
-    pub fn get_dec_idx(&self, idx: &usize) -> Option<&usize> {
-        self.ptsidx_to_decidx.get(idx)
+    pub fn get_all_pts(&self) -> Vec<i64> {
+        self.frame_times.values().map(|v| v.pts).collect::<Vec<_>>()
     }
-    pub fn get_pts_idx(&self, idx: &usize) -> Option<&usize> {
-        self.decidx_to_ptsidx.get(idx)
+    pub fn get_pts(&self, indices: &[usize]) -> Vec<i64> {
+        indices
+            .iter()
+            .map(|i| match self.frame_times.get(i) {
+                None => -1,
+                Some(ft) => ft.pts,
+            })
+            .collect::<Vec<_>>()
     }
 }
 
@@ -149,27 +149,16 @@ pub fn get_frame_count(
     }
 
     // mapping between decoding order and presentation order
-    let mut ptsidx_to_decidx: HashMap<usize, usize> = HashMap::new();
-    let mut decidx_to_ptsidx: HashMap<usize, usize> = HashMap::new();
-    for (idx, fr_info) in frame_times.iter().enumerate() {
-        ptsidx_to_decidx.insert(idx, fr_info.1.didx);
-        decidx_to_ptsidx.insert(fr_info.1.didx, idx);
-    }
-
-    let key_frames: Vec<_> = key_frames
-        .iter()
-        .map(|x| *decidx_to_ptsidx.get(x).unwrap_or(x))
-        .collect();
+    // let mut ptsidx_to_decidx: HashMap<usize, usize> = HashMap::new();
+    // let mut decidx_to_ptsidx: HashMap<usize, usize> = HashMap::new();
+    // for (idx, fr_info) in frame_times.iter().enumerate() {
+    //     ptsidx_to_decidx.insert(idx, fr_info.1.didx);
+    //     decidx_to_ptsidx.insert(fr_info.1.didx, idx);
+    // }
 
     // Seek back to the begining of the stream
     ictx.seek(0, ..10)?;
-    Ok(StreamInfo::new(
-        didx,
-        key_frames,
-        frame_times,
-        ptsidx_to_decidx,
-        decidx_to_ptsidx,
-    ))
+    Ok(StreamInfo::new(didx, key_frames, frame_times))
 }
 
 /// Get the resized dimension of a frame, keep the aspect ratio.

@@ -42,6 +42,49 @@ type FrameOrVid = PyArray<u8, IxDyn>;
 enum IntOrSlice<'py> {
     Int(i32),
     Slice(Bound<'py, PySlice>),
+    IntList(Vec<i32>),
+}
+
+impl<'py> IntOrSlice<'py> {
+    /// Helper function to handle indices and slices
+    fn to_indices(&self, frame_count: usize) -> PyResult<Vec<usize>> {
+        match self {
+            IntOrSlice::Int(index) => {
+                let pos_index = if *index < 0 {
+                    (frame_count as i32 + index) as usize
+                } else {
+                    *index as usize
+                };
+                Ok(vec![pos_index])
+            }
+            IntOrSlice::Slice(slice) => {
+                let start: i32 = slice.getattr("start")?.extract().unwrap_or(0_i32);
+                let stop: i32 = slice
+                    .getattr("stop")?
+                    .extract()
+                    .unwrap_or(frame_count as i32);
+                let step: i32 = slice.getattr("step")?.extract().unwrap_or(1_i32);
+                if ((step < 0) && (stop - start > 0)) || ((step > 0) && (stop - start < 0)) {
+                    return Err(PyRuntimeError::new_err(
+                        "Incompatible values in slice. step and (stop - start) must have the same sign.",
+                    ));
+                }
+                let indices = Array::range(start as f32, stop as f32, step as f32);
+                let indices = indices.mapv(|x| x as usize);
+                Ok(indices.to_vec())
+            }
+            IntOrSlice::IntList(indices) => Ok(indices
+                .iter()
+                .map(|x| {
+                    if x < &0 {
+                        (frame_count as i32 + x) as usize
+                    } else {
+                        *x as usize
+                    }
+                })
+                .collect::<Vec<_>>()),
+        }
+    }
 }
 
 #[pyclass]
@@ -106,35 +149,19 @@ impl PyVideoReader {
     }
 
     fn __getitem__<'a>(&self, py: Python<'a>, key: IntOrSlice) -> PyResult<Bound<'a, FrameOrVid>> {
-        match key {
-            IntOrSlice::Int(index) => {
-                let mut vr = self.inner.lock().unwrap();
-                let n_frames = vr.stream_info().frame_count();
-                let pos_index = if index < 0 {
-                    (*n_frames as i32 + index) as usize
+        match self.inner.lock() {
+            Ok(mut vr) => {
+                let frame_count = *vr.stream_info().frame_count();
+                let index = key.to_indices(frame_count)?;
+                let res_array = vr.get_batch(index).unwrap().into_dyn();
+                // remove first dim if key was a single int
+                if matches!(key, IntOrSlice::Int { .. }) {
+                    Ok(res_array.squeeze().into_pyarray(py))
                 } else {
-                    index as usize
-                };
-                let indices: Vec<usize> = vec![pos_index];
-                let res_array = vr.get_batch(indices).unwrap().into_dyn();
-                Ok(res_array.squeeze().into_pyarray(py))
-            }
-            IntOrSlice::Slice(slice) => {
-                let mut vr = self.inner.lock().unwrap();
-                let n_frames = vr.stream_info().frame_count();
-                let start: i32 = slice.getattr("start")?.extract().unwrap_or(0_i32);
-                let stop: i32 = slice.getattr("stop")?.extract().unwrap_or(*n_frames as i32);
-                let step: i32 = slice.getattr("step")?.extract().unwrap_or(1_i32);
-                if ((step < 0) && (stop - start > 0)) || ((step > 0) && (stop - start < 0)) {
-                    return Err(PyRuntimeError::new_err(
-                        "Incompatible values in slice. step and (stop - start) must have the same sign.",
-                    ));
+                    Ok(res_array.into_pyarray(py))
                 }
-                let indices = Array::range(start as f32, stop as f32, step as f32);
-                let indices = indices.mapv(|x| x as usize);
-                let res_array = vr.get_batch(indices.to_vec()).unwrap().into_dyn();
-                Ok(res_array.into_pyarray(py))
             }
+            Err(e) => Err(PyRuntimeError::new_err(format!("Lock error: {}", e))),
         }
     }
 
@@ -145,6 +172,23 @@ impl PyVideoReader {
                 let num_frames = vr.stream_info().frame_count().to_owned();
                 Ok(num_frames)
             }
+            Err(e) => Err(PyRuntimeError::new_err(format!("Lock error: {}", e))),
+        }
+    }
+
+    #[pyo3(signature = (index=None))]
+    /// Get the PTS for a given index or an index slice. If None, will return all pts.
+    /// If some index values are out of bounds, pts will be set to -1.
+    fn get_pts(&self, index: Option<IntOrSlice>) -> PyResult<Vec<i64>> {
+        match self.inner.lock() {
+            Ok(vr) => match index {
+                None => Ok(vr.stream_info().get_all_pts()),
+                Some(int_or_slice) => {
+                    let frame_count = vr.stream_info().frame_count();
+                    let index = int_or_slice.to_indices(*frame_count)?;
+                    Ok(vr.stream_info().get_pts(&index))
+                }
+            },
             Err(e) => Err(PyRuntimeError::new_err(format!("Lock error: {}", e))),
         }
     }

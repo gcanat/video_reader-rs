@@ -191,7 +191,7 @@ impl VideoReader {
             && (first_index > 0)
         {
             let frame_duration = (1. / self.decoder.fps * 1_000.0).round() as usize;
-            let key_pos = self.locate_keyframes(&first_index, self.stream_info.key_frames());
+            let key_pos = self.locate_keyframes(&first_index);
             self.seek_frame(&key_pos, &frame_duration)?;
             self.curr_frame = key_pos;
         }
@@ -316,7 +316,7 @@ impl VideoReader {
             .any(|k| &first_index >= k)
             && (first_index > 0)
         {
-            let key_pos = self.locate_keyframes(&first_index, self.stream_info.key_frames());
+            let key_pos = self.locate_keyframes(&first_index);
             let fps = self.decoder.fps;
             // duration of a frame in micro seconds
             let frame_duration = (1. / fps * 1_000.0).round() as usize;
@@ -424,7 +424,7 @@ impl VideoReader {
 
         let mut reducer = reducer.unwrap();
         // check if closest key frames to first_index is non zero, if so we can seek
-        let key_pos = self.locate_keyframes(first_index, self.stream_info.key_frames());
+        let key_pos = self.locate_keyframes(first_index);
         if key_pos > 0 {
             let frame_duration = (1. / self.decoder.fps * 1_000.0).round() as usize;
             self.seek_frame(&key_pos, &frame_duration)?;
@@ -504,9 +504,9 @@ impl VideoReader {
         frame_duration: &usize,
         frame_array: &mut ArrayViewMut3<u8>,
     ) -> Result<(), ffmpeg::Error> {
-        let key_pos = self.locate_keyframes(&frame_index, self.stream_info.key_frames());
+        let key_pos = self.locate_keyframes(&frame_index);
         debug!("    - Key pos: {}", key_pos);
-        let curr_key_pos = self.locate_keyframes(&self.curr_frame, self.stream_info.key_frames());
+        let curr_key_pos = self.locate_keyframes(&self.curr_frame);
         debug!("    - Curr key pos: {}", curr_key_pos);
         if (key_pos == curr_key_pos) & (frame_index >= self.curr_frame) {
             // we can directly skip until frame_index
@@ -532,8 +532,14 @@ impl VideoReader {
     }
 
     /// Find the closest key frame before `pos`
-    pub fn locate_keyframes(&self, pos: &usize, key_frames: &[usize]) -> usize {
-        let key_pos = key_frames.iter().filter(|e| pos >= *e).max().unwrap_or(&0);
+    pub fn locate_keyframes(&self, pos: &usize) -> usize {
+        let key_pos = self
+            .stream_info
+            .key_frames()
+            .iter()
+            .filter(|e| &pos >= e)
+            .max()
+            .unwrap_or(&0);
         key_pos.to_owned()
     }
 
@@ -541,11 +547,7 @@ impl VideoReader {
     /// to `target_dec_index`. The `frame_index` argument corresponds to the presentation
     /// index, while we need to know the number of frames to skip in terms of decoding index.
     pub fn get_num_skip(&self, frame_index: &usize) -> usize {
-        let target_dec_idx = self.stream_info.get_dec_idx(frame_index);
-        match target_dec_idx {
-            Some(v) => v.saturating_sub(self.curr_dec_idx),
-            None => *frame_index,
-        }
+        frame_index.saturating_sub(self.curr_dec_idx)
     }
 
     /// Seek back to the begining of the stream
@@ -674,7 +676,7 @@ impl VideoReader {
         self.avflushbuf()?;
         if res >= 0 {
             self.curr_dec_idx = *pos;
-            self.curr_frame = *self.stream_info.get_dec_idx(&self.curr_dec_idx).unwrap();
+            self.curr_frame = *pos;
             Ok(())
         } else {
             Err(ffmpeg::Error::from(res))
