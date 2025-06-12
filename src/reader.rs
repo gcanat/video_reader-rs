@@ -506,7 +506,7 @@ impl VideoReader {
     ) -> Result<(), ffmpeg::Error> {
         let key_pos = self.locate_keyframes(&frame_index, self.stream_info.key_frames());
         debug!("    - Key pos: {}", key_pos);
-        let curr_key_pos = self.locate_keyframes(&self.curr_dec_idx, self.stream_info.key_frames());
+        let curr_key_pos = self.locate_keyframes(&self.curr_frame, self.stream_info.key_frames());
         debug!("    - Curr key pos: {}", curr_key_pos);
         if (key_pos == curr_key_pos) & (frame_index >= self.curr_frame) {
             // we can directly skip until frame_index
@@ -619,6 +619,7 @@ impl VideoReader {
         let mut rgb_frame: Option<FrameArray> = None;
         while self.decoder.video.receive_frame(&mut decoded).is_ok() {
             if &self.curr_frame == frame_index {
+                debug!("Decoding frame {}", frame_index);
                 rgb_frame = self.decoder.process_frame(&decoded);
             }
             self.update_indices();
@@ -630,10 +631,11 @@ impl VideoReader {
     /// Update the current frame index and decoding index
     pub fn update_indices(&mut self) {
         self.curr_dec_idx += 1;
-        self.curr_frame = *self
-            .stream_info
-            .get_dec_idx(&self.curr_dec_idx)
-            .unwrap_or(self.stream_info.frame_count());
+        self.curr_frame = self.curr_dec_idx;
+        // self.curr_frame = *self
+        //     .stream_info
+        //     .get_pts_idx(&self.curr_dec_idx)
+        //     .unwrap_or(&self.stream_info.frame_count().saturating_sub(1));
         debug!(
             "dec_idx: {}, curr_frame: {}",
             self.curr_dec_idx, self.curr_frame
