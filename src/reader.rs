@@ -634,10 +634,6 @@ impl VideoReader {
     pub fn update_indices(&mut self) {
         self.curr_dec_idx += 1;
         self.curr_frame = self.curr_dec_idx;
-        // self.curr_frame = *self
-        //     .stream_info
-        //     .get_pts_idx(&self.curr_dec_idx)
-        //     .unwrap_or(&self.stream_info.frame_count().saturating_sub(1));
         debug!(
             "dec_idx: {}, curr_frame: {}",
             self.curr_dec_idx, self.curr_frame

@@ -179,16 +179,20 @@ impl PyVideoReader {
     #[pyo3(signature = (index=None))]
     /// Get the PTS for a given index or an index slice. If None, will return all pts.
     /// If some index values are out of bounds, pts will be set to -1.
-    fn get_pts(&self, index: Option<IntOrSlice>) -> PyResult<Vec<i64>> {
+    fn get_pts(&self, index: Option<IntOrSlice>) -> PyResult<Vec<f64>> {
         match self.inner.lock() {
-            Ok(vr) => match index {
-                None => Ok(vr.stream_info().get_all_pts()),
-                Some(int_or_slice) => {
-                    let frame_count = vr.stream_info().frame_count();
-                    let index = int_or_slice.to_indices(*frame_count)?;
-                    Ok(vr.stream_info().get_pts(&index))
+            Ok(vr) => {
+                let time_base = vr.decoder().video_info().get("time_base").unwrap();
+                let time_base = f64::from_str(time_base).unwrap();
+                match index {
+                    None => Ok(vr.stream_info().get_all_pts(time_base)),
+                    Some(int_or_slice) => {
+                        let frame_count = vr.stream_info().frame_count();
+                        let index = int_or_slice.to_indices(*frame_count)?;
+                        Ok(vr.stream_info().get_pts(&index, time_base))
+                    }
                 }
-            },
+            }
             Err(e) => Err(PyRuntimeError::new_err(format!("Lock error: {}", e))),
         }
     }

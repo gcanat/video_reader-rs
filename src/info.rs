@@ -60,15 +60,18 @@ impl StreamInfo {
     pub fn frame_times(&self) -> &BTreeMap<usize, FrameTime> {
         &self.frame_times
     }
-    pub fn get_all_pts(&self) -> Vec<i64> {
-        self.frame_times.values().map(|v| v.pts).collect::<Vec<_>>()
+    pub fn get_all_pts(&self, time_base: f64) -> Vec<f64> {
+        self.frame_times
+            .values()
+            .map(|v| v.pts as f64 * time_base)
+            .collect::<Vec<_>>()
     }
-    pub fn get_pts(&self, indices: &[usize]) -> Vec<i64> {
+    pub fn get_pts(&self, indices: &[usize], time_base: f64) -> Vec<f64> {
         indices
             .iter()
             .map(|i| match self.frame_times.get(i) {
-                None => -1,
-                Some(ft) => ft.pts,
+                None => -1.,
+                Some(ft) => ft.pts as f64 * time_base,
             })
             .collect::<Vec<_>>()
     }
@@ -141,14 +144,6 @@ pub fn get_frame_count(
             didx += 1;
         }
     }
-
-    // mapping between decoding order and presentation order
-    // let mut ptsidx_to_decidx: HashMap<usize, usize> = HashMap::new();
-    // let mut decidx_to_ptsidx: HashMap<usize, usize> = HashMap::new();
-    // for (idx, fr_info) in frame_times.iter().enumerate() {
-    //     ptsidx_to_decidx.insert(idx, fr_info.1.didx);
-    //     decidx_to_ptsidx.insert(fr_info.1.didx, idx);
-    // }
 
     // Seek back to the begining of the stream
     ictx.seek(0, ..10)?;
