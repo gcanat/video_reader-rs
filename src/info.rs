@@ -37,7 +37,6 @@ pub struct StreamInfo {
     frame_count: usize,
     key_frames: Vec<usize>,
     frame_times: BTreeMap<usize, FrameTime>,
-    decode_order: HashMap<usize, usize>,
 }
 
 impl StreamInfo {
@@ -45,13 +44,11 @@ impl StreamInfo {
         frame_count: usize,
         key_frames: Vec<usize>,
         frame_times: BTreeMap<usize, FrameTime>,
-        decode_order: HashMap<usize, usize>,
     ) -> Self {
         StreamInfo {
             frame_count,
             key_frames,
             frame_times,
-            decode_order,
         }
     }
     pub fn frame_count(&self) -> &usize {
@@ -63,8 +60,20 @@ impl StreamInfo {
     pub fn frame_times(&self) -> &BTreeMap<usize, FrameTime> {
         &self.frame_times
     }
-    pub fn get_dec_idx(&self, idx: &usize) -> Option<&usize> {
-        self.decode_order.get(idx)
+    pub fn get_all_pts(&self, time_base: f64) -> Vec<f64> {
+        self.frame_times
+            .values()
+            .map(|v| v.pts as f64 * time_base)
+            .collect::<Vec<_>>()
+    }
+    pub fn get_pts(&self, indices: &[usize], time_base: f64) -> Vec<f64> {
+        indices
+            .iter()
+            .map(|i| match self.frame_times.get(i) {
+                None => -1.,
+                Some(ft) => ft.pts as f64 * time_base,
+            })
+            .collect::<Vec<_>>()
     }
 }
 
@@ -136,15 +145,9 @@ pub fn get_frame_count(
         }
     }
 
-    // mapping between decoding order and presentation order
-    let mut decode_order: HashMap<usize, usize> = HashMap::new();
-    for (idx, fr_info) in frame_times.iter().enumerate() {
-        decode_order.insert(*fr_info.0, idx);
-    }
-
     // Seek back to the begining of the stream
     ictx.seek(0, ..10)?;
-    Ok(StreamInfo::new(didx, key_frames, frame_times, decode_order))
+    Ok(StreamInfo::new(didx, key_frames, frame_times))
 }
 
 /// Get the resized dimension of a frame, keep the aspect ratio.
