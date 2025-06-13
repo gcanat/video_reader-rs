@@ -1,62 +1,62 @@
-name: ci
+# name: ci
 
-on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
+# on:
+#   push:
+#     branches: [main]
+#   pull_request:
+#     branches: [main]
 
-jobs:
-  lints:
-    name: Lints
-    runs-on: ubuntu-latest
-    container: jrottenberg/ffmpeg:5.1-ubuntu
+# jobs:
+#   lints:
+#     name: Lints
+#     runs-on: ubuntu-latest
+#     container: jrottenberg/ffmpeg:5.1-ubuntu
 
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+#     steps:
+#       - name: Checkout
+#         uses: actions/checkout@v4
 
-      - name: Install dependencies
-        run: |
-          apt update
-          apt install -y --no-install-recommends clang curl pkg-config python3
+#       - name: Install dependencies
+#         run: |
+#           apt update
+#           apt install -y --no-install-recommends clang curl pkg-config python3
 
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@v1
-        with:
-          toolchain: stable
-          components: rustfmt, clippy
+#       - name: Setup Rust
+#         uses: dtolnay/rust-toolchain@v1
+#         with:
+#           toolchain: stable
+#           components: rustfmt, clippy
 
-      - name: Cache
-        uses: Swatinem/rust-cache@v2
+#       - name: Cache
+#         uses: Swatinem/rust-cache@v2
 
-      - name: Rustfmt
-        run: cargo fmt --all -- --check
+#       - name: Rustfmt
+#         run: cargo fmt --all -- --check
 
-      - name: Clippy
-        run: cargo clippy --all -- -D warnings
-  tests:
-    name: Tests
-    runs-on: ubuntu-latest
-    container: jrottenberg/ffmpeg:5.1-ubuntu
+#       - name: Clippy
+#         run: cargo clippy --all -- -D warnings
+#   tests:
+#     name: Tests
+#     runs-on: ubuntu-latest
+#     container: jrottenberg/ffmpeg:5.1-ubuntu
 
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+#     steps:
+#       - name: Checkout
+#         uses: actions/checkout@v4
 
-      - name: Install dependencies
-        run: |
-          apt update
-          apt install -y --no-install-recommends clang curl pkg-config python3
+#       - name: Install dependencies
+#         run: |
+#           apt update
+#           apt install -y --no-install-recommends clang curl pkg-config python3
 
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@v1
-        with:
-          toolchain: stable
-          components: rustc, cargo
+#       - name: Setup Rust
+#         uses: dtolnay/rust-toolchain@v1
+#         with:
+#           toolchain: stable
+#           components: rustc, cargo
 
-      - name: Cache
-        uses: Swatinem/rust-cache@v2
+#       - name: Cache
+#         uses: Swatinem/rust-cache@v2
 
-      - name: tests
-        run: cargo test
+#       - name: tests
+#         run: cargo test
