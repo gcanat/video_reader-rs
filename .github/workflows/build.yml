@@ -50,7 +50,7 @@ jobs:
           #   export FFMPEG_DIR=${{ env.FFMPEG_DIR }}
           before-script-linux: |
             dpkg --add-architecture arm64 &&
-            apt update &&
+            apt update || true &&
             apt install -y clang libxv-dev xz-utils pkg-config binutils-aarch64-linux-gnu gcc-aarch64-linux-gnu libasound2-dev python3-pip &&
             apt install -y multistrap gcc-aarch64-linux-gnu libcrypt-dev libnsl-dev rpcsvc-proto &&
             pip install "maturin>=1.3,<2.0" patchelf &&
