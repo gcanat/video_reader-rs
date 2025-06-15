@@ -22,7 +22,7 @@ apt install -y binutils-aarch64-linux-gnu clang gcc-aarch64-linux-gnu \
 pip install "maturin>=1.3,<2.0" patchelf
 
 # download ffmpeg archive and extract it
-curl -L "${{ env.FFMPEG_DOWNLOAD_URL }}" -o ffmpeg.tar.xz
-mkdir -p "${{ env.FFMPEG_DIR }}"
-tar -xf ffmpeg.tar.xz -C "${{ env.FFMPEG_DIR }}" --strip-components=1
-export FFMPEG_DIR="${{ env.FFMPEG_DIR }}"
+curl -L "$FFMPEG_DOWNLOAD_URL" -o ffmpeg.tar.xz
+mkdir -p $FFMPEG_DIR
+tar -xf ffmpeg.tar.xz -C $FFMPEG_DIR --strip-components=1
+export FFMPEG_DIR=$FFMPEG_DIR
