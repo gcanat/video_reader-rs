@@ -30,8 +30,6 @@ jobs:
           # - runner: ubuntu-latest
           #   target: ppc64le
     env:
-      # FFMPEG_DOWNLOAD_URL: "https://www.dropbox.com/scl/fi/x76nti8wr8qqoyyxvifa8/ffmpeg-4.4-linux-clang-default.tar.xz?rlkey=${{ secrets.DROPBOX_TOKEN }}&dl=1"
-      # FFMPEG_DOWNLOAD_URL: "https://www.dropbox.com/scl/fi/au67c14cgtu10873wtgyq/ffmpeg-n4.4.6-linuxarm64-gpl-shared-4.4.tar.xz?rlkey=${{ secrets.DROPBOX_TOKEN_AARCH64 }}&dl=1"
       FFMPEG_DIR: ${{ github.workspace }}/ffmpeg
     steps:
       - uses: actions/checkout@v4
@@ -109,126 +107,126 @@ jobs:
   #         name: wheels-musllinux-${{ matrix.platform.target }}
   #         path: dist
 
-  # windows:
-  #   runs-on: ${{ matrix.platform.runner }}
-  #   strategy:
-  #     matrix:
-  #       platform:
-  #         - runner: windows-latest
-  #           target: x64
-  #         # - runner: windows-latest
-  #         #   target: x86
+  windows:
+    runs-on: ${{ matrix.platform.runner }}
+    strategy:
+      matrix:
+        platform:
+          - runner: windows-latest
+            target: x64
+          # - runner: windows-latest
+          #   target: x86
 
-  #   env:
-  #     FFMPEG_DOWNLOAD_URL: "https://github.com/GyanD/codexffmpeg/releases/download/VER/ffmpeg-VER-full_build-shared.7z"
-  #     FFMPEG_INSTALL_PATH: "C:/ffmpeg"
-  #     FFMPEG_VERSION: "7.0"
+    env:
+      FFMPEG_DOWNLOAD_URL: "https://github.com/GyanD/codexffmpeg/releases/download/VER/ffmpeg-VER-full_build-shared.7z"
+      FFMPEG_INSTALL_PATH: "C:/ffmpeg"
+      FFMPEG_VERSION: "7.0"
 
-  #   steps:
-  #     - uses: actions/checkout@v4
-  #     - name: Set libclang path
-  #       run: |
-  #         $VCINSTALLDIR = $(& "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath)
-  #         Add-Content $env:GITHUB_ENV "LIBCLANG_PATH=${VCINSTALLDIR}\VC\Tools\LLVM\x64\bin"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set libclang path
+        run: |
+          $VCINSTALLDIR = $(& "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath)
+          Add-Content $env:GITHUB_ENV "LIBCLANG_PATH=${VCINSTALLDIR}\VC\Tools\LLVM\x64\bin"
 
-  #     - name: Install FFmpeg ${{ env.FFMPEG_VERSION }}
-  #       run: |
-  #         $tempFile = New-TemporaryFile
-  #         $uri = ($env:FFMPEG_DOWNLOAD_URL).Replace('VER', $env:FFMPEG_VERSION)
-  #         Invoke-WebRequest "$uri" -OutFile "$tempFile" -TimeoutSec 10
-  #         7z x -y -o"$env:FFMPEG_INSTALL_PATH" "$tempFile"
-  #         $ffmpegDir = (Get-ChildItem -Directory "$env:FFMPEG_INSTALL_PATH").FullName
-  #         Add-Content $env:GITHUB_ENV "FFMPEG_DIR=$ffmpegDir"
-  #         Add-Content $env:GITHUB_PATH "$ffmpegDir/bin"
+      - name: Install FFmpeg ${{ env.FFMPEG_VERSION }}
+        run: |
+          $tempFile = New-TemporaryFile
+          $uri = ($env:FFMPEG_DOWNLOAD_URL).Replace('VER', $env:FFMPEG_VERSION)
+          Invoke-WebRequest "$uri" -OutFile "$tempFile" -TimeoutSec 10
+          7z x -y -o"$env:FFMPEG_INSTALL_PATH" "$tempFile"
+          $ffmpegDir = (Get-ChildItem -Directory "$env:FFMPEG_INSTALL_PATH").FullName
+          Add-Content $env:GITHUB_ENV "FFMPEG_DIR=$ffmpegDir"
+          Add-Content $env:GITHUB_PATH "$ffmpegDir/bin"
 
-  #     - uses: actions/setup-python@v5
-  #       with:
-  #         python-version: '3.11'
-  #         architecture: ${{ matrix.platform.target }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          architecture: ${{ matrix.platform.target }}
 
-  #     - name: Install build dependencies
-  #       run: pip install delvewheel
+      - name: Install build dependencies
+        run: pip install delvewheel
 
-  #     - name: Build wheel
-  #       uses: PyO3/maturin-action@v1
-  #       with:
-  #         target: ${{ matrix.platform.target }}
-  #         args: --release --features ffmpeg_6_0 --out dist --find-interpreter
-  #         sccache: 'true'
+      - name: Build wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.platform.target }}
+          args: --release --features ffmpeg_6_0 --out dist --find-interpreter
+          sccache: 'true'
 
-  #     - name: Repair wheel with delvewheel
-  #       shell: bash
-  #       run: |
-  #         delvewheel repair dist/*.whl
+      - name: Repair wheel with delvewheel
+        shell: bash
+        run: |
+          delvewheel repair dist/*.whl
 
-  #     - name: Upload wheels
-  #       uses: actions/upload-artifact@v4
-  #       with:
-  #         name: wheels-windows-${{ matrix.platform.target }}
-  #         path: wheelhouse/
+      - name: Upload wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-windows-${{ matrix.platform.target }}
+          path: wheelhouse/
 
-  # macos:
-  #   runs-on: ${{ matrix.platform.runner }}
-  #   strategy:
-  #     matrix:
-  #       platform:
-  #         - runner: macos-13
-  #           target: x86_64
-  #         - runner: macos-14
-  #           target: aarch64
-  #   steps:
-  #     - uses: actions/checkout@v4
-  #     - uses: actions/setup-python@v5
-  #       with:
-  #         python-version: '3.11'
-  #     - name: Install dependencies
-  #       run: |
-  #         brew install ffmpeg &&
-  #         pip install delocate
-  #     - name: Build wheels
-  #       uses: PyO3/maturin-action@v1
-  #       with:
-  #         target: ${{ matrix.platform.target }}
-  #         args: --release --features ffmpeg_6_0 --out dist --find-interpreter
-  #         sccache: 'true'
+  macos:
+    runs-on: ${{ matrix.platform.runner }}
+    strategy:
+      matrix:
+        platform:
+          - runner: macos-13
+            target: x86_64
+          - runner: macos-14
+            target: aarch64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: |
+          brew install ffmpeg &&
+          pip install delocate
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.platform.target }}
+          args: --release --features ffmpeg_6_0 --out dist --find-interpreter
+          sccache: 'true'
 
-  #     - name: Repair wheel with delocate
-  #       shell: bash
-  #       run: |
-  #         delocate-wheel dist/*.whl
+      - name: Repair wheel with delocate
+        shell: bash
+        run: |
+          delocate-wheel dist/*.whl
 
-  #     - name: Upload wheels
-  #       uses: actions/upload-artifact@v4
-  #       with:
-  #         name: wheels-macos-${{ matrix.platform.target }}
-  #         path: dist
+      - name: Upload wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-macos-${{ matrix.platform.target }}
+          path: dist
 
-  # sdist:
-  #   runs-on: ubuntu-22.04
-  #   steps:
-  #     - uses: actions/checkout@v4
-  #     - name: Build sdist
-  #       uses: PyO3/maturin-action@v1
-  #       with:
-  #         command: sdist
-  #         args: --out dist
-  #     - name: Upload sdist
-  #       uses: actions/upload-artifact@v4
-  #       with:
-  #         name: wheels-sdist
-  #         path: dist
+  sdist:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build sdist
+        uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --out dist
+      - name: Upload sdist
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-sdist
+          path: dist
 
-  # release:
-  #   name: Release
-  #   runs-on: ubuntu-22.04
-  #   if: "startsWith(github.ref, 'refs/tags/')"
-  #   needs: [linux, windows, macos, sdist]
-  #   steps:
-  #     - uses: actions/download-artifact@v4
-  #     - name: Publish to PyPI
-  #       uses: PyO3/maturin-action@v1
-  #       env:
-  #         MATURIN_PYPI_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
-  #       with:
-  #         command: upload
-  #         args: --non-interactive --skip-existing wheels-*/*
+  release:
+    name: Release
+    runs-on: ubuntu-22.04
+    if: "startsWith(github.ref, 'refs/tags/')"
+    needs: [linux, windows, macos, sdist]
+    steps:
+      - uses: actions/download-artifact@v4
+      - name: Publish to PyPI
+        uses: PyO3/maturin-action@v1
+        env:
+          MATURIN_PYPI_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
+        with:
+          command: upload
+          args: --non-interactive --skip-existing wheels-*/*
