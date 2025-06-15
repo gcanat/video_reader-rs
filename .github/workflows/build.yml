@@ -49,7 +49,7 @@ jobs:
           #   tar -xf ffmpeg.tar.xz -C ${{ env.FFMPEG_DIR }} --strip-components=1 &&
           #   export FFMPEG_DIR=${{ env.FFMPEG_DIR }}
           before-script-linux: |
-            bash -c ".github/workflows/pre_build_arm64.sh ${{ env.FFMPEG_DOWNLOAD_URL }} ${{ env.FFMPEG_DIR }}"
+            bash .github/workflows/pre_build_arm64.sh
           args: --release --out dist --find-interpreter
           sccache: 'true'
           manylinux: 2_28
