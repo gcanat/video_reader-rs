@@ -8,8 +8,8 @@ name = "video_reader"
 crate-type = ["cdylib"]
 
 [dependencies]
-pyo3 = { version = "0.25", features = ["extension-module"] }
-numpy = "0.25"
+pyo3 = { version = "0.24", features = ["extension-module"] }
+numpy = "0.24"
 ndarray = { version = "0.16.1", features = ["rayon"] }
 ffmpeg-next = "7.1.0"
 env_logger = "0.11.5"
@@ -17,6 +17,9 @@ log = "0.4.22"
 tokio = { version = "1.44", features = ["full"] }
 yuv = "0.8.4"
 once_cell = "1.20.2"
+torch-sys = "0.20.0"
+pyo3-tch = "0.20.0"
+tch = "0.20.0"
 
 [features]
 ffmpeg_6_0 = []

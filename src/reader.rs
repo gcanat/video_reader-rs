@@ -8,7 +8,7 @@ use log::debug;
 use std::collections::HashMap;
 use std::path::Path;
 
-use crate::convert::{convert_nv12_to_ndarray_rgb24, convert_yuv_to_ndarray_rgb24};
+use crate::convert::{convert_nv12_to_torch_tensor, convert_yuv_to_torch_tensor};
 use crate::decoder::{DecoderConfig, VideoDecoder, VideoReducer};
 use crate::filter::{create_filter_spec, create_filters, FilterConfig};
 use crate::hwaccel::{HardwareAccelerationContext, HardwareAccelerationDeviceType};
@@ -17,6 +17,7 @@ use crate::info::{
 };
 use crate::utils::{insert_frame, FrameArray, VideoArray, HWACCEL_PIXEL_FORMAT};
 use ndarray::{s, Array, Array4, ArrayViewMut3};
+use tch::Tensor;
 use tokio::task;
 
 pub fn get_init_context(
@@ -295,7 +296,7 @@ impl VideoReader {
         start_frame: Option<usize>,
         end_frame: Option<usize>,
         compression_factor: Option<f64>,
-    ) -> Result<Vec<FrameArray>, ffmpeg::Error> {
+    ) -> Result<Vec<Tensor>, ffmpeg::Error> {
         let (reducer, start_frame, _) = VideoReducer::build(
             start_frame,
             end_frame,
@@ -355,11 +356,12 @@ impl VideoReader {
                         let crange = self.decoder.color_range;
                         if self.decoder.is_hwaccel {
                             tasks.push(task::spawn(async move {
-                                convert_nv12_to_ndarray_rgb24(rgb_frame, cspace, crange)
+                                // convert_nv12_to_ndarray_rgb24(rgb_frame, cspace, crange)
+                                convert_nv12_to_torch_tensor(rgb_frame, cspace, crange)
                             }));
                         } else {
                             tasks.push(task::spawn(async move {
-                                convert_yuv_to_ndarray_rgb24(rgb_frame, cspace, crange)
+                                convert_yuv_to_torch_tensor(rgb_frame, cspace, crange)
                             }));
                         }
                     }

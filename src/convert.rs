@@ -3,6 +3,7 @@ use ffmpeg::util::frame::video::Video;
 use ffmpeg_next as ffmpeg;
 use ndarray::parallel::prelude::*;
 use ndarray::{stack, Array2, Array3, Array4, ArrayView3, Axis};
+use tch::{Device, Kind, Tensor};
 use yuv::{
     yuv420_to_rgb, yuv_nv12_to_rgb, YuvBiPlanarImage, YuvConversionMode, YuvPlanarImage, YuvRange,
     YuvStandardMatrix,
@@ -51,6 +52,56 @@ pub fn convert_yuv_to_ndarray_rgb24(
     }
 }
 
+/// Converts a YUV420P video `AVFrame` produced by ffmpeg to a torch tensor.
+/// * `frame` - Video frame to convert.
+/// * `color_space` - Color space matrix for yuv to rgb conversion, eg BT601, BT709, etc.
+/// * `color_range` - color range of the frame: Full or Limited.
+/// * returns a three-dimensional `Tensor` with dimensions `(H, W, C)` and type byte.
+pub fn convert_yuv_to_torch_tensor(
+    frame: Video,
+    color_space: YuvStandardMatrix,
+    color_range: YuvRange,
+) -> Tensor {
+    let (buf_vec, frame_width, frame_height, bytes_copied) =
+        copy_image(frame, AVPixelFormat::AV_PIX_FMT_YUV420P);
+
+    // let colorspace = get_colorspace(frame_height, color_space.as_str());
+
+    if bytes_copied == buf_vec.len() as i32 {
+        let mut rgb = vec![0_u8; (frame_width * frame_height * 3) as usize];
+        let cut_point1 = (frame_width * frame_height) as usize;
+        let cut_point2 = cut_point1 + cut_point1 / 4;
+        let yuv_planar = YuvPlanarImage {
+            y_plane: &buf_vec[..cut_point1],
+            y_stride: frame_width as u32,
+            u_plane: &buf_vec[cut_point1..cut_point2],
+            u_stride: (frame_width / 2) as u32,
+            v_plane: &buf_vec[cut_point2..],
+            v_stride: (frame_width / 2) as u32,
+            width: frame_width as u32,
+            height: frame_height as u32,
+        };
+        yuv420_to_rgb(
+            &yuv_planar,
+            &mut rgb,
+            (frame_width * 3) as u32,
+            color_range,
+            color_space,
+        )
+        .unwrap();
+        Tensor::from_data_size(
+            &rgb,
+            &[frame_height.into(), frame_width.into(), 3_i64],
+            Kind::Uint8,
+        )
+    } else {
+        Tensor::zeros(
+            &[frame_height.into(), frame_width.into(), 3_i64],
+            (Kind::Uint8, Device::Cpu),
+        )
+    }
+}
+
 /// Converts a NV12 video `AVFrame` produced by ffmpeg to an `ndarray`.
 /// * `frame` - Video frame to convert.
 /// * `color_space` - color space of the frame, eg BT601, BT709, etc.
@@ -89,6 +140,54 @@ pub fn convert_nv12_to_ndarray_rgb24(
         Array3::from_shape_vec((frame_height as usize, frame_width as usize, 3_usize), rgb).unwrap()
     } else {
         Array3::zeros((frame_height as usize, frame_width as usize, 3_usize))
+    }
+}
+
+/// Converts a NV12 video `AVFrame` produced by ffmpeg to an torch tensor.
+/// * `frame` - Video frame to convert.
+/// * `color_space` - color space of the frame, eg BT601, BT709, etc.
+/// * `color_range` - color range of the frame: Full or Limited.
+/// * returns a three-dimensional `ndarray` with dimensions `(H, W, C)` and type byte.
+pub fn convert_nv12_to_torch_tensor(
+    frame: Video,
+    color_space: YuvStandardMatrix,
+    color_range: YuvRange,
+) -> Tensor {
+    let (buf_vec, frame_width, frame_height, bytes_copied) =
+        copy_image(frame, AVPixelFormat::AV_PIX_FMT_NV12);
+
+    // let colorspace = get_colorspace(frame_width, color_space.as_str());
+
+    if bytes_copied == buf_vec.len() as i32 {
+        let mut rgb = vec![0_u8; (frame_width * frame_height * 3) as usize];
+        let cut_point = (frame_width * frame_height) as usize;
+        let yuv_planar = YuvBiPlanarImage {
+            y_plane: &buf_vec[..cut_point],
+            y_stride: frame_width as u32,
+            uv_plane: &buf_vec[cut_point..],
+            uv_stride: frame_width as u32,
+            width: frame_width as u32,
+            height: frame_height as u32,
+        };
+        yuv_nv12_to_rgb(
+            &yuv_planar,
+            &mut rgb,
+            (frame_width * 3) as u32,
+            color_range,
+            color_space,
+            YuvConversionMode::Balanced,
+        )
+        .unwrap();
+        Tensor::from_data_size(
+            &rgb,
+            &[frame_height.into(), frame_width.into(), 3_i64],
+            Kind::Uint8,
+        )
+    } else {
+        Tensor::zeros(
+            &[frame_height.into(), frame_width.into(), 3_i64],
+            (Kind::Uint8, Device::Cpu),
+        )
     }
 }
 

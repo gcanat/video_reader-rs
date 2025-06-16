@@ -22,6 +22,7 @@ use pyo3::{
     },
     Bound, FromPyObject, PyRef, PyRefMut, PyResult, Python,
 };
+use pyo3_tch::PyTensor;
 use reader::VideoReader;
 use std::sync::Mutex;
 
@@ -269,11 +270,10 @@ impl PyVideoReader {
     /// * returns a list of numpy array, each ndarray being a frame.
     fn decode_fast<'a>(
         &'a self,
-        py: Python<'a>,
         start_frame: Option<usize>,
         end_frame: Option<usize>,
         compression_factor: Option<f64>,
-    ) -> PyResult<Vec<Bound<'a, Frame>>> {
+    ) -> PyResult<Vec<PyTensor>> {
         match self.inner.lock() {
             Ok(mut reader) => {
                 let res_decode = RUNTIME.block_on(async {
@@ -284,7 +284,7 @@ impl PyVideoReader {
                 });
                 Ok(res_decode
                     .into_iter()
-                    .map(|x| x.into_pyarray(py))
+                    .map(|x| PyTensor(x))
                     .collect::<Vec<_>>())
             }
             Err(e) => Err(PyRuntimeError::new_err(format!("Lock error: {}", e))),
