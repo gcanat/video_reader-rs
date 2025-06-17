@@ -373,8 +373,9 @@ impl PyVideoReader {
 }
 
 #[pymodule]
-fn video_reader<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()> {
+fn video_reader<'py>(py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()> {
     env_logger::init();
+    py.import("torch")?;
     // Add the VideoReader class to the module
     m.add_class::<PyVideoReader>()?;
     Ok(())
