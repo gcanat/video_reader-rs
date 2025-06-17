@@ -6,11 +6,11 @@ mod filter;
 mod hwaccel;
 mod info;
 use hwaccel::HardwareAccelerationDeviceType;
-use numpy::{IntoPyArray, PyArray};
+use numpy::PyArray;
 mod decoder;
 mod reader;
 mod utils;
-use convert::rgb2gray;
+// use convert::rgb2gray;
 use decoder::DecoderConfig;
 use log::debug;
 use ndarray::Array;
@@ -138,28 +138,25 @@ impl PyVideoReader {
     fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
         slf
     }
-    fn __next__<'a>(
-        slf: PyRefMut<'_, Self>,
-        py: Python<'a>,
-    ) -> Option<Bound<'a, PyArray<u8, Dim<[usize; 3]>>>> {
+    fn __next__<'a>(slf: PyRefMut<'_, Self>) -> Option<PyTensor> {
         slf.inner
             .lock()
             .unwrap()
             .next()
-            .map(|rgb_frame| rgb_frame.into_pyarray(py))
+            .map(|rgb_frame| PyTensor(rgb_frame))
     }
 
-    fn __getitem__<'a>(&self, py: Python<'a>, key: IntOrSlice) -> PyResult<Bound<'a, FrameOrVid>> {
+    fn __getitem__<'a>(&self, key: IntOrSlice) -> PyResult<PyTensor> {
         match self.inner.lock() {
             Ok(mut vr) => {
                 let frame_count = *vr.stream_info().frame_count();
                 let index = key.to_indices(frame_count)?;
-                let res_array = vr.get_batch(index).unwrap().into_dyn();
+                let res_array = vr.get_batch(index).unwrap();
                 // remove first dim if key was a single int
                 if matches!(key, IntOrSlice::Int { .. }) {
-                    Ok(res_array.squeeze().into_pyarray(py))
+                    Ok(PyTensor(res_array.squeeze()))
                 } else {
-                    Ok(res_array.into_pyarray(py))
+                    Ok(PyTensor(res_array))
                 }
             }
             Err(e) => Err(PyRuntimeError::new_err(format!("Lock error: {}", e))),
@@ -245,15 +242,14 @@ impl PyVideoReader {
     /// * returns a numpy array of shape (N, H, W, C), where N is the number of frames
     fn decode<'a>(
         &'a self,
-        py: Python<'a>,
         start_frame: Option<usize>,
         end_frame: Option<usize>,
         compression_factor: Option<f64>,
-    ) -> PyResult<Bound<'a, PyArray<u8, Dim<[usize; 4]>>>> {
+    ) -> PyResult<PyTensor> {
         match self.inner.lock() {
             Ok(mut reader) => match reader.decode_video(start_frame, end_frame, compression_factor)
             {
-                Ok(video) => Ok(video.into_pyarray(py)),
+                Ok(video) => Ok(PyTensor(video)),
                 Err(e) => Err(PyRuntimeError::new_err(format!("Error: {}", e))),
             },
             Err(e) => Err(PyRuntimeError::new_err(format!("Lock error: {}", e))),
@@ -291,44 +287,39 @@ impl PyVideoReader {
         }
     }
 
-    #[pyo3(signature = (start_frame=None, end_frame=None, compression_factor=None))]
+    // #[pyo3(signature = (start_frame=None, end_frame=None, compression_factor=None))]
     /// Decode the video, returning grayscale frames.
     /// * `start_frame` - optional starting index (will start decoding from this frame)
     /// * `end_frame` - optional last frame index (will stop decoding after this frame)
     /// * `compression_factor` - optional temporal compression, eg if set to 0.25, will
     /// decode 1 frame out of 4. If None, will default to 1.0, ie decoding all frames.
     /// * returns a numpy array of shape (N, H, W), where N is the number of frames.
-    fn decode_gray<'a>(
-        &'a self,
-        py: Python<'a>,
-        start_frame: Option<usize>,
-        end_frame: Option<usize>,
-        compression_factor: Option<f64>,
-    ) -> PyResult<Bound<'a, PyArray<u8, Dim<[usize; 3]>>>> {
-        match self.inner.lock() {
-            Ok(mut reader) => match reader.decode_video(start_frame, end_frame, compression_factor)
-            {
-                Ok(video) => {
-                    let gray_video = rgb2gray(video);
-                    Ok(gray_video.into_pyarray(py))
-                }
-                Err(e) => Err(PyRuntimeError::new_err(format!("Error: {}", e))),
-            },
-            Err(e) => Err(PyRuntimeError::new_err(format!("Lock error: {}", e))),
-        }
-    }
+    // fn decode_gray<'a>(
+    //     &'a self,
+    //     py: Python<'a>,
+    //     start_frame: Option<usize>,
+    //     end_frame: Option<usize>,
+    //     compression_factor: Option<f64>,
+    // ) -> PyResult<Bound<'a, PyArray<u8, Dim<[usize; 3]>>>> {
+    //     match self.inner.lock() {
+    //         Ok(mut reader) => match reader.decode_video(start_frame, end_frame, compression_factor)
+    //         {
+    //             Ok(video) => {
+    //                 let gray_video = rgb2gray(video);
+    //                 Ok(gray_video.into_pyarray(py))
+    //             }
+    //             Err(e) => Err(PyRuntimeError::new_err(format!("Error: {}", e))),
+    //         },
+    //         Err(e) => Err(PyRuntimeError::new_err(format!("Lock error: {}", e))),
+    //     }
+    // }
 
     #[pyo3(signature = (indices, with_fallback=false))]
     /// Decodes the frames in the video corresponding to the indices in `indices`.
     /// * `indices` - list of frame index to decode.
     /// * `with_fallback` - whether to fallback to safe decoding when video has weird
     /// timestamps or B-frames.
-    fn get_batch<'a>(
-        &'a self,
-        py: Python<'a>,
-        indices: Vec<usize>,
-        with_fallback: bool,
-    ) -> PyResult<Bound<'a, PyArray<u8, Dim<[usize; 4]>>>> {
+    fn get_batch<'a>(&'a self, indices: Vec<usize>, with_fallback: bool) -> PyResult<PyTensor> {
         match self.inner.lock() {
             Ok(mut vr) => {
                 // let video: Array4<u8>;
@@ -366,12 +357,12 @@ impl PyVideoReader {
                 {
                     debug!("Switching to get_batch_safe!");
                     match vr.get_batch_safe(indices) {
-                        Ok(batch) => Ok(batch.into_pyarray(py)),
+                        Ok(batch) => Ok(PyTensor(batch)),
                         Err(e) => Err(PyRuntimeError::new_err(format!("Error: {}", e))),
                     }
                 } else {
                     match vr.get_batch(indices) {
-                        Ok(batch) => Ok(batch.into_pyarray(py)),
+                        Ok(batch) => Ok(PyTensor(batch)),
                         Err(e) => Err(PyRuntimeError::new_err(format!("Error: {}", e))),
                     }
                 }

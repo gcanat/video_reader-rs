@@ -1,12 +1,13 @@
-use crate::convert::{convert_nv12_to_ndarray_rgb24, convert_yuv_to_ndarray_rgb24};
+use crate::convert::{convert_nv12_to_torch_tensor, convert_yuv_to_torch_tensor};
 use crate::convert::{get_colorrange, get_colorspace};
 use crate::hwaccel::HardwareAccelerationDeviceType;
-use crate::utils::{FrameArray, VideoArray};
+use crate::utils::VideoArray;
 use ffmpeg::filter;
 use ffmpeg::util::frame::video::Video;
 use ffmpeg_next as ffmpeg;
 use ndarray::{s, Array, Array4, ArrayViewMut3};
 use std::collections::HashMap;
+use tch::Tensor;
 use yuv::{YuvRange, YuvStandardMatrix};
 
 /// Struct used when we want to decode the whole video with a compression_factor
@@ -192,7 +193,7 @@ impl VideoDecoder {
         &self.video
     }
 
-    pub fn decode_frames(&mut self) -> Result<Option<FrameArray>, ffmpeg::Error> {
+    pub fn decode_frames(&mut self) -> Result<Option<Tensor>, ffmpeg::Error> {
         let mut decoded = Video::empty();
         if self.video.receive_frame(&mut decoded).is_ok() {
             let rgb_frame = self.process_frame(&decoded);
@@ -201,7 +202,7 @@ impl VideoDecoder {
         Ok(None)
     }
 
-    pub fn process_frame(&mut self, decoded: &Video) -> Option<FrameArray> {
+    pub fn process_frame(&mut self, decoded: &Video) -> Option<Tensor> {
         self.graph.get("in").unwrap().source().add(decoded).unwrap();
         let cspace = self.color_space;
         let crange = self.color_range;
@@ -215,10 +216,10 @@ impl VideoDecoder {
             .frame(&mut yuv_frame)
             .is_ok()
         {
-            let rgb_frame: FrameArray = if self.is_hwaccel {
-                convert_nv12_to_ndarray_rgb24(yuv_frame, cspace, crange)
+            let rgb_frame: Tensor = if self.is_hwaccel {
+                convert_nv12_to_torch_tensor(yuv_frame, cspace, crange)
             } else {
-                convert_yuv_to_ndarray_rgb24(yuv_frame, cspace, crange)
+                convert_yuv_to_torch_tensor(yuv_frame, cspace, crange)
             };
             return Some(rgb_frame);
         }
@@ -229,7 +230,7 @@ impl VideoDecoder {
     pub fn receive_and_process_decoded_frames(
         &mut self,
         reducer: &mut VideoReducer,
-    ) -> Result<Option<FrameArray>, ffmpeg::Error> {
+    ) -> Result<Option<Tensor>, ffmpeg::Error> {
         let mut decoded = Video::empty();
         while self.video.receive_frame(&mut decoded).is_ok() {
             let match_index = reducer
@@ -250,7 +251,7 @@ impl VideoDecoder {
         &mut self,
         reducer: &mut VideoReducer,
         indices: &[usize],
-        frame_map: &mut HashMap<usize, FrameArray>,
+        frame_map: &mut HashMap<usize, Tensor>,
     ) -> Result<(), ffmpeg::Error> {
         let mut decoded = Video::empty();
         while self.video.receive_frame(&mut decoded).is_ok() {
