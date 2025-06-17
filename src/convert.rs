@@ -9,6 +9,17 @@ use yuv::{
     YuvStandardMatrix,
 };
 
+pub fn frame_tensor_from_raw_vec(raw_vec: &[u8], h: i64, w: i64) -> Tensor {
+    unsafe { Tensor::from_blob(raw_vec.as_ptr(), &[h, w, 3], &[], Kind::Uint8, Device::Cpu) }
+}
+pub fn video_tensor_from_raw_vec(raw_batch: &[Vec<u8>], h: i64, w: i64) -> Tensor {
+    let tensor_vec: Vec<_> = raw_batch
+        .iter()
+        .map(|raw_vec| frame_tensor_from_raw_vec(raw_vec, h, w))
+        .collect();
+    Tensor::stack(&tensor_vec, 0_i64)
+}
+
 /// Converts a YUV420P video `AVFrame` produced by ffmpeg to an `ndarray`.
 /// * `frame` - Video frame to convert.
 /// * `color_space` - Color space matrix for yuv to rgb conversion, eg BT601, BT709, etc.
@@ -61,14 +72,15 @@ pub fn convert_yuv_to_torch_tensor(
     frame: Video,
     color_space: YuvStandardMatrix,
     color_range: YuvRange,
-) -> Tensor {
+) -> Vec<u8> {
     let (buf_vec, frame_width, frame_height, bytes_copied) =
         copy_image(frame, AVPixelFormat::AV_PIX_FMT_YUV420P);
 
     // let colorspace = get_colorspace(frame_height, color_space.as_str());
 
+    let mut rgb = vec![0_u8; (frame_width * frame_height * 3) as usize];
     if bytes_copied == buf_vec.len() as i32 {
-        let mut rgb = vec![0_u8; (frame_width * frame_height * 3) as usize];
+        // let mut rgb = vec![0_u8; (frame_width * frame_height * 3) as usize];
         let cut_point1 = (frame_width * frame_height) as usize;
         let cut_point2 = cut_point1 + cut_point1 / 4;
         let yuv_planar = YuvPlanarImage {
@@ -89,17 +101,18 @@ pub fn convert_yuv_to_torch_tensor(
             color_space,
         )
         .unwrap();
-        Tensor::from_data_size(
-            &rgb,
-            &[frame_height.into(), frame_width.into(), 3_i64],
-            Kind::Uint8,
-        )
-    } else {
-        Tensor::zeros(
-            &[frame_height.into(), frame_width.into(), 3_i64],
-            (Kind::Uint8, Device::Cpu),
-        )
+        // Tensor::from_data_size(
+        //     &rgb,
+        //     &[frame_height.into(), frame_width.into(), 3_i64],
+        //     Kind::Uint8,
+        // )
+        // } else {
+        //     Tensor::zeros(
+        //         &[frame_height.into(), frame_width.into(), 3_i64],
+        //         (Kind::Uint8, Device::Cpu),
+        //     )
     }
+    rgb
 }
 
 /// Converts a NV12 video `AVFrame` produced by ffmpeg to an `ndarray`.
@@ -152,14 +165,13 @@ pub fn convert_nv12_to_torch_tensor(
     frame: Video,
     color_space: YuvStandardMatrix,
     color_range: YuvRange,
-) -> Tensor {
+) -> Vec<u8> {
     let (buf_vec, frame_width, frame_height, bytes_copied) =
         copy_image(frame, AVPixelFormat::AV_PIX_FMT_NV12);
 
-    // let colorspace = get_colorspace(frame_width, color_space.as_str());
-
+    let mut rgb = vec![0_u8; (frame_width * frame_height * 3) as usize];
     if bytes_copied == buf_vec.len() as i32 {
-        let mut rgb = vec![0_u8; (frame_width * frame_height * 3) as usize];
+        // let mut rgb = vec![0_u8; (frame_width * frame_height * 3) as usize];
         let cut_point = (frame_width * frame_height) as usize;
         let yuv_planar = YuvBiPlanarImage {
             y_plane: &buf_vec[..cut_point],
@@ -178,17 +190,18 @@ pub fn convert_nv12_to_torch_tensor(
             YuvConversionMode::Balanced,
         )
         .unwrap();
-        Tensor::from_data_size(
-            &rgb,
-            &[frame_height.into(), frame_width.into(), 3_i64],
-            Kind::Uint8,
-        )
-    } else {
-        Tensor::zeros(
-            &[frame_height.into(), frame_width.into(), 3_i64],
-            (Kind::Uint8, Device::Cpu),
-        )
+        //     Tensor::from_data_size(
+        //         &rgb,
+        //         &[frame_height.into(), frame_width.into(), 3_i64],
+        //         Kind::Uint8,
+        //     )
+        // } else {
+        //     Tensor::zeros(
+        //         &[frame_height.into(), frame_width.into(), 3_i64],
+        //         (Kind::Uint8, Device::Cpu),
+        //     )
     }
+    rgb
 }
 
 fn copy_image(mut frame: Video, pix_fmt: AVPixelFormat) -> (Vec<u8>, i32, i32, i32) {

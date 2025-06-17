@@ -193,7 +193,7 @@ impl VideoDecoder {
         &self.video
     }
 
-    pub fn decode_frames(&mut self) -> Result<Option<Tensor>, ffmpeg::Error> {
+    pub fn decode_frames(&mut self) -> Result<Option<Vec<u8>>, ffmpeg::Error> {
         let mut decoded = Video::empty();
         if self.video.receive_frame(&mut decoded).is_ok() {
             let rgb_frame = self.process_frame(&decoded);
@@ -202,7 +202,7 @@ impl VideoDecoder {
         Ok(None)
     }
 
-    pub fn process_frame(&mut self, decoded: &Video) -> Option<Tensor> {
+    pub fn process_frame(&mut self, decoded: &Video) -> Option<Vec<u8>> {
         self.graph.get("in").unwrap().source().add(decoded).unwrap();
         let cspace = self.color_space;
         let crange = self.color_range;
@@ -216,12 +216,12 @@ impl VideoDecoder {
             .frame(&mut yuv_frame)
             .is_ok()
         {
-            let rgb_frame: Tensor = if self.is_hwaccel {
+            let raw_frame: Vec<u8> = if self.is_hwaccel {
                 convert_nv12_to_torch_tensor(yuv_frame, cspace, crange)
             } else {
                 convert_yuv_to_torch_tensor(yuv_frame, cspace, crange)
             };
-            return Some(rgb_frame);
+            return Some(raw_frame);
         }
         None
     }
@@ -230,7 +230,7 @@ impl VideoDecoder {
     pub fn receive_and_process_decoded_frames(
         &mut self,
         reducer: &mut VideoReducer,
-    ) -> Result<Option<Tensor>, ffmpeg::Error> {
+    ) -> Result<Option<Vec<u8>>, ffmpeg::Error> {
         let mut decoded = Video::empty();
         while self.video.receive_frame(&mut decoded).is_ok() {
             let match_index = reducer
@@ -251,7 +251,7 @@ impl VideoDecoder {
         &mut self,
         reducer: &mut VideoReducer,
         indices: &[usize],
-        frame_map: &mut HashMap<usize, Tensor>,
+        frame_map: &mut HashMap<usize, Vec<u8>>,
     ) -> Result<(), ffmpeg::Error> {
         let mut decoded = Video::empty();
         while self.video.receive_frame(&mut decoded).is_ok() {

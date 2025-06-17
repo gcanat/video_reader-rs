@@ -11,6 +11,7 @@ mod decoder;
 mod reader;
 mod utils;
 // use convert::rgb2gray;
+use convert::{frame_tensor_from_raw_vec, video_tensor_from_raw_vec};
 use decoder::DecoderConfig;
 use log::debug;
 use ndarray::Array;
@@ -139,11 +140,24 @@ impl PyVideoReader {
         slf
     }
     fn __next__<'a>(slf: PyRefMut<'_, Self>) -> Option<PyTensor> {
-        slf.inner
-            .lock()
-            .unwrap()
-            .next()
-            .map(|rgb_frame| PyTensor(rgb_frame))
+        match slf.inner.lock() {
+            Ok(mut vr) => {
+                let width = vr.decoder().video().width() as i64;
+                let height = vr.decoder().video().height() as i64;
+                match vr.next() {
+                    Some(frame_vec) => {
+                        vr.set_data(vec![frame_vec]);
+                        Some(PyTensor(frame_tensor_from_raw_vec(
+                            &vr.get_data()[0],
+                            height,
+                            width,
+                        )))
+                    }
+                    None => None,
+                }
+            }
+            Err(_) => None,
+        }
     }
 
     fn __getitem__<'a>(&self, key: IntOrSlice) -> PyResult<PyTensor> {
@@ -152,11 +166,15 @@ impl PyVideoReader {
                 let frame_count = *vr.stream_info().frame_count();
                 let index = key.to_indices(frame_count)?;
                 let res_array = vr.get_batch(index).unwrap();
+                vr.set_data(res_array);
+                let width = vr.decoder().video().width() as i64;
+                let height = vr.decoder().video().height() as i64;
+                let tensor = video_tensor_from_raw_vec(vr.get_data(), height, width);
                 // remove first dim if key was a single int
                 if matches!(key, IntOrSlice::Int { .. }) {
-                    Ok(PyTensor(res_array.squeeze()))
+                    Ok(PyTensor(tensor.squeeze()))
                 } else {
-                    Ok(PyTensor(res_array))
+                    Ok(PyTensor(tensor))
                 }
             }
             Err(e) => Err(PyRuntimeError::new_err(format!("Lock error: {}", e))),
@@ -247,9 +265,14 @@ impl PyVideoReader {
         compression_factor: Option<f64>,
     ) -> PyResult<PyTensor> {
         match self.inner.lock() {
-            Ok(mut reader) => match reader.decode_video(start_frame, end_frame, compression_factor)
-            {
-                Ok(video) => Ok(PyTensor(video)),
+            Ok(mut vr) => match vr.decode_video(start_frame, end_frame, compression_factor) {
+                Ok(video) => {
+                    let w = vr.decoder().video().width() as i64;
+                    let h = vr.decoder().video().height() as i64;
+                    vr.set_data(video);
+                    let tensor = video_tensor_from_raw_vec(vr.get_data(), h, w);
+                    Ok(PyTensor(tensor))
+                }
                 Err(e) => Err(PyRuntimeError::new_err(format!("Error: {}", e))),
             },
             Err(e) => Err(PyRuntimeError::new_err(format!("Lock error: {}", e))),
@@ -278,9 +301,13 @@ impl PyVideoReader {
                         .await
                         .unwrap()
                 });
-                Ok(res_decode
+                let width = reader.decoder().video().width() as i64;
+                let height = reader.decoder().video().height() as i64;
+                reader.set_data(res_decode);
+                Ok(reader
+                    .get_data()
                     .into_iter()
-                    .map(|x| PyTensor(x))
+                    .map(|x| PyTensor(frame_tensor_from_raw_vec(&x, height, width)))
                     .collect::<Vec<_>>())
             }
             Err(e) => Err(PyRuntimeError::new_err(format!("Lock error: {}", e))),
@@ -357,12 +384,24 @@ impl PyVideoReader {
                 {
                     debug!("Switching to get_batch_safe!");
                     match vr.get_batch_safe(indices) {
-                        Ok(batch) => Ok(PyTensor(batch)),
+                        Ok(batch) => {
+                            let width = vr.decoder().video().width() as i64;
+                            let height = vr.decoder().video().height() as i64;
+                            vr.set_data(batch);
+                            let tensor = video_tensor_from_raw_vec(vr.get_data(), height, width);
+                            Ok(PyTensor(tensor))
+                        }
                         Err(e) => Err(PyRuntimeError::new_err(format!("Error: {}", e))),
                     }
                 } else {
                     match vr.get_batch(indices) {
-                        Ok(batch) => Ok(PyTensor(batch)),
+                        Ok(batch) => {
+                            let width = vr.decoder().video().width() as i64;
+                            let height = vr.decoder().video().height() as i64;
+                            vr.set_data(batch);
+                            let tensor = video_tensor_from_raw_vec(vr.get_data(), height, width);
+                            Ok(PyTensor(tensor))
+                        }
                         Err(e) => Err(PyRuntimeError::new_err(format!("Error: {}", e))),
                     }
                 }
