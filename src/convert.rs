@@ -260,24 +260,32 @@ pub fn get_colorrange(color_range: &str) -> YuvRange {
 
 /// Convert RGB video (N, H, W, C) to Grayscale video (N, H, W).
 /// Returns a 3D ndarray with shape (N, H, W).
-pub fn rgb2gray(frames: Array4<u8>) -> Array3<u8> {
+pub fn rgb2gray_nd(frames: Array4<u8>) -> Array3<u8> {
     let mut gray = Vec::new();
     frames
         .axis_iter(Axis(0))
         .into_par_iter()
-        .map(rgb2gray_2d)
+        .map(rgb2gray_2d_nd)
         .collect_into_vec(&mut gray);
     let views: Vec<_> = gray.iter().map(|x| x.view()).collect();
     stack(Axis(0), &views[..]).unwrap()
 }
 
 /// Convert RGB Frame (H, W, C) to grayscale (H, W).
-fn rgb2gray_2d(frames: ArrayView3<u8>) -> Array2<u8> {
+fn rgb2gray_2d_nd(frames: ArrayView3<u8>) -> Array2<u8> {
     frames.map_axis(Axis(2), |pix| {
-        (0.2125 * pix[0] as f32 + 0.7154 * pix[1] as f32 + 0.0721 * pix[2] as f32)
+        (0.2989 * pix[0] as f32 + 0.5870 * pix[1] as f32 + 0.1140 * pix[2] as f32)
             .round()
             .clamp(0.0, 255.0) as u8
     })
+}
+
+/// Convert 4D torch tensor from RGB (N, H, W, C) to grayscale (N, H, W)
+pub fn rgb2gray_tch(frames: Tensor) -> Tensor {
+    // we use same coefs as torchvision, tensorflow and opencv
+    let rgb_coef = Tensor::from_slice(&[0.2989, 0.5870, 0.1140]).reshape([1, 1, 1, 3]);
+    let gray = frames.multiply(&rgb_coef);
+    gray.sum_dim_intlist(vec![3_i64], false, Kind::Uint8)
 }
 
 #[cfg(test)]
@@ -292,7 +300,7 @@ mod tests {
             [[[128, 128, 128], [0, 0, 0]], [[255, 0, 255], [0, 255, 255]]],
         );
         let expected = arr3(&[[[54, 182], [18, 255]], [[128, 0], [73, 201]]]);
-        let result = rgb2gray(input);
+        let result = rgb2gray_nd(input);
         assert_eq!(result, expected);
     }
 
@@ -300,7 +308,7 @@ mod tests {
     fn test_rgb2gray_2d() {
         let input = arr3(&[[[255, 0, 0], [0, 255, 0]], [[0, 0, 255], [255, 255, 255]]]);
         let expected = arr2(&[[54, 182], [18, 255]]);
-        let result = rgb2gray_2d(input.view());
+        let result = rgb2gray_2d_nd(input.view());
         assert_eq!(result, expected);
     }
 

@@ -15,9 +15,7 @@ use crate::hwaccel::{HardwareAccelerationContext, HardwareAccelerationDeviceType
 use crate::info::{
     collect_video_metadata, extract_video_params, get_frame_count, get_resized_dim, StreamInfo,
 };
-use crate::utils::{insert_frame, FrameArray, VideoArray, HWACCEL_PIXEL_FORMAT};
-use ndarray::{s, Array, ArrayViewMut3};
-use tch::{Device, Kind, Tensor};
+use crate::utils::{RawFrame, RawVideo, HWACCEL_PIXEL_FORMAT};
 use tokio::task;
 
 pub fn get_init_context(
@@ -74,7 +72,7 @@ pub struct VideoReader {
     n_fails: usize,
     decoder: VideoDecoder,
     draining: bool,
-    data: Vec<Vec<u8>>,
+    data: RawVideo,
 }
 
 unsafe impl Send for VideoReader {}
@@ -86,10 +84,10 @@ impl VideoReader {
     pub fn stream_info(&self) -> &StreamInfo {
         &self.stream_info
     }
-    pub fn set_data(&mut self, data: Vec<Vec<u8>>) {
+    pub fn set_data(&mut self, data: RawVideo) {
         self.data = data;
     }
-    pub fn get_data(&self) -> &[Vec<u8>] {
+    pub fn get_data(&self) -> &[RawFrame] {
         &self.data
     }
     /// Create a new VideoReader instance
@@ -183,8 +181,6 @@ impl VideoReader {
             end_frame,
             *self.stream_info.frame_count(),
             compression_factor,
-            self.decoder.height,
-            self.decoder.width,
         );
         let first_index = start_frame.unwrap_or(0);
 
@@ -211,7 +207,7 @@ impl VideoReader {
         Ok((reducer, max_idx))
     }
 
-    pub fn decode_next(&mut self) -> Result<Vec<u8>, ffmpeg::Error> {
+    pub fn decode_next(&mut self) -> Result<RawFrame, ffmpeg::Error> {
         loop {
             match self.ictx.packets().next() {
                 Some((stream, packet)) => {
@@ -247,10 +243,10 @@ impl VideoReader {
         start_frame: Option<usize>,
         end_frame: Option<usize>,
         compression_factor: Option<f64>,
-    ) -> Result<Vec<Vec<u8>>, ffmpeg::Error> {
+    ) -> Result<RawVideo, ffmpeg::Error> {
         let (mut reducer, max_idx) =
             self.decoder_start(start_frame, end_frame, compression_factor)?;
-        let mut frame_vec: Vec<Vec<u8>> = Vec::new();
+        let mut frame_vec: RawVideo = Vec::new();
         for (stream, packet) in self.ictx.packets() {
             if reducer.get_frame_index() > max_idx {
                 break;
@@ -302,14 +298,12 @@ impl VideoReader {
         start_frame: Option<usize>,
         end_frame: Option<usize>,
         compression_factor: Option<f64>,
-    ) -> Result<Vec<Vec<u8>>, ffmpeg::Error> {
+    ) -> Result<RawVideo, ffmpeg::Error> {
         let (reducer, start_frame, _) = VideoReducer::build(
             start_frame,
             end_frame,
             *self.stream_info.frame_count(),
             compression_factor,
-            self.decoder.height,
-            self.decoder.width,
         );
         let first_index = start_frame.unwrap_or(0);
 
@@ -414,7 +408,7 @@ impl VideoReader {
     /// Safely get the batch of frames from the video by iterating over all frames and decoding
     /// only the ones we need. This can be more accurate when the video's metadata is not reliable,
     /// or when the video has B-frames.
-    pub fn get_batch_safe(&mut self, indices: Vec<usize>) -> Result<Vec<Vec<u8>>, ffmpeg::Error> {
+    pub fn get_batch_safe(&mut self, indices: Vec<usize>) -> Result<RawVideo, ffmpeg::Error> {
         let first_index = indices.iter().min().unwrap_or(&0);
         let max_index = self.stream_info.frame_count() - 1;
         let last_index = indices.iter().max().unwrap_or(&max_index);
@@ -423,8 +417,6 @@ impl VideoReader {
             Some(*last_index),
             *self.stream_info.frame_count(),
             None,
-            self.decoder.height,
-            self.decoder.width,
         );
 
         // make sure we are at the begining of the stream
@@ -438,7 +430,7 @@ impl VideoReader {
             self.seek_frame(&key_pos, &frame_duration)?;
             reducer.set_frame_index(self.curr_frame);
         }
-        let mut frame_map: HashMap<usize, Vec<u8>> = HashMap::new();
+        let mut frame_map: HashMap<usize, RawFrame> = HashMap::new();
 
         for (stream, packet) in self.ictx.packets() {
             if stream.index() == self.stream_index {
@@ -463,7 +455,7 @@ impl VideoReader {
         //     .enumerate()
         //     .filter_map(|(_i, idx)| frame_map.get(&idx))
         //     .collect::<Vec<_>>();
-        let mut frame_batch: Vec<Vec<u8>> = Vec::with_capacity(indices.len());
+        let mut frame_batch: RawVideo = Vec::with_capacity(indices.len());
         for idx in indices {
             if let Some(frame) = frame_map.get(&idx) {
                 frame_batch.push(frame.to_vec());
@@ -477,7 +469,7 @@ impl VideoReader {
     /// Get the batch of frames from the video by seeking to the closest keyframe and skipping
     /// the frames until we reach the desired frame index. Heavily inspired by the implementation
     /// from decord library: https://github.com/dmlc/decord
-    pub fn get_batch(&mut self, indices: Vec<usize>) -> Result<Vec<Vec<u8>>, ffmpeg::Error> {
+    pub fn get_batch(&mut self, indices: Vec<usize>) -> Result<RawVideo, ffmpeg::Error> {
         // frame rate
         let fps = self.decoder.fps;
         // duration of a frame in micro seconds
@@ -486,7 +478,7 @@ impl VideoReader {
         // make sure we are at the begining of the stream
         self.seek_to_start()?;
 
-        let mut frame_vec: Vec<Vec<u8>> = Vec::new();
+        let mut frame_vec: RawVideo = Vec::new();
 
         for frame_index in indices.into_iter() {
             self.n_fails = 0;
@@ -502,7 +494,7 @@ impl VideoReader {
         &mut self,
         frame_index: usize,
         frame_duration: &usize,
-    ) -> Result<Vec<u8>, ffmpeg::Error> {
+    ) -> Result<RawFrame, ffmpeg::Error> {
         let key_pos = self.locate_keyframes(&frame_index);
         debug!("    - Key pos: {}", key_pos);
         let curr_key_pos = self.locate_keyframes(&self.curr_frame);
@@ -568,7 +560,7 @@ impl VideoReader {
         &mut self,
         num: usize,
         frame_index: &usize,
-    ) -> Result<Vec<u8>, ffmpeg::Error> {
+    ) -> Result<RawFrame, ffmpeg::Error> {
         let num_skip = num.min(self.stream_info.frame_count() - 1);
         debug!(
             "will skip {} frames, from current frame:{}",
@@ -604,7 +596,7 @@ impl VideoReader {
     }
 
     /// Get frame at `frame_index` when there is no more packets to iterate
-    pub fn get_frame_after_eof(&mut self, frame_index: &usize) -> Result<Vec<u8>, ffmpeg::Error> {
+    pub fn get_frame_after_eof(&mut self, frame_index: &usize) -> Result<RawFrame, ffmpeg::Error> {
         self.decoder.video.send_eof()?;
         let (rgb_frame, _counter) = self.get_frame(frame_index);
         if let Some(frame) = rgb_frame {
@@ -614,10 +606,10 @@ impl VideoReader {
     }
 
     /// Get a single frame at `frame_index`
-    pub fn get_frame(&mut self, frame_index: &usize) -> (Option<Vec<u8>>, i32) {
+    pub fn get_frame(&mut self, frame_index: &usize) -> (Option<RawFrame>, i32) {
         let mut decoded = Video::empty();
         let mut counter = 0;
-        let mut rgb_frame: Option<Vec<u8>> = None;
+        let mut rgb_frame: Option<RawFrame> = None;
         while self.decoder.video.receive_frame(&mut decoded).is_ok() {
             if &self.curr_frame == frame_index {
                 debug!("Decoding frame {}", frame_index);
@@ -685,7 +677,7 @@ impl VideoReader {
 }
 
 impl Iterator for VideoReader {
-    type Item = Vec<u8>;
+    type Item = RawFrame;
     fn next(&mut self) -> Option<Self::Item> {
         self.decode_next().ok()
     }

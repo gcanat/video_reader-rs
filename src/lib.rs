@@ -10,7 +10,7 @@ use numpy::PyArray;
 mod decoder;
 mod reader;
 mod utils;
-// use convert::rgb2gray;
+use convert::rgb2gray_tch;
 use convert::{frame_tensor_from_raw_vec, video_tensor_from_raw_vec};
 use decoder::DecoderConfig;
 use log::debug;
@@ -139,7 +139,7 @@ impl PyVideoReader {
     fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
         slf
     }
-    fn __next__<'a>(slf: PyRefMut<'_, Self>) -> Option<PyTensor> {
+    fn __next__(slf: PyRefMut<'_, Self>) -> Option<PyTensor> {
         match slf.inner.lock() {
             Ok(mut vr) => {
                 let width = vr.decoder().video().width() as i64;
@@ -160,7 +160,7 @@ impl PyVideoReader {
         }
     }
 
-    fn __getitem__<'a>(&self, key: IntOrSlice) -> PyResult<PyTensor> {
+    fn __getitem__(&self, key: IntOrSlice) -> PyResult<PyTensor> {
         match self.inner.lock() {
             Ok(mut vr) => {
                 let frame_count = *vr.stream_info().frame_count();
@@ -258,8 +258,8 @@ impl PyVideoReader {
     /// * `compression_factor` - optional temporal compression, eg if set to 0.25, will
     /// decode 1 frame out of 4. If None, will default to 1.0, ie decoding all frames.
     /// * returns a numpy array of shape (N, H, W, C), where N is the number of frames
-    fn decode<'a>(
-        &'a self,
+    fn decode(
+        &self,
         start_frame: Option<usize>,
         end_frame: Option<usize>,
         compression_factor: Option<f64>,
@@ -287,8 +287,8 @@ impl PyVideoReader {
     /// * `compression_factor` - optional temporal compression, eg if set to 0.25, will
     /// decode 1 frame out of 4. If None, will default to 1.0, ie decoding all frames.
     /// * returns a list of numpy array, each ndarray being a frame.
-    fn decode_fast<'a>(
-        &'a self,
+    fn decode_fast(
+        &self,
         start_frame: Option<usize>,
         end_frame: Option<usize>,
         compression_factor: Option<f64>,
@@ -306,47 +306,50 @@ impl PyVideoReader {
                 reader.set_data(res_decode);
                 Ok(reader
                     .get_data()
-                    .into_iter()
-                    .map(|x| PyTensor(frame_tensor_from_raw_vec(&x, height, width)))
+                    .iter()
+                    .map(|x| PyTensor(frame_tensor_from_raw_vec(x, height, width)))
                     .collect::<Vec<_>>())
             }
             Err(e) => Err(PyRuntimeError::new_err(format!("Lock error: {}", e))),
         }
     }
 
-    // #[pyo3(signature = (start_frame=None, end_frame=None, compression_factor=None))]
+    #[pyo3(signature = (start_frame=None, end_frame=None, compression_factor=None))]
     /// Decode the video, returning grayscale frames.
     /// * `start_frame` - optional starting index (will start decoding from this frame)
     /// * `end_frame` - optional last frame index (will stop decoding after this frame)
     /// * `compression_factor` - optional temporal compression, eg if set to 0.25, will
     /// decode 1 frame out of 4. If None, will default to 1.0, ie decoding all frames.
     /// * returns a numpy array of shape (N, H, W), where N is the number of frames.
-    // fn decode_gray<'a>(
-    //     &'a self,
-    //     py: Python<'a>,
-    //     start_frame: Option<usize>,
-    //     end_frame: Option<usize>,
-    //     compression_factor: Option<f64>,
-    // ) -> PyResult<Bound<'a, PyArray<u8, Dim<[usize; 3]>>>> {
-    //     match self.inner.lock() {
-    //         Ok(mut reader) => match reader.decode_video(start_frame, end_frame, compression_factor)
-    //         {
-    //             Ok(video) => {
-    //                 let gray_video = rgb2gray(video);
-    //                 Ok(gray_video.into_pyarray(py))
-    //             }
-    //             Err(e) => Err(PyRuntimeError::new_err(format!("Error: {}", e))),
-    //         },
-    //         Err(e) => Err(PyRuntimeError::new_err(format!("Lock error: {}", e))),
-    //     }
-    // }
+    fn decode_gray(
+        &self,
+        start_frame: Option<usize>,
+        end_frame: Option<usize>,
+        compression_factor: Option<f64>,
+    ) -> PyResult<PyTensor> {
+        match self.inner.lock() {
+            Ok(mut reader) => match reader.decode_video(start_frame, end_frame, compression_factor)
+            {
+                Ok(video) => {
+                    let w = reader.decoder().video().width() as i64;
+                    let h = reader.decoder().video().height() as i64;
+                    reader.set_data(video);
+                    let tensor = video_tensor_from_raw_vec(reader.get_data(), h, w);
+                    let gray_video = rgb2gray_tch(tensor);
+                    Ok(PyTensor(gray_video))
+                }
+                Err(e) => Err(PyRuntimeError::new_err(format!("Error: {}", e))),
+            },
+            Err(e) => Err(PyRuntimeError::new_err(format!("Lock error: {}", e))),
+        }
+    }
 
     #[pyo3(signature = (indices, with_fallback=false))]
     /// Decodes the frames in the video corresponding to the indices in `indices`.
     /// * `indices` - list of frame index to decode.
     /// * `with_fallback` - whether to fallback to safe decoding when video has weird
     /// timestamps or B-frames.
-    fn get_batch<'a>(&'a self, indices: Vec<usize>, with_fallback: bool) -> PyResult<PyTensor> {
+    fn get_batch(&self, indices: Vec<usize>, with_fallback: bool) -> PyResult<PyTensor> {
         match self.inner.lock() {
             Ok(mut vr) => {
                 // let video: Array4<u8>;
