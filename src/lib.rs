@@ -1,4 +1,3 @@
-use numpy::ndarray::{Dim, IxDyn};
 mod convert;
 mod ffi_hwaccel;
 use std::str::FromStr;
@@ -6,7 +5,6 @@ mod filter;
 mod hwaccel;
 mod info;
 use hwaccel::HardwareAccelerationDeviceType;
-use numpy::PyArray;
 mod decoder;
 mod reader;
 mod utils;
@@ -14,7 +12,6 @@ use convert::rgb2gray_tch;
 use convert::{frame_tensor_from_raw_vec, video_tensor_from_raw_vec};
 use decoder::DecoderConfig;
 use log::debug;
-use ndarray::Array;
 use pyo3::{
     exceptions::PyRuntimeError,
     pyclass, pymethods, pymodule,
@@ -26,6 +23,7 @@ use pyo3::{
 use pyo3_tch::PyTensor;
 use reader::VideoReader;
 use std::sync::Mutex;
+use tch::{Device, Kind, Tensor};
 
 use once_cell::sync::Lazy;
 use tokio::runtime::{self, Runtime};
@@ -36,9 +34,6 @@ static RUNTIME: Lazy<Runtime> = Lazy::new(|| {
         .build()
         .unwrap()
 });
-
-type Frame = PyArray<u8, Dim<[usize; 3]>>;
-type FrameOrVid = PyArray<u8, IxDyn>;
 
 #[derive(FromPyObject)]
 enum IntOrSlice<'py> {
@@ -53,38 +48,50 @@ impl<'py> IntOrSlice<'py> {
         match self {
             IntOrSlice::Int(index) => {
                 let pos_index = if *index < 0 {
-                    (frame_count as i32 + index) as usize
+                    frame_count as i32 + index
                 } else {
-                    *index as usize
+                    *index as i32
                 };
-                Ok(vec![pos_index])
+                Ok(vec![pos_index as usize])
             }
             IntOrSlice::Slice(slice) => {
-                let start: i32 = slice.getattr("start")?.extract().unwrap_or(0_i32);
-                let stop: i32 = slice
+                let start: i64 = slice.getattr("start")?.extract().unwrap_or(0_i64);
+                let stop: i64 = slice
                     .getattr("stop")?
                     .extract()
-                    .unwrap_or(frame_count as i32);
-                let step: i32 = slice.getattr("step")?.extract().unwrap_or(1_i32);
+                    .unwrap_or(frame_count as i64);
+                let step: i64 = slice.getattr("step")?.extract().unwrap_or(1_i64);
                 if ((step < 0) && (stop - start > 0)) || ((step > 0) && (stop - start < 0)) {
                     return Err(PyRuntimeError::new_err(
                         "Incompatible values in slice. step and (stop - start) must have the same sign.",
                     ));
                 }
-                let indices = Array::range(start as f32, stop as f32, step as f32);
-                let indices = indices.mapv(|x| x as usize);
-                Ok(indices.to_vec())
+                let indices: Tensor = Tensor::arange_start_step(
+                    start as i64,
+                    stop as i64,
+                    step as i64,
+                    (Kind::Int64, Device::Cpu),
+                );
+                let indice_list: Vec<usize> = indices
+                    .iter::<i64>()
+                    .unwrap()
+                    .map(|v: i64| v as usize)
+                    .collect();
+                Ok(indice_list)
             }
-            IntOrSlice::IntList(indices) => Ok(indices
-                .iter()
-                .map(|x| {
-                    if x < &0 {
-                        (frame_count as i32 + x) as usize
-                    } else {
-                        *x as usize
-                    }
-                })
-                .collect::<Vec<_>>()),
+            IntOrSlice::IntList(indices) => {
+                let pos_indices = indices
+                    .iter()
+                    .map(|x| {
+                        if x < &0 {
+                            (frame_count as i32 + x) as usize
+                        } else {
+                            *x as usize
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                Ok(pos_indices)
+            }
         }
     }
 }
@@ -286,7 +293,7 @@ impl PyVideoReader {
     /// * `end_frame` - optional last frame index (will stop decoding after this frame)
     /// * `compression_factor` - optional temporal compression, eg if set to 0.25, will
     /// decode 1 frame out of 4. If None, will default to 1.0, ie decoding all frames.
-    /// * returns a list of numpy array, each ndarray being a frame.
+    /// * returns a list of torch tensor, each tensor being a frame.
     fn decode_fast(
         &self,
         start_frame: Option<usize>,
@@ -352,7 +359,6 @@ impl PyVideoReader {
     fn get_batch(&self, indices: Vec<usize>, with_fallback: bool) -> PyResult<PyTensor> {
         match self.inner.lock() {
             Ok(mut vr) => {
-                // let video: Array4<u8>;
                 let start_time: i32 = vr
                     .decoder()
                     .video_info()

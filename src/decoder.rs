@@ -1,12 +1,12 @@
-use crate::convert::{convert_nv12_to_torch_tensor, convert_yuv_to_torch_tensor};
+use crate::convert::{convert_nv12_to_rgb, convert_yuv_to_rgb};
 use crate::convert::{get_colorrange, get_colorspace};
 use crate::hwaccel::HardwareAccelerationDeviceType;
 use crate::utils::RawFrame;
 use ffmpeg::filter;
 use ffmpeg::util::frame::video::Video;
 use ffmpeg_next as ffmpeg;
-use ndarray::Array;
 use std::collections::HashMap;
+use tch::{Device, Kind, Tensor};
 use yuv::{YuvRange, YuvStandardMatrix};
 
 /// Struct used when we want to decode the whole video with a compression_factor
@@ -34,9 +34,6 @@ impl VideoReducer {
     pub fn set_frame_index(&mut self, v: usize) {
         self.frame_index = v;
     }
-    pub fn get_idx_counter(&self) -> usize {
-        self.idx_counter
-    }
     pub fn incr_idx_counter(&mut self, v: usize) {
         self.idx_counter += v;
     }
@@ -58,12 +55,21 @@ impl VideoReducer {
         let start = start_frame.unwrap_or(0);
         let end = end_frame.unwrap_or(frame_count).min(frame_count);
 
-        let n_frames = ((end - start) as f64 * compression_factor.unwrap_or(1.0)).round() as usize;
+        let n_frames = ((end - start) as f64 * compression_factor.unwrap_or(1.0)).round() as i64;
 
-        let indices = Array::linspace(start as f64, end as f64 - 1., n_frames)
-            .iter()
-            .map(|x| x.round() as usize)
-            .collect::<Vec<_>>();
+        // create the indices with torch linspace
+        let tch_indices: Tensor = Tensor::linspace(
+            start as f64,
+            end as f64 - 1.,
+            n_frames,
+            (Kind::Float, Device::Cpu),
+        )
+        .round();
+        // copy tensor data to a vec
+        let mut indice_vec: Vec<f64> = Vec::with_capacity(n_frames as usize);
+        tch_indices.copy_data(&mut indice_vec, n_frames as usize);
+        // convert vec values to usize
+        let indices: Vec<usize> = indice_vec.into_iter().map(|v| v as usize).collect();
 
         (
             Some(VideoReducer::new(indices, 0, 0)),
@@ -127,8 +133,6 @@ impl DecoderConfig {
 /// Struct responsible for doing the actual decoding
 pub struct VideoDecoder {
     pub video: ffmpeg::decoder::Video,
-    pub height: u32,
-    pub width: u32,
     pub fps: f64,
     pub video_info: HashMap<&'static str, String>,
     pub is_hwaccel: bool,
@@ -143,7 +147,6 @@ impl VideoDecoder {
     pub fn new(
         video: ffmpeg::decoder::Video,
         height: u32,
-        width: u32,
         fps: f64,
         video_info: HashMap<&'static str, String>,
         is_hwaccel: bool,
@@ -155,8 +158,6 @@ impl VideoDecoder {
         let color_range = get_colorrange(crange_string);
         VideoDecoder {
             video,
-            height,
-            width,
             fps,
             video_info,
             is_hwaccel,
@@ -199,9 +200,9 @@ impl VideoDecoder {
             .is_ok()
         {
             let raw_frame: RawFrame = if self.is_hwaccel {
-                convert_nv12_to_torch_tensor(yuv_frame, cspace, crange)
+                convert_nv12_to_rgb(yuv_frame, cspace, crange)
             } else {
-                convert_yuv_to_torch_tensor(yuv_frame, cspace, crange)
+                convert_yuv_to_rgb(yuv_frame, cspace, crange)
             };
             return Some(raw_frame);
         }

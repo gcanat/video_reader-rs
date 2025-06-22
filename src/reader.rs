@@ -8,7 +8,7 @@ use log::debug;
 use std::collections::HashMap;
 use std::path::Path;
 
-use crate::convert::{convert_nv12_to_torch_tensor, convert_yuv_to_torch_tensor};
+use crate::convert::{convert_nv12_to_rgb, convert_yuv_to_rgb};
 use crate::decoder::{DecoderConfig, VideoDecoder, VideoReducer};
 use crate::filter::{create_filter_spec, create_filters, FilterConfig};
 use crate::hwaccel::{HardwareAccelerationContext, HardwareAccelerationDeviceType};
@@ -166,7 +166,7 @@ impl VideoReader {
         let graph = create_filters(&mut video, hw_format, filter_cfg)?;
 
         Ok(VideoDecoder::new(
-            video, height, width, fps, video_info, is_hwaccel, graph,
+            video, height, fps, video_info, is_hwaccel, graph,
         ))
     }
 
@@ -356,12 +356,11 @@ impl VideoReader {
                         let crange = self.decoder.color_range;
                         if self.decoder.is_hwaccel {
                             tasks.push(task::spawn(async move {
-                                // convert_nv12_to_ndarray_rgb24(rgb_frame, cspace, crange)
-                                convert_nv12_to_torch_tensor(rgb_frame, cspace, crange)
+                                convert_nv12_to_rgb(rgb_frame, cspace, crange)
                             }));
                         } else {
                             tasks.push(task::spawn(async move {
-                                convert_yuv_to_torch_tensor(rgb_frame, cspace, crange)
+                                convert_yuv_to_rgb(rgb_frame, cspace, crange)
                             }));
                         }
                     }
