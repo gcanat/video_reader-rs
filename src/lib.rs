@@ -23,7 +23,6 @@ use pyo3::{
 use pyo3_tch::PyTensor;
 use reader::VideoReader;
 use std::sync::Mutex;
-use tch::{Device, Kind, Tensor};
 
 use once_cell::sync::Lazy;
 use tokio::runtime::{self, Runtime};
@@ -66,16 +65,8 @@ impl<'py> IntOrSlice<'py> {
                         "Incompatible values in slice. step and (stop - start) must have the same sign.",
                     ));
                 }
-                let indices: Tensor = Tensor::arange_start_step(
-                    start as i64,
-                    stop as i64,
-                    step as i64,
-                    (Kind::Int64, Device::Cpu),
-                );
-                let indice_list: Vec<usize> = indices
-                    .iter::<i64>()
-                    .unwrap()
-                    .map(|v: i64| v as usize)
+                let indice_list: Vec<usize> = (start as usize..stop as usize)
+                    .step_by(step as usize)
                     .collect();
                 Ok(indice_list)
             }
@@ -153,9 +144,9 @@ impl PyVideoReader {
                 let height = vr.decoder().video().height() as i64;
                 match vr.next() {
                     Some(frame_vec) => {
-                        vr.set_data(vec![frame_vec]);
+                        vr.push_frame(frame_vec);
                         Some(PyTensor(frame_tensor_from_raw_vec(
-                            &vr.get_data()[0],
+                            vr.get_last_frame().unwrap(),
                             height,
                             width,
                         )))
@@ -299,7 +290,7 @@ impl PyVideoReader {
         start_frame: Option<usize>,
         end_frame: Option<usize>,
         compression_factor: Option<f64>,
-    ) -> PyResult<Vec<PyTensor>> {
+    ) -> PyResult<PyTensor> {
         match self.inner.lock() {
             Ok(mut reader) => {
                 let res_decode = RUNTIME.block_on(async {
@@ -311,11 +302,16 @@ impl PyVideoReader {
                 let width = reader.decoder().video().width() as i64;
                 let height = reader.decoder().video().height() as i64;
                 reader.set_data(res_decode);
-                Ok(reader
-                    .get_data()
-                    .iter()
-                    .map(|x| PyTensor(frame_tensor_from_raw_vec(x, height, width)))
-                    .collect::<Vec<_>>())
+                // Ok(reader
+                //     .get_data()
+                //     .iter()
+                //     .map(|x| PyTensor(frame_tensor_from_raw_vec(x, height, width)))
+                //     .collect::<Vec<_>>())
+                Ok(PyTensor(video_tensor_from_raw_vec(
+                    reader.get_data(),
+                    height,
+                    width,
+                )))
             }
             Err(e) => Err(PyRuntimeError::new_err(format!("Lock error: {}", e))),
         }

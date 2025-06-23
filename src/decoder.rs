@@ -6,7 +6,6 @@ use ffmpeg::filter;
 use ffmpeg::util::frame::video::Video;
 use ffmpeg_next as ffmpeg;
 use std::collections::HashMap;
-use tch::{Device, Kind, Tensor};
 use yuv::{YuvRange, YuvStandardMatrix};
 
 /// Struct used when we want to decode the whole video with a compression_factor
@@ -55,21 +54,9 @@ impl VideoReducer {
         let start = start_frame.unwrap_or(0);
         let end = end_frame.unwrap_or(frame_count).min(frame_count);
 
-        let n_frames = ((end - start) as f64 * compression_factor.unwrap_or(1.0)).round() as i64;
-
-        // create the indices with torch linspace
-        let tch_indices: Tensor = Tensor::linspace(
-            start as f64,
-            end as f64 - 1.,
-            n_frames,
-            (Kind::Float, Device::Cpu),
-        )
-        .round();
-        // copy tensor data to a vec
-        let mut indice_vec: Vec<f64> = Vec::with_capacity(n_frames as usize);
-        tch_indices.copy_data(&mut indice_vec, n_frames as usize);
-        // convert vec values to usize
-        let indices: Vec<usize> = indice_vec.into_iter().map(|v| v as usize).collect();
+        let steps = (1. / compression_factor.unwrap_or(1.0)).round() as usize;
+        // create the list indices
+        let indices: Vec<usize> = (start..end).step_by(steps).collect();
 
         (
             Some(VideoReducer::new(indices, 0, 0)),

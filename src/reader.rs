@@ -90,6 +90,17 @@ impl VideoReader {
     pub fn get_data(&self) -> &[RawFrame] {
         &self.data
     }
+    pub fn push_frame(&mut self, frame: RawFrame) {
+        self.data.push(frame);
+    }
+    pub fn get_last_frame(&self) -> Option<&RawFrame> {
+        let n = self.data.len();
+        if n > 0 {
+            Some(&self.data[n - 1])
+        } else {
+            None
+        }
+    }
     /// Create a new VideoReader instance
     /// * `filename` - Path to the video file.
     /// * `decoder_config` - Config for the decoder see: [`DecoderConfig`]
@@ -246,6 +257,7 @@ impl VideoReader {
     ) -> Result<RawVideo, ffmpeg::Error> {
         let (mut reducer, max_idx) =
             self.decoder_start(start_frame, end_frame, compression_factor)?;
+        self.seek_to_start()?;
         let mut frame_vec: RawVideo = Vec::new();
         for (stream, packet) in self.ictx.packets() {
             if reducer.get_frame_index() > max_idx {
