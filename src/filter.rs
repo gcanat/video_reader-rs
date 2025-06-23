@@ -134,10 +134,12 @@ pub fn create_filter_spec(
                     return Err(ffmpeg::error::Error::DecoderNotFound);
                 }
                 filter_spec = format!(
-                    "scale_cuda=w={}:h={}:passthrough=0,hwdownload,format={}",
+                    "scale_cuda=w={}:h={}:passthrough=0,format={}",
                     width,
                     height,
-                    hwaccel_fmt.descriptor().unwrap().name(),
+                    // hwaccel_fmt.descriptor().unwrap().name(),
+                    // let ffmpeg handle conversion to RGB24 on the GPU.
+                    AvPixel::RGB24.descriptor().unwrap().name(),
                 );
                 codec_context_get_hw_frames_ctx(video, hw_format.unwrap(), hwaccel_fmt)?;
             }
