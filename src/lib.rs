@@ -290,7 +290,7 @@ impl PyVideoReader {
         start_frame: Option<usize>,
         end_frame: Option<usize>,
         compression_factor: Option<f64>,
-    ) -> PyResult<PyTensor> {
+    ) -> PyResult<Vec<PyTensor>> {
         match self.inner.lock() {
             Ok(mut reader) => {
                 let res_decode = RUNTIME.block_on(async {
@@ -302,16 +302,11 @@ impl PyVideoReader {
                 let width = reader.decoder().video().width() as i64;
                 let height = reader.decoder().video().height() as i64;
                 reader.set_data(res_decode);
-                // Ok(reader
-                //     .get_data()
-                //     .iter()
-                //     .map(|x| PyTensor(frame_tensor_from_raw_vec(x, height, width)))
-                //     .collect::<Vec<_>>())
-                Ok(PyTensor(video_tensor_from_raw_vec(
-                    reader.get_data(),
-                    height,
-                    width,
-                )))
+                Ok(reader
+                    .get_data()
+                    .iter()
+                    .map(|x| PyTensor(frame_tensor_from_raw_vec(x, height, width)))
+                    .collect::<Vec<_>>())
             }
             Err(e) => Err(PyRuntimeError::new_err(format!("Lock error: {}", e))),
         }
