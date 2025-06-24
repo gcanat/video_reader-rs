@@ -49,7 +49,7 @@ impl<'py> IntOrSlice<'py> {
                 let pos_index = if *index < 0 {
                     frame_count as i32 + index
                 } else {
-                    *index as i32
+                    *index
                 };
                 Ok(vec![pos_index as usize])
             }
@@ -137,6 +137,7 @@ impl PyVideoReader {
     fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
         slf
     }
+
     fn __next__(slf: PyRefMut<'_, Self>) -> Option<PyTensor> {
         match slf.inner.lock() {
             Ok(mut vr) => {
@@ -144,7 +145,7 @@ impl PyVideoReader {
                 let height = vr.decoder().video().height() as i64;
                 match vr.next() {
                     Some(frame_vec) => {
-                        vr.push_frame(frame_vec);
+                        vr.set_data(vec![frame_vec]);
                         Some(PyTensor(frame_tensor_from_raw_vec(
                             vr.get_last_frame().unwrap(),
                             height,

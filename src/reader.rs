@@ -81,18 +81,22 @@ impl VideoReader {
     pub fn decoder(&self) -> &VideoDecoder {
         &self.decoder
     }
+
     pub fn stream_info(&self) -> &StreamInfo {
         &self.stream_info
     }
+
+    #[inline(always)]
     pub fn set_data(&mut self, data: RawVideo) {
         self.data = data;
     }
+
+    #[inline(always)]
     pub fn get_data(&self) -> &[RawFrame] {
         &self.data
     }
-    pub fn push_frame(&mut self, frame: RawFrame) {
-        self.data.push(frame);
-    }
+
+    #[inline(always)]
     pub fn get_last_frame(&self) -> Option<&RawFrame> {
         let n = self.data.len();
         if n > 0 {
@@ -101,6 +105,7 @@ impl VideoReader {
             None
         }
     }
+
     /// Create a new VideoReader instance
     /// * `filename` - Path to the video file.
     /// * `decoder_config` - Config for the decoder see: [`DecoderConfig`]
@@ -115,6 +120,7 @@ impl VideoReader {
         let decoder = Self::get_decoder(&ictx, decoder_config)?;
         debug!("frame_count: {}", stream_info.frame_count());
         debug!("key frames: {:?}", stream_info.key_frames());
+        let n = *stream_info.frame_count();
         Ok(VideoReader {
             ictx,
             stream_index,
@@ -124,7 +130,7 @@ impl VideoReader {
             n_fails: 0,
             decoder,
             draining: false,
-            data: Vec::new(),
+            data: Vec::with_capacity(n),
         })
     }
 

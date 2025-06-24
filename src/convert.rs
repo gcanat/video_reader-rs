@@ -8,9 +8,11 @@ use yuv::{
     YuvStandardMatrix,
 };
 
+#[inline(always)]
 pub fn frame_tensor_from_raw_vec(raw_vec: &[u8], h: i64, w: i64) -> Tensor {
     unsafe { Tensor::from_blob(raw_vec.as_ptr(), &[h, w, 3], &[], Kind::Uint8, Device::Cpu) }
 }
+
 pub fn video_tensor_from_raw_vec(raw_batch: &[RawFrame], h: i64, w: i64) -> Tensor {
     let tensor_vec: Vec<_> = raw_batch
         .iter()
