@@ -1,4 +1,3 @@
-use numpy::ndarray::{Dim, IxDyn};
 mod convert;
 mod ffi_hwaccel;
 use std::str::FromStr;
@@ -6,14 +5,13 @@ mod filter;
 mod hwaccel;
 mod info;
 use hwaccel::HardwareAccelerationDeviceType;
-use numpy::{IntoPyArray, PyArray};
 mod decoder;
 mod reader;
 mod utils;
-use convert::rgb2gray;
+use convert::rgb2gray_tch;
+use convert::{frame_tensor_from_raw_vec, video_tensor_from_raw_vec};
 use decoder::DecoderConfig;
 use log::debug;
-use ndarray::Array;
 use pyo3::{
     exceptions::PyRuntimeError,
     pyclass, pymethods, pymodule,
@@ -22,6 +20,7 @@ use pyo3::{
     },
     Bound, FromPyObject, PyRef, PyRefMut, PyResult, Python,
 };
+use pyo3_tch::PyTensor;
 use reader::VideoReader;
 use std::sync::Mutex;
 
@@ -34,9 +33,6 @@ static RUNTIME: Lazy<Runtime> = Lazy::new(|| {
         .build()
         .unwrap()
 });
-
-type Frame = PyArray<u8, Dim<[usize; 3]>>;
-type FrameOrVid = PyArray<u8, IxDyn>;
 
 #[derive(FromPyObject)]
 enum IntOrSlice<'py> {
@@ -51,38 +47,42 @@ impl<'py> IntOrSlice<'py> {
         match self {
             IntOrSlice::Int(index) => {
                 let pos_index = if *index < 0 {
-                    (frame_count as i32 + index) as usize
+                    frame_count as i32 + index
                 } else {
-                    *index as usize
+                    *index
                 };
-                Ok(vec![pos_index])
+                Ok(vec![pos_index as usize])
             }
             IntOrSlice::Slice(slice) => {
-                let start: i32 = slice.getattr("start")?.extract().unwrap_or(0_i32);
-                let stop: i32 = slice
+                let start: i64 = slice.getattr("start")?.extract().unwrap_or(0_i64);
+                let stop: i64 = slice
                     .getattr("stop")?
                     .extract()
-                    .unwrap_or(frame_count as i32);
-                let step: i32 = slice.getattr("step")?.extract().unwrap_or(1_i32);
+                    .unwrap_or(frame_count as i64);
+                let step: i64 = slice.getattr("step")?.extract().unwrap_or(1_i64);
                 if ((step < 0) && (stop - start > 0)) || ((step > 0) && (stop - start < 0)) {
                     return Err(PyRuntimeError::new_err(
                         "Incompatible values in slice. step and (stop - start) must have the same sign.",
                     ));
                 }
-                let indices = Array::range(start as f32, stop as f32, step as f32);
-                let indices = indices.mapv(|x| x as usize);
-                Ok(indices.to_vec())
+                let indice_list: Vec<usize> = (start as usize..stop as usize)
+                    .step_by(step as usize)
+                    .collect();
+                Ok(indice_list)
             }
-            IntOrSlice::IntList(indices) => Ok(indices
-                .iter()
-                .map(|x| {
-                    if x < &0 {
-                        (frame_count as i32 + x) as usize
-                    } else {
-                        *x as usize
-                    }
-                })
-                .collect::<Vec<_>>()),
+            IntOrSlice::IntList(indices) => {
+                let pos_indices = indices
+                    .iter()
+                    .map(|x| {
+                        if x < &0 {
+                            (frame_count as i32 + x) as usize
+                        } else {
+                            *x as usize
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                Ok(pos_indices)
+            }
         }
     }
 }
@@ -137,28 +137,43 @@ impl PyVideoReader {
     fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
         slf
     }
-    fn __next__<'a>(
-        slf: PyRefMut<'_, Self>,
-        py: Python<'a>,
-    ) -> Option<Bound<'a, PyArray<u8, Dim<[usize; 3]>>>> {
-        slf.inner
-            .lock()
-            .unwrap()
-            .next()
-            .map(|rgb_frame| rgb_frame.into_pyarray(py))
+
+    fn __next__(slf: PyRefMut<'_, Self>) -> Option<PyTensor> {
+        match slf.inner.lock() {
+            Ok(mut vr) => {
+                let width = vr.decoder().video().width() as i64;
+                let height = vr.decoder().video().height() as i64;
+                match vr.next() {
+                    Some(frame_vec) => {
+                        vr.set_data(vec![frame_vec]);
+                        Some(PyTensor(frame_tensor_from_raw_vec(
+                            vr.get_last_frame().unwrap(),
+                            height,
+                            width,
+                        )))
+                    }
+                    None => None,
+                }
+            }
+            Err(_) => None,
+        }
     }
 
-    fn __getitem__<'a>(&self, py: Python<'a>, key: IntOrSlice) -> PyResult<Bound<'a, FrameOrVid>> {
+    fn __getitem__(&self, key: IntOrSlice) -> PyResult<PyTensor> {
         match self.inner.lock() {
             Ok(mut vr) => {
                 let frame_count = *vr.stream_info().frame_count();
                 let index = key.to_indices(frame_count)?;
-                let res_array = vr.get_batch(index).unwrap().into_dyn();
+                let res_array = vr.get_batch(index).unwrap();
+                vr.set_data(res_array);
+                let width = vr.decoder().video().width() as i64;
+                let height = vr.decoder().video().height() as i64;
+                let tensor = video_tensor_from_raw_vec(vr.get_data(), height, width);
                 // remove first dim if key was a single int
                 if matches!(key, IntOrSlice::Int { .. }) {
-                    Ok(res_array.squeeze().into_pyarray(py))
+                    Ok(PyTensor(tensor.squeeze()))
                 } else {
-                    Ok(res_array.into_pyarray(py))
+                    Ok(PyTensor(tensor))
                 }
             }
             Err(e) => Err(PyRuntimeError::new_err(format!("Lock error: {}", e))),
@@ -242,17 +257,21 @@ impl PyVideoReader {
     /// * `compression_factor` - optional temporal compression, eg if set to 0.25, will
     /// decode 1 frame out of 4. If None, will default to 1.0, ie decoding all frames.
     /// * returns a numpy array of shape (N, H, W, C), where N is the number of frames
-    fn decode<'a>(
-        &'a self,
-        py: Python<'a>,
+    fn decode(
+        &self,
         start_frame: Option<usize>,
         end_frame: Option<usize>,
         compression_factor: Option<f64>,
-    ) -> PyResult<Bound<'a, PyArray<u8, Dim<[usize; 4]>>>> {
+    ) -> PyResult<PyTensor> {
         match self.inner.lock() {
-            Ok(mut reader) => match reader.decode_video(start_frame, end_frame, compression_factor)
-            {
-                Ok(video) => Ok(video.into_pyarray(py)),
+            Ok(mut vr) => match vr.decode_video(start_frame, end_frame, compression_factor) {
+                Ok(video) => {
+                    let w = vr.decoder().video().width() as i64;
+                    let h = vr.decoder().video().height() as i64;
+                    vr.set_data(video);
+                    let tensor = video_tensor_from_raw_vec(vr.get_data(), h, w);
+                    Ok(PyTensor(tensor))
+                }
                 Err(e) => Err(PyRuntimeError::new_err(format!("Error: {}", e))),
             },
             Err(e) => Err(PyRuntimeError::new_err(format!("Lock error: {}", e))),
@@ -266,14 +285,13 @@ impl PyVideoReader {
     /// * `end_frame` - optional last frame index (will stop decoding after this frame)
     /// * `compression_factor` - optional temporal compression, eg if set to 0.25, will
     /// decode 1 frame out of 4. If None, will default to 1.0, ie decoding all frames.
-    /// * returns a list of numpy array, each ndarray being a frame.
-    fn decode_fast<'a>(
-        &'a self,
-        py: Python<'a>,
+    /// * returns a list of torch tensor, each tensor being a frame.
+    fn decode_fast(
+        &self,
         start_frame: Option<usize>,
         end_frame: Option<usize>,
         compression_factor: Option<f64>,
-    ) -> PyResult<Vec<Bound<'a, Frame>>> {
+    ) -> PyResult<Vec<PyTensor>> {
         match self.inner.lock() {
             Ok(mut reader) => {
                 let res_decode = RUNTIME.block_on(async {
@@ -282,9 +300,13 @@ impl PyVideoReader {
                         .await
                         .unwrap()
                 });
-                Ok(res_decode
-                    .into_iter()
-                    .map(|x| x.into_pyarray(py))
+                let width = reader.decoder().video().width() as i64;
+                let height = reader.decoder().video().height() as i64;
+                reader.set_data(res_decode);
+                Ok(reader
+                    .get_data()
+                    .iter()
+                    .map(|x| PyTensor(frame_tensor_from_raw_vec(x, height, width)))
                     .collect::<Vec<_>>())
             }
             Err(e) => Err(PyRuntimeError::new_err(format!("Lock error: {}", e))),
@@ -298,19 +320,22 @@ impl PyVideoReader {
     /// * `compression_factor` - optional temporal compression, eg if set to 0.25, will
     /// decode 1 frame out of 4. If None, will default to 1.0, ie decoding all frames.
     /// * returns a numpy array of shape (N, H, W), where N is the number of frames.
-    fn decode_gray<'a>(
-        &'a self,
-        py: Python<'a>,
+    fn decode_gray(
+        &self,
         start_frame: Option<usize>,
         end_frame: Option<usize>,
         compression_factor: Option<f64>,
-    ) -> PyResult<Bound<'a, PyArray<u8, Dim<[usize; 3]>>>> {
+    ) -> PyResult<PyTensor> {
         match self.inner.lock() {
             Ok(mut reader) => match reader.decode_video(start_frame, end_frame, compression_factor)
             {
                 Ok(video) => {
-                    let gray_video = rgb2gray(video);
-                    Ok(gray_video.into_pyarray(py))
+                    let w = reader.decoder().video().width() as i64;
+                    let h = reader.decoder().video().height() as i64;
+                    reader.set_data(video);
+                    let tensor = video_tensor_from_raw_vec(reader.get_data(), h, w);
+                    let gray_video = rgb2gray_tch(tensor);
+                    Ok(PyTensor(gray_video))
                 }
                 Err(e) => Err(PyRuntimeError::new_err(format!("Error: {}", e))),
             },
@@ -323,15 +348,9 @@ impl PyVideoReader {
     /// * `indices` - list of frame index to decode.
     /// * `with_fallback` - whether to fallback to safe decoding when video has weird
     /// timestamps or B-frames.
-    fn get_batch<'a>(
-        &'a self,
-        py: Python<'a>,
-        indices: Vec<usize>,
-        with_fallback: bool,
-    ) -> PyResult<Bound<'a, PyArray<u8, Dim<[usize; 4]>>>> {
+    fn get_batch(&self, indices: Vec<usize>, with_fallback: bool) -> PyResult<PyTensor> {
         match self.inner.lock() {
             Ok(mut vr) => {
-                // let video: Array4<u8>;
                 let start_time: i32 = vr
                     .decoder()
                     .video_info()
@@ -366,12 +385,24 @@ impl PyVideoReader {
                 {
                     debug!("Switching to get_batch_safe!");
                     match vr.get_batch_safe(indices) {
-                        Ok(batch) => Ok(batch.into_pyarray(py)),
+                        Ok(batch) => {
+                            let width = vr.decoder().video().width() as i64;
+                            let height = vr.decoder().video().height() as i64;
+                            vr.set_data(batch);
+                            let tensor = video_tensor_from_raw_vec(vr.get_data(), height, width);
+                            Ok(PyTensor(tensor))
+                        }
                         Err(e) => Err(PyRuntimeError::new_err(format!("Error: {}", e))),
                     }
                 } else {
                     match vr.get_batch(indices) {
-                        Ok(batch) => Ok(batch.into_pyarray(py)),
+                        Ok(batch) => {
+                            let width = vr.decoder().video().width() as i64;
+                            let height = vr.decoder().video().height() as i64;
+                            vr.set_data(batch);
+                            let tensor = video_tensor_from_raw_vec(vr.get_data(), height, width);
+                            Ok(PyTensor(tensor))
+                        }
                         Err(e) => Err(PyRuntimeError::new_err(format!("Error: {}", e))),
                     }
                 }
@@ -382,8 +413,9 @@ impl PyVideoReader {
 }
 
 #[pymodule]
-fn video_reader<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()> {
+fn video_reader<'py>(py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()> {
     env_logger::init();
+    py.import("torch")?;
     // Add the VideoReader class to the module
     m.add_class::<PyVideoReader>()?;
     Ok(())

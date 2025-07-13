@@ -1,11 +1,10 @@
-use crate::convert::{convert_nv12_to_ndarray_rgb24, convert_yuv_to_ndarray_rgb24};
+use crate::convert::{convert_nv12_to_rgb, convert_yuv_to_rgb};
 use crate::convert::{get_colorrange, get_colorspace};
 use crate::hwaccel::HardwareAccelerationDeviceType;
-use crate::utils::{FrameArray, VideoArray};
+use crate::utils::RawFrame;
 use ffmpeg::filter;
 use ffmpeg::util::frame::video::Video;
 use ffmpeg_next as ffmpeg;
-use ndarray::{s, Array, Array4, ArrayViewMut3};
 use std::collections::HashMap;
 use yuv::{YuvRange, YuvStandardMatrix};
 
@@ -15,21 +14,14 @@ pub struct VideoReducer {
     indices: Vec<usize>,
     frame_index: usize,
     idx_counter: usize,
-    full_video: VideoArray,
 }
 
 impl VideoReducer {
-    pub fn new(
-        indices: Vec<usize>,
-        frame_index: usize,
-        idx_counter: usize,
-        full_video: VideoArray,
-    ) -> Self {
+    pub fn new(indices: Vec<usize>, frame_index: usize, idx_counter: usize) -> Self {
         VideoReducer {
             indices,
             frame_index,
             idx_counter,
-            full_video,
         }
     }
     pub fn get_frame_index(&self) -> usize {
@@ -40,9 +32,6 @@ impl VideoReducer {
     }
     pub fn set_frame_index(&mut self, v: usize) {
         self.frame_index = v;
-    }
-    pub fn get_idx_counter(&self) -> usize {
-        self.idx_counter
     }
     pub fn incr_idx_counter(&mut self, v: usize) {
         self.idx_counter += v;
@@ -56,34 +45,21 @@ impl VideoReducer {
     pub fn remove_idx(&mut self, idx: usize) {
         self.indices.remove(idx);
     }
-    pub fn slice_mut(&mut self, idx: usize) -> ArrayViewMut3<u8> {
-        self.full_video.slice_mut(s![idx, .., .., ..])
-    }
-    pub fn get_full_video(self) -> Array4<u8> {
-        self.full_video
-    }
     pub fn build(
         start_frame: Option<usize>,
         end_frame: Option<usize>,
         frame_count: usize,
         compression_factor: Option<f64>,
-        height: u32,
-        width: u32,
     ) -> (Option<VideoReducer>, Option<usize>, Option<usize>) {
         let start = start_frame.unwrap_or(0);
         let end = end_frame.unwrap_or(frame_count).min(frame_count);
 
-        let n_frames = ((end - start) as f64 * compression_factor.unwrap_or(1.0)).round() as usize;
-
-        let indices = Array::linspace(start as f64, end as f64 - 1., n_frames)
-            .iter()
-            .map(|x| x.round() as usize)
-            .collect::<Vec<_>>();
-
-        let full_video = Array::zeros((indices.len(), height as usize, width as usize, 3));
+        let steps = (1. / compression_factor.unwrap_or(1.0)).round() as usize;
+        // create the list indices
+        let indices: Vec<usize> = (start..end).step_by(steps).collect();
 
         (
-            Some(VideoReducer::new(indices, 0, 0, full_video)),
+            Some(VideoReducer::new(indices, 0, 0)),
             Some(start),
             Some(end),
         )
@@ -144,8 +120,6 @@ impl DecoderConfig {
 /// Struct responsible for doing the actual decoding
 pub struct VideoDecoder {
     pub video: ffmpeg::decoder::Video,
-    pub height: u32,
-    pub width: u32,
     pub fps: f64,
     pub video_info: HashMap<&'static str, String>,
     pub is_hwaccel: bool,
@@ -160,7 +134,6 @@ impl VideoDecoder {
     pub fn new(
         video: ffmpeg::decoder::Video,
         height: u32,
-        width: u32,
         fps: f64,
         video_info: HashMap<&'static str, String>,
         is_hwaccel: bool,
@@ -172,8 +145,6 @@ impl VideoDecoder {
         let color_range = get_colorrange(crange_string);
         VideoDecoder {
             video,
-            height,
-            width,
             fps,
             video_info,
             is_hwaccel,
@@ -192,7 +163,7 @@ impl VideoDecoder {
         &self.video
     }
 
-    pub fn decode_frames(&mut self) -> Result<Option<FrameArray>, ffmpeg::Error> {
+    pub fn decode_frames(&mut self) -> Result<Option<RawFrame>, ffmpeg::Error> {
         let mut decoded = Video::empty();
         if self.video.receive_frame(&mut decoded).is_ok() {
             let rgb_frame = self.process_frame(&decoded);
@@ -201,7 +172,7 @@ impl VideoDecoder {
         Ok(None)
     }
 
-    pub fn process_frame(&mut self, decoded: &Video) -> Option<FrameArray> {
+    pub fn process_frame(&mut self, decoded: &Video) -> Option<RawFrame> {
         self.graph.get("in").unwrap().source().add(decoded).unwrap();
         let cspace = self.color_space;
         let crange = self.color_range;
@@ -215,12 +186,12 @@ impl VideoDecoder {
             .frame(&mut yuv_frame)
             .is_ok()
         {
-            let rgb_frame: FrameArray = if self.is_hwaccel {
-                convert_nv12_to_ndarray_rgb24(yuv_frame, cspace, crange)
+            let raw_frame: RawFrame = if self.is_hwaccel {
+                convert_nv12_to_rgb(yuv_frame, cspace, crange)
             } else {
-                convert_yuv_to_ndarray_rgb24(yuv_frame, cspace, crange)
+                convert_yuv_to_rgb(yuv_frame, cspace, crange)
             };
-            return Some(rgb_frame);
+            return Some(raw_frame);
         }
         None
     }
@@ -229,7 +200,7 @@ impl VideoDecoder {
     pub fn receive_and_process_decoded_frames(
         &mut self,
         reducer: &mut VideoReducer,
-    ) -> Result<Option<FrameArray>, ffmpeg::Error> {
+    ) -> Result<Option<RawFrame>, ffmpeg::Error> {
         let mut decoded = Video::empty();
         while self.video.receive_frame(&mut decoded).is_ok() {
             let match_index = reducer
@@ -250,7 +221,7 @@ impl VideoDecoder {
         &mut self,
         reducer: &mut VideoReducer,
         indices: &[usize],
-        frame_map: &mut HashMap<usize, FrameArray>,
+        frame_map: &mut HashMap<usize, RawFrame>,
     ) -> Result<(), ffmpeg::Error> {
         let mut decoded = Video::empty();
         while self.video.receive_frame(&mut decoded).is_ok() {
