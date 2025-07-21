@@ -54,8 +54,7 @@ jobs:
           before-script-linux: |
             bash .github/workflows/pre_build_${{ matrix.platform.target }}.sh &&
             curl -L "${{ steps.download_url.outputs.ffmpeg_url }}" -o ffmpeg.tar.gz && mkdir -p ${{ env.FFMPEG_DIR }} &&
-            tar -zxf ffmpeg.tar.gz -C ${{ env.FFMPEG_DIR }} --strip-components=1 &&
-            export FFMPEG_DIR=${{ env.FFMPEG_DIR }}
+            tar -zxf ffmpeg.tar.gz -C ${{ env.FFMPEG_DIR }} && export FFMPEG_DIR=${{ env.FFMPEG_DIR }}
           args: --release --out dist --interpreter '3.9 3.10 3.11 3.12 3.13 3.13t 3.14 3.14t pypy3.9 pypy3.10 pypy3.11'
           manylinux: 2_28
       - name: Upload wheels
