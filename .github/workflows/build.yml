@@ -41,11 +41,7 @@ jobs:
         id: download_url
         run: |
           DOWNLOAD_URL=$(
-            if [[ "${{ matrix.platform.target }}" == "x86_64" ]]; then
-              echo "https://www.dropbox.com/scl/fi/x76nti8wr8qqoyyxvifa8/ffmpeg-4.4-linux-clang-default.tar.xz?rlkey=${{ secrets.DROPBOX_TOKEN }}&dl=1";
-            elif [[ "${{ matrix.platform.target }}" == "aarch64" ]]; then
-              echo "https://www.dropbox.com/scl/fi/au67c14cgtu10873wtgyq/ffmpeg-n4.4.6-linuxarm64-gpl-shared-4.4.tar.xz?rlkey=${{ secrets.DROPBOX_TOKEN_AARCH64 }}&dl=1"
-            fi
+              echo "https://github.com/PyAV-Org/pyav-ffmpeg/releases/download/4.4.1-8/ffmpeg-manylinux_${{ matrix.platform.target }}.tar.gz";
           )
           echo "ffmpeg_url=$DOWNLOAD_URL" >> $GITHUB_OUTPUT
 
