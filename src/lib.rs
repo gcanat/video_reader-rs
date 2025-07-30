@@ -130,7 +130,7 @@ impl PyVideoReader {
             Ok(reader) => Ok(PyVideoReader {
                 inner: Mutex::new(reader),
             }),
-            Err(e) => Err(PyRuntimeError::new_err(format!("Error: {}", e))),
+            Err(e) => Err(PyRuntimeError::new_err(format!("Error: {e}"))),
         }
     }
 
@@ -161,7 +161,7 @@ impl PyVideoReader {
                     Ok(res_array.into_pyarray(py))
                 }
             }
-            Err(e) => Err(PyRuntimeError::new_err(format!("Lock error: {}", e))),
+            Err(e) => Err(PyRuntimeError::new_err(format!("Lock error: {e}"))),
         }
     }
 
@@ -172,7 +172,7 @@ impl PyVideoReader {
                 let num_frames = vr.stream_info().frame_count().to_owned();
                 Ok(num_frames)
             }
-            Err(e) => Err(PyRuntimeError::new_err(format!("Lock error: {}", e))),
+            Err(e) => Err(PyRuntimeError::new_err(format!("Lock error: {e}"))),
         }
     }
 
@@ -193,7 +193,7 @@ impl PyVideoReader {
                     }
                 }
             }
-            Err(e) => Err(PyRuntimeError::new_err(format!("Lock error: {}", e))),
+            Err(e) => Err(PyRuntimeError::new_err(format!("Lock error: {e}"))),
         }
     }
 
@@ -206,7 +206,7 @@ impl PyVideoReader {
                 info_dict.insert("frame_count", vr.stream_info().frame_count().to_string());
                 Ok(info_dict.into_py_dict(py)?)
             }
-            Err(e) => Err(PyRuntimeError::new_err(format!("Lock error: {}", e))),
+            Err(e) => Err(PyRuntimeError::new_err(format!("Lock error: {e}"))),
         }
     }
 
@@ -217,7 +217,7 @@ impl PyVideoReader {
                 let fps = vr.decoder().fps();
                 Ok(PyFloat::new(py, fps))
             }
-            Err(e) => Err(PyRuntimeError::new_err(format!("Lock error: {}", e))),
+            Err(e) => Err(PyRuntimeError::new_err(format!("Lock error: {e}"))),
         }
     }
 
@@ -231,7 +231,7 @@ impl PyVideoReader {
                 let list = PyList::new(py, [*num_frames, height, width]);
                 Ok(list?)
             }
-            Err(e) => Err(PyRuntimeError::new_err(format!("Lock error: {}", e))),
+            Err(e) => Err(PyRuntimeError::new_err(format!("Lock error: {e}"))),
         }
     }
 
@@ -253,9 +253,9 @@ impl PyVideoReader {
             Ok(mut reader) => match reader.decode_video(start_frame, end_frame, compression_factor)
             {
                 Ok(video) => Ok(video.into_pyarray(py)),
-                Err(e) => Err(PyRuntimeError::new_err(format!("Error: {}", e))),
+                Err(e) => Err(PyRuntimeError::new_err(format!("Error: {e}"))),
             },
-            Err(e) => Err(PyRuntimeError::new_err(format!("Lock error: {}", e))),
+            Err(e) => Err(PyRuntimeError::new_err(format!("Lock error: {e}"))),
         }
     }
 
@@ -287,7 +287,7 @@ impl PyVideoReader {
                     .map(|x| x.into_pyarray(py))
                     .collect::<Vec<_>>())
             }
-            Err(e) => Err(PyRuntimeError::new_err(format!("Lock error: {}", e))),
+            Err(e) => Err(PyRuntimeError::new_err(format!("Lock error: {e}"))),
         }
     }
 
@@ -312,9 +312,9 @@ impl PyVideoReader {
                     let gray_video = rgb2gray(video);
                     Ok(gray_video.into_pyarray(py))
                 }
-                Err(e) => Err(PyRuntimeError::new_err(format!("Error: {}", e))),
+                Err(e) => Err(PyRuntimeError::new_err(format!("Error: {e}"))),
             },
-            Err(e) => Err(PyRuntimeError::new_err(format!("Lock error: {}", e))),
+            Err(e) => Err(PyRuntimeError::new_err(format!("Lock error: {e}"))),
         }
     }
 
@@ -367,16 +367,16 @@ impl PyVideoReader {
                     debug!("Switching to get_batch_safe!");
                     match vr.get_batch_safe(indices) {
                         Ok(batch) => Ok(batch.into_pyarray(py)),
-                        Err(e) => Err(PyRuntimeError::new_err(format!("Error: {}", e))),
+                        Err(e) => Err(PyRuntimeError::new_err(format!("Error: {e}"))),
                     }
                 } else {
                     match vr.get_batch(indices) {
                         Ok(batch) => Ok(batch.into_pyarray(py)),
-                        Err(e) => Err(PyRuntimeError::new_err(format!("Error: {}", e))),
+                        Err(e) => Err(PyRuntimeError::new_err(format!("Error: {e}"))),
                     }
                 }
             }
-            Err(e) => Err(PyRuntimeError::new_err(format!("Lock error: {}", e))),
+            Err(e) => Err(PyRuntimeError::new_err(format!("Lock error: {e}"))),
         }
     }
 }
