@@ -58,7 +58,7 @@ jobs:
             curl -L "${{ steps.download_url.outputs.ffmpeg_url }}" -o ffmpeg.tar.xz && mkdir -p ${{ env.FFMPEG_DIR }} &&
             tar -xf ffmpeg.tar.xz -C ${{ env.FFMPEG_DIR }} --strip-components=1 &&
             export FFMPEG_DIR=${{ env.FFMPEG_DIR }}
-          args: --release --out dist --find-interpreter
+          args: --release --out dist --find-interpreter --interpreter '3.9 3.10 3.11 3.12 3.13 3.13t 3.14 3.14t pypy3.9 pypy3.10 pypy3.11'
           sccache: 'true'
           manylinux: 2_28
       - name: Upload wheels
