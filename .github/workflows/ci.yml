@@ -11,10 +11,12 @@ jobs:
     name: Lints
     runs-on: ubuntu-latest
     container: jrottenberg/ffmpeg:5.1-ubuntu
+    permissions:
+      contents: read
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
           persist-credentials: false
 
@@ -24,13 +26,10 @@ jobs:
           apt install -y --no-install-recommends clang curl pkg-config python3
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@v1
+        uses: actions-rust-lang/setup-rust-toolchain@fb51252c7ba57d633bc668f941da052e410add48
         with:
           toolchain: stable
           components: rustfmt, clippy
-
-      - name: Cache
-        uses: Swatinem/rust-cache@v2
 
       - name: Rustfmt
         run: cargo fmt --all -- --check
@@ -41,10 +40,12 @@ jobs:
     name: Tests
     runs-on: ubuntu-latest
     container: jrottenberg/ffmpeg:5.1-ubuntu
+    permissions:
+      contents: read
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
           persist-credentials: false
 
@@ -54,13 +55,10 @@ jobs:
           apt install -y --no-install-recommends clang curl pkg-config python3
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@v1
+        uses: actions-rust-lang/setup-rust-toolchain@fb51252c7ba57d633bc668f941da052e410add48  # v1.13.0
         with:
           toolchain: stable
           components: rustc, cargo
-
-      - name: Cache
-        uses: Swatinem/rust-cache@v2
 
       - name: tests
         run: cargo test
