@@ -95,7 +95,7 @@ pub fn collect_video_metadata(
 
     let fps_rational = video.frame_rate().unwrap_or(Rational(0, 1));
     info.insert("fps_rational", fps_rational.to_string());
-    info.insert("fps", format!("{}", fps));
+    info.insert("fps", format!("{fps}"));
     info.insert("start_time", params.start_time.to_string());
     info.insert("time_base", params.time_base.to_string());
     info.insert("time_base_rational", params.time_base_rational.to_string());
