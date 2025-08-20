@@ -56,7 +56,7 @@ impl VideoReducer {
     pub fn remove_idx(&mut self, idx: usize) {
         self.indices.remove(idx);
     }
-    pub fn slice_mut(&mut self, idx: usize) -> ArrayViewMut3<u8> {
+    pub fn slice_mut(&mut self, idx: usize) -> ArrayViewMut3<'_, u8> {
         self.full_video.slice_mut(s![idx, .., .., ..])
     }
     pub fn get_full_video(self) -> Array4<u8> {
