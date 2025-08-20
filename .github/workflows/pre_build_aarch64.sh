@@ -17,12 +17,7 @@ sed -i -e 's/deb http/deb [arch=amd64] http/g' /etc/apt/sources.list
 apt update
 apt install -y binutils-aarch64-linux-gnu clang gcc-aarch64-linux-gnu \
   gcc-aarch64-linux-gnu libasound2-dev libcrypt-dev libnsl-dev libxv-dev \
-  multistrap pkg-config python3-pip rpcsvc-proto xz-utils
+  multistrap pkg-config python3-pip rpcsvc-proto xz-utils uuid-dev:arm64 \
+  libxcb-shm0:arm64 libxcb-xfixes0:arm64 libxcb-shape0:arm64
 
 pip install "maturin>=1.3,<2.0" patchelf
-
-# # download ffmpeg archive and extract it
-# curl -L "$FFMPEG_DOWNLOAD_URL" -o ffmpeg.tar.xz
-# mkdir -p $FFMPEG_DIR
-# tar -xf ffmpeg.tar.xz -C $FFMPEG_DIR --strip-components=1
-# export FFMPEG_DIR=$FFMPEG_DIR
