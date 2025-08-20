@@ -237,8 +237,8 @@ impl VideoDecoder {
                 .iter()
                 .position(|x| x == &reducer.get_frame_index());
             reducer.incr_frame_index(1);
-            if match_index.is_some() {
-                reducer.remove_idx(match_index.unwrap());
+            if let Some(mch_idx) = match_index {
+                reducer.remove_idx(mch_idx);
                 let rgb_frame = self.process_frame(&decoded);
                 return Ok(rgb_frame);
             }
