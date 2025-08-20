@@ -1,0 +1,4 @@
+[build]
+rustflags = [
+    "-L", "/usr/lib/aarch64-linux-gnu"
+]
