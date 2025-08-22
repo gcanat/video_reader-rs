@@ -195,12 +195,12 @@ pub fn get_resized_dim(
     }
 
     // Only case remaining is one is None and the other is Some
-    if resize_shorter_side_to.is_some() {
+    if let Some(res_short_side) = resize_shorter_side_to {
         if shorter_is_height {
-            new_height = resize_shorter_side_to.unwrap();
+            new_height = res_short_side;
             new_width = (width * new_height / height).round();
         } else {
-            new_width = resize_shorter_side_to.unwrap();
+            new_width = res_short_side;
             new_height = (height * new_width / width).round();
         }
     } else {
