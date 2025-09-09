@@ -56,7 +56,7 @@ impl VideoReducer {
     pub fn remove_idx(&mut self, idx: usize) {
         self.indices.remove(idx);
     }
-    pub fn slice_mut(&mut self, idx: usize) -> ArrayViewMut3<u8> {
+    pub fn slice_mut(&mut self, idx: usize) -> ArrayViewMut3<'_, u8> {
         self.full_video.slice_mut(s![idx, .., .., ..])
     }
     pub fn get_full_video(self) -> Array4<u8> {
@@ -237,8 +237,8 @@ impl VideoDecoder {
                 .iter()
                 .position(|x| x == &reducer.get_frame_index());
             reducer.incr_frame_index(1);
-            if match_index.is_some() {
-                reducer.remove_idx(match_index.unwrap());
+            if let Some(match_idx) = match_index {
+                reducer.remove_idx(match_idx);
                 let rgb_frame = self.process_frame(&decoded);
                 return Ok(rgb_frame);
             }
