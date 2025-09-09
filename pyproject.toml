@@ -11,6 +11,13 @@ classifiers = [
     "Programming Language :: Python :: Implementation :: PyPy",
 ]
 dynamic = ["version"]
+license = "MIT OR GPL-2.0 OR GPL-3.0"
+license-files = [
+    "LICENSE",
+    "COPYING.GPLv2.FFmpeg",
+    "COPYING.GPLv3.FFmpeg",
+    "license_notes.md",
+]
 
 [tool.maturin]
 features = ["pyo3/extension-module"]
