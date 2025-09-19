@@ -1,23 +1,8 @@
 #!/bin/bash
 
-dpkg --add-architecture arm64
-
-# add arm64 source
-cat <<'EOF'>> /etc/apt/sources.list.d/arm64.list
-deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ jammy main restricted
-deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ jammy-updates main restricted
-deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ jammy-backports main restricted universe multiverse
-EOF
-
-# specifcy amd64 source in the main source.list
-sed -i -e 's/deb mirror/deb [arch=amd64] mirror/g' /etc/apt/sources.list
-sed -i -e 's/deb http/deb [arch=amd64] http/g' /etc/apt/sources.list
-
 # update and install deps
-apt update
-apt install -y binutils-aarch64-linux-gnu clang gcc-aarch64-linux-gnu \
-  gcc-aarch64-linux-gnu libasound2-dev:arm64 libcrypt-dev:arm64 libnsl-dev:arm64 \
-  libxv-dev:arm64  multistrap pkg-config:arm64 python3-pip rpcsvc-proto:arm64 xz-utils:arm64 \
-  uuid-dev:arm64 libxcb-shm0:arm64 libxcb-xfixes0:arm64 libxcb-shape0:arm64
+dnf -y update
+dnf install -y binutils clang gcc alsa-lib-devel libxcrypt-devel libnsl \
+    libXv-devel python3-pip rpcsvc-proto-devel xz uuid-devel libxcb
 
 pip install "maturin>=1.3,<2.0" patchelf
