@@ -190,9 +190,8 @@ impl VideoReader {
             .any(|k| &first_index >= k)
             && (first_index > 0)
         {
-            let frame_duration = (1. / self.decoder.fps * 1_000.0).round() as usize;
             let key_pos = self.locate_keyframes(&first_index);
-            self.seek_frame(&key_pos, &frame_duration)?;
+            self.seek_frame(&key_pos)?;
             self.curr_frame = key_pos;
         }
 
@@ -317,11 +316,8 @@ impl VideoReader {
             && (first_index > 0)
         {
             let key_pos = self.locate_keyframes(&first_index);
-            let fps = self.decoder.fps;
-            // duration of a frame in micro seconds
-            let frame_duration = (1. / fps * 1_000.0).round() as usize;
             // seek to closest key frame before first_index
-            self.seek_frame(&key_pos, &frame_duration)?;
+            self.seek_frame(&key_pos)?;
         }
 
         let mut reducer = reducer.unwrap();
@@ -426,8 +422,7 @@ impl VideoReader {
         // check if closest key frames to first_index is non zero, if so we can seek
         let key_pos = self.locate_keyframes(first_index);
         if key_pos > 0 {
-            let frame_duration = (1. / self.decoder.fps * 1_000.0).round() as usize;
-            self.seek_frame(&key_pos, &frame_duration)?;
+            self.seek_frame(&key_pos)?;
             reducer.set_frame_index(self.curr_frame);
         }
         let mut frame_map: HashMap<usize, FrameArray> = HashMap::new();
@@ -478,10 +473,6 @@ impl VideoReader {
             self.decoder.width as usize,
             3,
         ));
-        // frame rate
-        let fps = self.decoder.fps;
-        // duration of a frame in micro seconds
-        let frame_duration = (1. / fps * 1_000.0).round() as usize;
 
         // make sure we are at the begining of the stream
         self.seek_to_start()?;
@@ -491,7 +482,6 @@ impl VideoReader {
             debug!("[NEXT INDICE] frame_index: {frame_index}");
             self.seek_accurate(
                 frame_index,
-                &frame_duration,
                 &mut video_frames.slice_mut(s![idx_counter, .., .., ..]),
             )?;
         }
@@ -501,7 +491,6 @@ impl VideoReader {
     pub fn seek_accurate(
         &mut self,
         frame_index: usize,
-        frame_duration: &usize,
         frame_array: &mut ArrayViewMut3<u8>,
     ) -> Result<(), ffmpeg::Error> {
         let key_pos = self.locate_keyframes(&frame_index);
@@ -522,7 +511,7 @@ impl VideoReader {
                 self.seek_to_start()?;
             }
             debug!("Seeking to key_pos: {}", key_pos);
-            self.seek_frame(&key_pos, frame_duration)?;
+            self.seek_frame(&key_pos)?;
             let num_skip = self.get_num_skip(&frame_index);
             match self.skip_frames(num_skip, &frame_index, frame_array) {
                 Ok(()) => Ok(()),
@@ -644,15 +633,18 @@ impl VideoReader {
     // AVSEEK_FLAG_BYTE 2 <- seeking based on position in bytes
     // AVSEEK_FLAG_ANY 4 <- seek to any frame, even non-key frames
     // AVSEEK_FLAG_FRAME 8 <- seeking based on frame number
-    pub fn seek_frame(&mut self, pos: &usize, frame_duration: &usize) -> Result<(), ffmpeg::Error> {
-        let frame_ts = match self.stream_info.frame_times().iter().nth(*pos) {
-            Some((_, fr_ts)) => *fr_ts.pts(),
-            None => (pos * frame_duration) as i64,
-        };
-
-        match self.avseekframe(pos, frame_ts, AVSEEK_FLAG_BACKWARD) {
-            Ok(()) => Ok(()),
-            Err(_) => self.avseekframe(pos, *pos as i64, AVSEEK_FLAG_FRAME),
+    pub fn seek_frame(&mut self, pos: &usize) -> Result<(), ffmpeg::Error> {
+        // Prefer DTS when available for monotonicity; fallback to PTS.
+        // If no timestamp is available for this decode index, fall back to frame-number seeking.
+        if let Some(fr_ts) = self.stream_info.frame_times().get(pos) {
+            let dts = *fr_ts.dts();
+            let ts = if dts > 0 { dts } else { *fr_ts.pts() };
+            match self.avseekframe(pos, ts, AVSEEK_FLAG_BACKWARD) {
+                Ok(()) => Ok(()),
+                Err(_) => self.avseekframe(pos, *pos as i64, AVSEEK_FLAG_FRAME),
+            }
+        } else {
+            self.avseekframe(pos, *pos as i64, AVSEEK_FLAG_FRAME)
         }
     }
     pub fn avseekframe(
