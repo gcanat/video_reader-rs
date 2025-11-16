@@ -1,7 +1,7 @@
 use ffmpeg::ffi::{av_display_rotation_get, av_stream_get_side_data, AVPacketSideDataType};
 use ffmpeg::util::rational::Rational;
-use ffmpeg_next as ffmpeg;
 use ffmpeg::Stream;
+use ffmpeg_next as ffmpeg;
 use std::collections::{BTreeMap, HashMap};
 
 pub struct VideoParams {
@@ -80,10 +80,13 @@ impl StreamInfo {
     }
 }
 
-
 fn get_rotation_angle(input: &Stream) -> isize {
     unsafe {
-        let display_matrix_ptr = av_stream_get_side_data(input.as_ptr(), AVPacketSideDataType::AV_PKT_DATA_DISPLAYMATRIX, std::ptr::null_mut());
+        let display_matrix_ptr = av_stream_get_side_data(
+            input.as_ptr(),
+            AVPacketSideDataType::AV_PKT_DATA_DISPLAYMATRIX,
+            std::ptr::null_mut(),
+        );
         if display_matrix_ptr.is_null() {
             0_isize
         } else {
