@@ -1,5 +1,7 @@
+use ffmpeg::ffi::{av_display_rotation_get, av_stream_get_side_data, AVPacketSideDataType};
 use ffmpeg::util::rational::Rational;
 use ffmpeg_next as ffmpeg;
+use ffmpeg::Stream;
 use std::collections::{BTreeMap, HashMap};
 
 pub struct VideoParams {
@@ -7,6 +9,7 @@ pub struct VideoParams {
     start_time: i64,
     time_base: f64,
     time_base_rational: Rational,
+    pub rotation: isize,
 }
 
 /// Timing info for key frames
@@ -77,12 +80,26 @@ impl StreamInfo {
     }
 }
 
-pub fn extract_video_params(input: &ffmpeg::Stream) -> VideoParams {
+
+fn get_rotation_angle(input: &Stream) -> isize {
+    unsafe {
+        let display_matrix_ptr = av_stream_get_side_data(input.as_ptr(), AVPacketSideDataType::AV_PKT_DATA_DISPLAYMATRIX, std::ptr::null_mut());
+        if display_matrix_ptr.is_null() {
+            0_isize
+        } else {
+            let theta = av_display_rotation_get(display_matrix_ptr as *const _);
+            theta.round() as isize
+        }
+    }
+}
+
+pub fn extract_video_params(input: &Stream) -> VideoParams {
     VideoParams {
         duration: input.duration() as f64 * f64::from(input.time_base()),
         start_time: input.start_time(),
         time_base: f64::from(input.time_base()),
         time_base_rational: input.time_base(),
+        rotation: get_rotation_angle(input),
     }
 }
 
@@ -119,7 +136,7 @@ pub fn collect_video_metadata(
     info.insert("vid_ref", video.references().to_string());
     info.insert("intra_dc_precision", video.intra_dc_precision().to_string());
     info.insert("has_b_frames", format!("{}", video.has_b_frames()));
-
+    info.insert("rotation", format!("{}", params.rotation));
     info
 }
 

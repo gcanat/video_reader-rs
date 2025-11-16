@@ -126,10 +126,11 @@ impl VideoReader {
             setup_decoder_context(&input, config.threads(), config.hwaccel())?;
 
         let mut video = decoder_context.decoder().video()?;
-        let (orig_h, orig_w, orig_fmt) = (video.height(), video.width(), video.format());
         let video_info = collect_video_metadata(&video, &video_params, &fps);
 
-        let (height, width) = get_resized_dim(
+        let (orig_h, orig_w, orig_fmt) = (video.height(), video.width(), video.format());
+
+        let (mut height, mut width) = get_resized_dim(
             orig_h as f64,
             orig_w as f64,
             config.resize_shorter_side(),
@@ -144,6 +145,7 @@ impl VideoReader {
             config.ff_filter(),
             hwaccel_context,
             HWACCEL_PIXEL_FORMAT,
+            video_params.rotation,
         )?;
 
         debug!("Filter spec: {}", filter_spec);
@@ -158,6 +160,9 @@ impl VideoReader {
 
         let graph = create_filters(&mut video, hw_format, filter_cfg)?;
 
+        if video_params.rotation.abs() == 90 {
+            std::mem::swap(&mut height, &mut width);
+        }
         Ok(VideoDecoder::new(
             video, height, width, fps, video_info, is_hwaccel, graph,
         ))
