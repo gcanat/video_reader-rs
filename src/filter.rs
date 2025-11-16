@@ -105,6 +105,15 @@ pub fn create_hwbuffer_src(
     }
 }
 
+fn transpose_filter(rotation: isize) -> String {
+    match rotation {
+        -90 => ",transpose=1".to_owned(),
+        90 => ",transpose=2".to_owned(),
+        180 | -180 => ",transport=1,transpose=1".to_owned(),
+        _ => "".to_owned(),
+    }
+}
+
 pub fn create_filter_spec(
     width: u32,
     height: u32,
@@ -112,6 +121,7 @@ pub fn create_filter_spec(
     ff_filter: Option<String>,
     hwaccel_context: Option<HardwareAccelerationContext>,
     hwaccel_fmt: AvPixel,
+    rotation: isize,
 ) -> Result<(String, Option<AvPixel>), ffmpeg_next::Error> {
     let pix_fmt = AvPixel::YUV420P;
     let mut hw_format: Option<AvPixel> = None;
@@ -119,10 +129,11 @@ pub fn create_filter_spec(
     let filter_spec = match ff_filter {
         None => {
             let mut filter_spec = format!(
-                "format={},scale=w={}:h={}:flags=fast_bilinear",
+                "format={},scale=w={}:h={}:flags=fast_bilinear{}",
                 pix_fmt.descriptor().unwrap().name(),
                 width,
                 height,
+                transpose_filter(rotation),
             );
 
             if let Some(hw_ctx) = hwaccel_context {
@@ -134,10 +145,11 @@ pub fn create_filter_spec(
                     return Err(ffmpeg::error::Error::DecoderNotFound);
                 }
                 filter_spec = format!(
-                    "scale_cuda=w={}:h={}:passthrough=0,hwdownload,format={}",
+                    "scale_cuda=w={}:h={}:passthrough=0,hwdownload,format={}{}",
                     width,
                     height,
                     hwaccel_fmt.descriptor().unwrap().name(),
+                    transpose_filter(rotation),
                 );
                 codec_context_get_hw_frames_ctx(video, hw_format.unwrap(), hwaccel_fmt)?;
             }
