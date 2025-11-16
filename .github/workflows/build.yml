@@ -178,6 +178,8 @@ jobs:
     env:
       FFMPEG_DIR: /opt/homebrew/opt/ffmpeg@7
       PKG_CONFIG_PATH: /opt/homebrew/opt/ffmpeg@7/lib/pkgconfig
+      LDFLAGS: -L/usr/local/opt/ffmpeg@7/lib
+      CPPFLAGS: -I/usr/local/opt/ffmpeg@7/include
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
