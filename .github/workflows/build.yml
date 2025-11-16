@@ -175,6 +175,9 @@ jobs:
             target: x86_64
           - runner: macos-14
             target: aarch64
+    env:
+      FFMPEG_DIR: /opt/homebrew/opt/ffmpeg@7
+      PKG_CONFIG_PATH: /opt/homebrew/opt/ffmpeg@7/lib/pkgconfig
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -184,8 +187,8 @@ jobs:
           python-version: '3.11'
       - name: Install dependencies
         run: |
-          brew install ffmpeg@7 && pip install delocate &&
-          export PKG_CONFIG_PATH="/opt/homebrew/opt/ffmpeg@7/lib/pkgconfig"
+          brew install ffmpeg@7 &&
+          pip install delocate
       - name: Build wheels
         uses: PyO3/maturin-action@e10f6c464b90acceb5f640d31beda6d586ba7b4a  # v1.49.3
         with:
