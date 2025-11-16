@@ -185,8 +185,7 @@ jobs:
       - name: Install dependencies
         run: |
           brew install ffmpeg@7 && pip install delocate &&
-          export FFMPEG_DIR="/opt/homebrew/opt/ffmpeg@7" &&
-          export PATH="/opt/homebrew/opt/ffmpeg@7/bin:$PATH"
+          export PKG_CONFIG_PATH="/opt/homebrew/opt/ffmpeg@7/lib/pkgconfig"
       - name: Build wheels
         uses: PyO3/maturin-action@e10f6c464b90acceb5f640d31beda6d586ba7b4a  # v1.49.3
         with:
