@@ -1,4 +1,11 @@
-use ffmpeg::ffi::{av_display_rotation_get, av_stream_get_side_data, AVPacketSideDataType};
+use ffmpeg::ffi::{av_display_rotation_get, AVPacketSideDataType};
+
+#[cfg(feature = "ffmpeg_8")]
+use ffmpeg::ffi::av_packet_side_data_get;
+
+#[cfg(not(feature = "ffmpeg_8"))]
+use ffmpeg::ffi::av_stream_get_side_data;
+
 use ffmpeg::util::rational::Rational;
 use ffmpeg::Stream;
 use ffmpeg_next as ffmpeg;
@@ -80,6 +87,31 @@ impl StreamInfo {
     }
 }
 
+#[cfg(feature = "ffmpeg_8")]
+fn get_rotation_angle(input: &Stream) -> isize {
+    unsafe {
+        let codec_params_ptr = input.parameters().as_ptr();
+        let display_matrix_ptr = av_packet_side_data_get(
+            (*codec_params_ptr).coded_side_data,
+            (*codec_params_ptr).nb_coded_side_data,
+            AVPacketSideDataType::AV_PKT_DATA_DISPLAYMATRIX,
+        );
+        if display_matrix_ptr.is_null() {
+            println!("no display_matrix_ptr");
+            0_isize
+        } else {
+            let theta = av_display_rotation_get(display_matrix_ptr as *const _);
+            if theta.is_nan() {
+                0_isize
+            } else {
+                println!("theta: {}", theta);
+                theta.round() as isize
+            }
+        }
+    }
+}
+
+#[cfg(not(feature = "ffmpeg_8"))]
 fn get_rotation_angle(input: &Stream) -> isize {
     unsafe {
         let display_matrix_ptr = av_stream_get_side_data(
@@ -91,7 +123,11 @@ fn get_rotation_angle(input: &Stream) -> isize {
             0_isize
         } else {
             let theta = av_display_rotation_get(display_matrix_ptr as *const _);
-            theta.round() as isize
+            if theta.is_nan() {
+                0_isize
+            } else {
+                theta.round() as isize
+            }
         }
     }
 }
