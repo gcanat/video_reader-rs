@@ -10,7 +10,7 @@ jobs:
   lints:
     name: Lints
     runs-on: ubuntu-latest
-    container: jrottenberg/ffmpeg:5.1-ubuntu
+    container: jrottenberg/ffmpeg:7.1-ubuntu
     permissions:
       contents: read
 
@@ -39,7 +39,7 @@ jobs:
   tests:
     name: Tests
     runs-on: ubuntu-latest
-    container: jrottenberg/ffmpeg:5.1-ubuntu
+    container: jrottenberg/ffmpeg:7.1-ubuntu
     permissions:
       contents: read
 
