@@ -61,4 +61,4 @@ jobs:
           components: rustc, cargo
 
       - name: tests
-        run: cargo test
+        run: ffmpeg -version && cargo test
