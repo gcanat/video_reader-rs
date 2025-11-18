@@ -10,7 +10,7 @@ jobs:
   lints:
     name: Lints
     runs-on: ubuntu-latest
-    container: jrottenberg/ffmpeg:7.1-ubuntu
+    container: jrottenberg/ffmpeg:5.1-ubuntu
     permissions:
       contents: read
 
@@ -32,14 +32,14 @@ jobs:
           components: rustfmt, clippy
 
       - name: Rustfmt
-        run: cargo fmt --all -- --check
+        run: cargo fmt --all --features ffmpeg_5 -- --check
 
       - name: Clippy
-        run: cargo clippy --all -- -D warnings
+        run: cargo clippy --all --features ffmpeg_5 -- -D warnings
   tests:
     name: Tests
     runs-on: ubuntu-latest
-    container: jrottenberg/ffmpeg:7.1-ubuntu
+    container: jrottenberg/ffmpeg:5.1-ubuntu
     permissions:
       contents: read
 
@@ -61,4 +61,4 @@ jobs:
           components: rustc, cargo
 
       - name: tests
-        run: ffmpeg -version && cargo test
+        run: cargo test --features ffmpeg_5
