@@ -32,10 +32,10 @@ jobs:
           components: rustfmt, clippy
 
       - name: Rustfmt
-        run: cargo fmt --all -- --check --features ffmpeg_5
+        run: cargo fmt --all -- --check
 
       - name: Clippy
-        run: cargo clippy --all -- -D warnings --features ffmpeg_5
+        run: cargo clippy --all  --features ffmpeg_5 -- -D warnings
   tests:
     name: Tests
     runs-on: ubuntu-latest
