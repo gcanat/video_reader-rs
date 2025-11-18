@@ -57,7 +57,7 @@ fn setup_decoder_context(
     context.set_threading(threading::Config {
         kind: threading::Type::Frame,
         count: threads,
-        #[cfg(not(feature = "ffmpeg_6_0"))]
+        #[cfg(feature = "ffmpeg_5")]
         safe: true,
     });
     Ok((context, hwaccel_context))

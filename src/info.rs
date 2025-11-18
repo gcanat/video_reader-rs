@@ -1,4 +1,6 @@
-use ffmpeg::ffi::{av_display_rotation_get, av_stream_get_side_data, AVPacketSideDataType};
+use ffmpeg::codec::packet::side_data::Type as SideDataType;
+use ffmpeg::ffi::av_display_rotation_get;
+
 use ffmpeg::util::rational::Rational;
 use ffmpeg::Stream;
 use ffmpeg_next as ffmpeg;
@@ -81,19 +83,18 @@ impl StreamInfo {
 }
 
 fn get_rotation_angle(input: &Stream) -> isize {
-    unsafe {
-        let display_matrix_ptr = av_stream_get_side_data(
-            input.as_ptr(),
-            AVPacketSideDataType::AV_PKT_DATA_DISPLAYMATRIX,
-            std::ptr::null_mut(),
-        );
-        if display_matrix_ptr.is_null() {
-            0_isize
-        } else {
-            let theta = av_display_rotation_get(display_matrix_ptr as *const _);
-            theta.round() as isize
+    for sd in input.side_data() {
+        if sd.kind() == SideDataType::DisplayMatrix {
+            let matrix = sd.data();
+            let theta = unsafe { av_display_rotation_get(matrix.as_ptr() as *const _) };
+            if theta.is_nan() {
+                return 0_isize;
+            } else {
+                return theta.round() as isize;
+            }
         }
     }
+    0_isize
 }
 
 pub fn extract_video_params(input: &Stream) -> VideoParams {

@@ -60,7 +60,7 @@ jobs:
             curl -L "${{ steps.download_url.outputs.ffmpeg_url }}" -o ffmpeg.tar.xz && mkdir -p ${{ env.FFMPEG_DIR }} &&
             tar -xf ffmpeg.tar.xz -C ${{ env.FFMPEG_DIR }} --strip-components=1 &&
             export FFMPEG_DIR=${{ env.FFMPEG_DIR }}
-          args: --release --out dist --interpreter '3.9 3.10 3.11 3.12 3.13 3.13t 3.14 3.14t pypy3.9 pypy3.10 pypy3.11'
+          args: --release --features ffmpeg_5 --out dist --interpreter '3.9 3.10 3.11 3.12 3.13 3.13t 3.14 3.14t pypy3.9 pypy3.10 pypy3.11'
           manylinux: 2_28
       - name: Upload wheels
         uses: actions/upload-artifact@v4
@@ -153,7 +153,7 @@ jobs:
         uses: PyO3/maturin-action@e10f6c464b90acceb5f640d31beda6d586ba7b4a  # v1.49.3
         with:
           target: ${{ matrix.platform.target }}
-          args: --release --features ffmpeg_6_0 --out dist --find-interpreter
+          args: --release --out dist --find-interpreter
 
       - name: Repair wheel with delvewheel
         shell: bash
@@ -171,15 +171,10 @@ jobs:
     strategy:
       matrix:
         platform:
-          # - runner: macos-15-intel
-          #   target: x86_64
+          - runner: macos-15-intel
+            target: x86_64
           - runner: macos-14
             target: aarch64
-    env:
-      FFMPEG_DIR: /opt/homebrew/opt/ffmpeg@7
-      PKG_CONFIG_PATH: /opt/homebrew/opt/ffmpeg@7/lib/pkgconfig
-      LDFLAGS: -L/usr/local/opt/ffmpeg@7/lib
-      CPPFLAGS: -I/usr/local/opt/ffmpeg@7/include
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -189,13 +184,13 @@ jobs:
           python-version: '3.11'
       - name: Install dependencies
         run: |
-          brew install ffmpeg@7 &&
+          brew install ffmpeg &&
           pip install delocate
       - name: Build wheels
         uses: PyO3/maturin-action@e10f6c464b90acceb5f640d31beda6d586ba7b4a  # v1.49.3
         with:
           target: ${{ matrix.platform.target }}
-          args: --release --features ffmpeg_6_0 --out dist --find-interpreter
+          args: --release --out dist --find-interpreter
 
       - name: Repair wheel with delocate
         shell: bash
