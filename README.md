@@ -44,9 +44,9 @@ maturin develop --release
 `maturin develop` builds the crate and installs it as a python module directly in the current virtualenv.
 the `--release` flag ensures the Rust part of the code is compiled in release mode, which enables compiler optimizations.
 
-⚠️ If you are using a version of **ffmpeg >= 6.0** you need to enable the `ffmpeg_6_0` feature:
+⚠️ If you are using a version of **ffmpeg <= 5** you need to enable the `ffmpeg_5` feature:
 ```bash
-maturin develop --release --features ffmpeg_6_0
+maturin develop --release --features ffmpeg_5
 ```
 
 ## 💻 Usage
@@ -140,7 +140,7 @@ for i in range(0, video_length, chunk_size):
 ```
 
 ## 🧪 Experimental support for Hardware Acceleration
-You need to install `video-reader-rs` from source by cloning this repo and running `maturin develop -r` or `maturin develop -r --features ffmpeg_6_0` if you have ffmpeg >= 6.0. Your ffmpeg installation should have support for cuda. Check with `ffmpeg -version | grep cuda` for example.
+You need to install `video-reader-rs` from source by cloning this repo and running `maturin develop -r`. Your ffmpeg installation should have support for cuda. Check with `ffmpeg -version | grep cuda` for example.
 
 ```python
 from video_reader import PyVideoReader
