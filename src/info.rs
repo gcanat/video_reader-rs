@@ -1,10 +1,5 @@
-use ffmpeg::ffi::{av_display_rotation_get, AVPacketSideDataType};
-
-#[cfg(feature = "ffmpeg_8")]
-use ffmpeg::ffi::av_packet_side_data_get;
-
-#[cfg(not(feature = "ffmpeg_8"))]
-use ffmpeg::ffi::av_stream_get_side_data;
+use ffmpeg::codec::packet::side_data::Type as SideDataType;
+use ffmpeg::ffi::av_display_rotation_get;
 
 use ffmpeg::util::rational::Rational;
 use ffmpeg::Stream;
@@ -87,49 +82,19 @@ impl StreamInfo {
     }
 }
 
-#[cfg(feature = "ffmpeg_8")]
 fn get_rotation_angle(input: &Stream) -> isize {
-    unsafe {
-        let codec_params_ptr = input.parameters().as_ptr();
-        let display_matrix_ptr = av_packet_side_data_get(
-            (*codec_params_ptr).coded_side_data,
-            (*codec_params_ptr).nb_coded_side_data,
-            AVPacketSideDataType::AV_PKT_DATA_DISPLAYMATRIX,
-        );
-        if display_matrix_ptr.is_null() {
-            println!("no display_matrix_ptr");
-            0_isize
-        } else {
-            let theta = av_display_rotation_get(display_matrix_ptr as *const _);
+    for sd in input.side_data() {
+        if sd.kind() == SideDataType::DisplayMatrix {
+            let matrix = sd.data();
+            let theta = unsafe { av_display_rotation_get(matrix.as_ptr() as *const _) };
             if theta.is_nan() {
-                0_isize
+                return 0_isize;
             } else {
-                println!("theta: {}", theta);
-                theta.round() as isize
+                return theta.round() as isize;
             }
         }
     }
-}
-
-#[cfg(not(feature = "ffmpeg_8"))]
-fn get_rotation_angle(input: &Stream) -> isize {
-    unsafe {
-        let display_matrix_ptr = av_stream_get_side_data(
-            input.as_ptr(),
-            AVPacketSideDataType::AV_PKT_DATA_DISPLAYMATRIX,
-            std::ptr::null_mut(),
-        );
-        if display_matrix_ptr.is_null() {
-            0_isize
-        } else {
-            let theta = av_display_rotation_get(display_matrix_ptr as *const _);
-            if theta.is_nan() {
-                0_isize
-            } else {
-                theta.round() as isize
-            }
-        }
-    }
+    0_isize
 }
 
 pub fn extract_video_params(input: &Stream) -> VideoParams {

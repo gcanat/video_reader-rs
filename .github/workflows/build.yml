@@ -190,7 +190,7 @@ jobs:
         uses: PyO3/maturin-action@e10f6c464b90acceb5f640d31beda6d586ba7b4a  # v1.49.3
         with:
           target: ${{ matrix.platform.target }}
-          args: --release --features ffmpeg_8 --out dist --find-interpreter
+          args: --release --out dist --find-interpreter
 
       - name: Repair wheel with delocate
         shell: bash
