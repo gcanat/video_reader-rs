@@ -226,7 +226,7 @@ jobs:
     if: "startsWith(github.ref, 'refs/tags/')"
     needs: [linux, windows, macos, sdist]
     steps:
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53  # v6.0.0
       - name: Publish to PyPI
         uses: PyO3/maturin-action@e10f6c464b90acceb5f640d31beda6d586ba7b4a  # v1.49.3
         env:
