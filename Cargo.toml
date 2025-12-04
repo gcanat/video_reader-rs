@@ -8,7 +8,7 @@ name = "video_reader"
 crate-type = ["cdylib"]
 
 [dependencies]
-pyo3 = { version = "0.25", features = ["extension-module"] }
+pyo3 = { version = "0.25", features = ["extension-module", "abi3-py39"] }
 numpy = "0.25"
 ndarray = { version = "0.16.1", features = ["rayon"] }
 ffmpeg-next = "8.0.0"
