@@ -126,15 +126,6 @@ impl StreamInfo {
     pub fn has_negative_dts(&self) -> bool {
         self.has_negative_dts
     }
-    /// Get the raw PTS value for a decode index (packet order)
-    pub fn get_pts_for_decode_idx(&self, decode_idx: usize) -> Option<i64> {
-        self.frame_times.get(&decode_idx).map(|ft| ft.pts)
-    }
-    /// Get the raw PTS value for a presentation index (display order)
-    pub fn get_pts_for_presentation_idx(&self, presentation_idx: usize) -> Option<i64> {
-        let decode_idx = self.get_decode_idx_for_presentation(presentation_idx)?;
-        self.get_pts_for_decode_idx(decode_idx)
-    }
     pub fn get_all_pts(&self, time_base: f64) -> Vec<f64> {
         self.frame_times
             .values()

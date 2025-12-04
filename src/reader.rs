@@ -812,132 +812,6 @@ impl VideoReader {
             }
         }
     }
-
-    /// Verify if seek works correctly for this video by testing a seek operation
-    /// Returns true if seek produces correct results, false otherwise
-    /// 
-    /// This is useful for videos with negative PTS/DTS where FFmpeg's seek behavior
-    /// may be unreliable depending on the time_base and timestamp values.
-    /// 
-    /// The verification works by:
-    /// 1. Seeking to a keyframe (not the first one)
-    /// 2. Sending multiple packets and decoding frames
-    /// 3. Checking if ANY decoded frame's PTS matches the expected keyframe PTS
-    /// 
-    /// This catches cases where seek "succeeds" but FFmpeg actually goes back
-    /// to the beginning of the video (common with negative PTS videos).
-    pub fn verify_seek_works(&mut self) -> bool {
-        let key_frames = self.stream_info.key_frames();
-        
-        // Find a keyframe to test (preferably not the first one)
-        let test_keyframe = if key_frames.len() > 1 {
-            // Use the second keyframe to actually test seeking
-            key_frames[1]
-        } else if !key_frames.is_empty() {
-            key_frames[0]
-        } else {
-            return false;  // No keyframes, can't verify
-        };
-
-        // Get the expected PTS for this keyframe (in presentation order)
-        let expected_pts = match self.stream_info.get_pts_for_presentation_idx(test_keyframe) {
-            Some(pts) => pts,
-            None => return false,
-        };
-        
-        // Also get the PTS of the first frame (frame 0) to detect if we ended up there
-        let first_frame_pts = self.stream_info.get_pts_for_presentation_idx(0).unwrap_or(0);
-        
-        debug!("verify_seek_works: testing seek to keyframe {} (expected_pts={}, first_frame_pts={})", 
-               test_keyframe, expected_pts, first_frame_pts);
-
-        // Try to seek to this keyframe
-        if self.seek_to_start().is_err() {
-            return false;
-        }
-
-        // Get the decode index for this presentation index
-        let decode_idx = match self.stream_info.get_decode_idx_for_presentation(test_keyframe) {
-            Some(idx) => idx,
-            None => return false,
-        };
-
-        // Seek using the low-level seek
-        let pts = self.stream_info.get_pts_for_decode_idx(decode_idx).unwrap_or(0);
-        if self.avseekframe(&decode_idx, pts, 0).is_err() {
-            return false;
-        }
-        
-        // Flush buffers
-        if self.avflushbuf().is_err() {
-            return false;
-        }
-
-        // Send multiple packets and decode frames to check where we actually are
-        // We need to decode multiple frames because FFmpeg might buffer
-        let mut decoded_pts_values: Vec<i64> = Vec::new();
-        let mut packets_sent = 0;
-        let max_packets = 20;  // Check first 20 packets
-        
-        'packet_loop: for (stream, packet) in self.ictx.packets() {
-            if stream.index() != self.stream_index {
-                continue;
-            }
-            
-            if self.decoder.video.send_packet(&packet).is_err() {
-                continue;
-            }
-            packets_sent += 1;
-            
-            let mut decoded = Video::empty();
-            while self.decoder.video.receive_frame(&mut decoded).is_ok() {
-                if let Some(pts) = decoded.pts() {
-                    decoded_pts_values.push(pts);
-                }
-            }
-            
-            // If we have enough samples, stop
-            if packets_sent >= max_packets || decoded_pts_values.len() >= 10 {
-                break 'packet_loop;
-            }
-        }
-
-        // Reset state for future operations
-        let _ = self.seek_to_start();
-
-        debug!("verify_seek_works: decoded PTS values after seek: {:?}", decoded_pts_values);
-
-        // Check if we got the expected PTS or ended up at the beginning
-        let found_expected = decoded_pts_values.iter().any(|&pts| pts == expected_pts);
-        let found_first_frame = decoded_pts_values.iter().any(|&pts| pts == first_frame_pts);
-        
-        // If the first frame's PTS (e.g., 0 or negative) appears in our decoded frames,
-        // but we were seeking to a later keyframe, the seek failed
-        let seek_worked = if test_keyframe > 0 && first_frame_pts != expected_pts {
-            // We sought to a non-zero keyframe, so we shouldn't see frame 0's PTS
-            // (unless the keyframe and first frame have the same PTS, which is edge case)
-            if found_first_frame && !found_expected {
-                debug!("verify_seek_works: FAILED - found first frame PTS {} but not expected {}", 
-                       first_frame_pts, expected_pts);
-                false
-            } else if found_expected {
-                debug!("verify_seek_works: SUCCESS - found expected PTS {}", expected_pts);
-                true
-            } else {
-                // Didn't find either - uncertain, but likely failed
-                debug!("verify_seek_works: UNCERTAIN - neither expected {} nor first {} found", 
-                       expected_pts, first_frame_pts);
-                false
-            }
-        } else {
-            // First keyframe test - just check if we found the expected PTS
-            found_expected
-        };
-
-        debug!("verify_seek_works: result={}", seek_worked);
-        seek_worked
-    }
-
     /// Check if this video needs sequential mode
     /// Returns true if seek is known to be unreliable for this video
     pub fn needs_sequential_mode(&mut self) -> bool {
@@ -948,13 +822,14 @@ impl VideoReader {
             return true;
         }
 
-        // Videos with negative DTS (but positive PTS) may work with seek flag=0
-        // The flag is already set in seek_frame_by_decode_idx based on has_negative_pts()
-        // For extra safety, we can verify seek works
+        // Videos with negative DTS MUST also use sequential mode
+        // FFmpeg's av_seek_frame is unreliable for negative DTS videos:
+        // - Some keyframes seek correctly, others jump to wrong positions
+        // - Cannot reliably predict which keyframes will fail
+        // - Runtime verification cannot cover all cases
         if self.stream_info.has_negative_dts() {
-            let works = self.verify_seek_works();
-            debug!("needs_sequential_mode: Video has negative DTS - verify_seek_works={}", works);
-            return !works;
+            debug!("needs_sequential_mode: Video has negative DTS - must use sequential");
+            return true;
         }
 
         // Normal videos (no negative PTS or DTS) - seek should work fine
