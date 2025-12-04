@@ -76,6 +76,8 @@ pub struct VideoReader {
     n_fails: usize,
     decoder: VideoDecoder,
     draining: bool,
+    /// Cached result of seek verification (None = not tested yet)
+    seek_verified: Option<bool>,
     /// True if we've sent EOF and need to re-seek before processing more frames
     eof_sent: bool,
 }
@@ -111,6 +113,7 @@ impl VideoReader {
             n_fails: 0,
             decoder,
             draining: false,
+            seek_verified: None,  // Will be tested on first get_batch
             eof_sent: false,
         })
     }
@@ -814,6 +817,7 @@ impl VideoReader {
     }
     /// Check if this video needs sequential mode
     /// Returns true if seek is known to be unreliable for this video
+    /// Result is cached after first call to avoid repeated verification overhead
     pub fn needs_sequential_mode(&mut self) -> bool {
         // Videos with negative PTS MUST use sequential mode
         // FFmpeg decoder normalizes PTS, making our presentation order mapping invalid
@@ -832,8 +836,122 @@ impl VideoReader {
             return true;
         }
 
-        // Normal videos (no negative PTS or DTS) - seek should work fine
+        // Check cached verification result
+        if let Some(seek_works) = self.seek_verified {
+            if !seek_works {
+                debug!("needs_sequential_mode: Cached result - seek failed");
+            }
+            return !seek_works;
+        }
+
+        // For normal videos, do a runtime seek verification (only once)
+        // Some videos have seek issues even with positive PTS/DTS
+        let seek_works = self.verify_seek_works();
+        self.seek_verified = Some(seek_works);  // Cache the result
+        
+        if !seek_works {
+            debug!("needs_sequential_mode: Runtime verification failed - must use sequential");
+            return true;
+        }
+
+        // Normal videos that pass verification - seek should work fine
         false
+    }
+
+    /// Verify if seek works correctly by testing a seek to a middle keyframe
+    /// Returns true if seek produces correct results, false otherwise
+    fn verify_seek_works(&mut self) -> bool {
+        let key_frames = self.stream_info.key_frames();
+        
+        // Need at least 2 keyframes to test (skip first keyframe since seek to 0 always works)
+        if key_frames.len() < 2 {
+            return true;  // Can't verify, assume it works
+        }
+
+        // Pick the second keyframe (or middle one if many keyframes)
+        let test_keyframe_idx = if key_frames.len() >= 4 {
+            key_frames.len() / 2
+        } else {
+            1
+        };
+        let test_decode_idx = key_frames[test_keyframe_idx];
+        
+        // Get expected PTS for this keyframe
+        let expected_pts = match self.stream_info.frame_times().get(&test_decode_idx) {
+            Some(ft) => *ft.pts(),
+            None => return true,  // Can't verify
+        };
+
+        debug!(
+            "verify_seek_works: testing keyframe {} (decode_idx={}, expected_pts={})",
+            test_keyframe_idx, test_decode_idx, expected_pts
+        );
+
+        // Reset state
+        if self.seek_to_start().is_err() {
+            return false;
+        }
+
+        // Perform seek using pts with AVSEEK_FLAG_BACKWARD
+        if self.avseekframe(&test_decode_idx, expected_pts, 1).is_err() {
+            debug!("verify_seek_works: seek failed");
+            return false;
+        }
+
+        // Decode first few frames and check PTS
+        // B-frame videos may need many packets before outputting any frames
+        let mut decoded_pts_values: Vec<i64> = Vec::new();
+        let mut packets_sent = 0;
+        let max_packets = 30;
+
+        for (stream, packet) in self.ictx.packets() {
+            if stream.index() != self.stream_index {
+                continue;
+            }
+
+            if self.decoder.video.send_packet(&packet).is_err() {
+                continue;
+            }
+            packets_sent += 1;
+
+        let mut decoded = Video::empty();
+        while self.decoder.video.receive_frame(&mut decoded).is_ok() {
+                if let Some(pts) = decoded.pts() {
+                    decoded_pts_values.push(pts);
+            }
+        }
+
+            if packets_sent >= max_packets || decoded_pts_values.len() >= 5 {
+                break;
+            }
+    }
+
+        debug!(
+            "verify_seek_works: packets_sent={}, decoded_frames={}",
+            packets_sent, decoded_pts_values.len()
+        );
+
+        // Reset state for future operations
+        let _ = self.seek_to_start();
+
+        // Check if we got the expected PTS (or close to it) in decoded frames
+        // The expected PTS should appear in the first few decoded frames
+        let found = decoded_pts_values.iter().any(|&pts| {
+            // Allow some tolerance for B-frame reordering
+            // The keyframe PTS should be one of the first few decoded frames
+            pts == expected_pts
+        });
+
+        if !found {
+            debug!(
+                "verify_seek_works: FAILED - expected_pts={}, got {:?}",
+                expected_pts, decoded_pts_values
+            );
+        } else {
+            debug!("verify_seek_works: PASSED (found pts={})", expected_pts);
+        }
+
+        found
     }
 
     /// Detailed cost estimation for seek-based vs sequential methods
