@@ -43,11 +43,18 @@ pub fn create_filters(
 ) -> Result<filter::Graph, ffmpeg::Error> {
     let mut graph = filter::Graph::new();
 
+    // Get pixel format name, fallback to yuv420p if unknown
+    let pix_fmt_name = filter_cfg
+        .vid_format
+        .descriptor()
+        .map(|d| d.name())
+        .unwrap_or("yuv420p");
+
     let args = format!(
         "video_size={}x{}:pix_fmt={}:time_base={}:pixel_aspect=1/1",
         filter_cfg.width,
         filter_cfg.height,
-        filter_cfg.vid_format.descriptor().unwrap().name(),
+        pix_fmt_name,
         filter_cfg.time_base,
     );
     debug!("Buffer args: {}", args);
@@ -172,9 +179,10 @@ pub fn create_filter_spec(
 
     let filter_spec = match ff_filter {
         None => {
+            let pix_fmt_name = pix_fmt.descriptor().map(|d| d.name()).unwrap_or("yuv420p");
             let mut filter_spec = format!(
                 "format={},scale=w={}:h={}:flags=fast_bilinear{}",
-                pix_fmt.descriptor().unwrap().name(),
+                pix_fmt_name,
                 width,
                 height,
                 transpose_filter(rotation),
@@ -188,11 +196,12 @@ pub fn create_filter_spec(
                     println!("Using hwaccel other than cuda, you should provide a custom filter");
                     return Err(ffmpeg::error::Error::DecoderNotFound);
                 }
+                let hwaccel_fmt_name = hwaccel_fmt.descriptor().map(|d| d.name()).unwrap_or("nv12");
                 filter_spec = format!(
                     "scale_cuda=w={}:h={}:passthrough=0,hwdownload,format={}{}",
                     width,
                     height,
-                    hwaccel_fmt.descriptor().unwrap().name(),
+                    hwaccel_fmt_name,
                     transpose_filter(rotation),
                 );
                 codec_context_get_hw_frames_ctx(video, hw_format.unwrap(), hwaccel_fmt)?;
