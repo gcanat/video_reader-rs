@@ -318,64 +318,110 @@ impl PyVideoReader {
         }
     }
 
-    #[pyo3(signature = (indices, with_fallback=false))]
+    #[pyo3(signature = (indices, with_fallback=None))]
     /// Decodes the frames in the video corresponding to the indices in `indices`.
     /// * `indices` - list of frame index to decode.
-    /// * `with_fallback` - whether to fallback to safe decoding when video has weird
-    /// timestamps or B-frames.
+    /// * `with_fallback` - None (auto), True (sequential), or False (seek-based).
+    ///   - None: automatically choose the faster method based on cost estimation
+    ///   - True: use sequential decoding (iterate through all frames)
+    ///   - False: use seek-based decoding (seek to keyframes)
     fn get_batch<'a>(
         &'a self,
         py: Python<'a>,
         indices: Vec<usize>,
-        with_fallback: bool,
+        with_fallback: Option<bool>,
     ) -> PyResult<Bound<'a, PyArray<u8, Dim<[usize; 4]>>>> {
         match self.inner.lock() {
             Ok(mut vr) => {
-                // let video: Array4<u8>;
-                let start_time: i32 = vr
-                    .decoder()
-                    .video_info()
-                    .get("start_time")
-                    .unwrap()
-                    .as_str()
-                    .parse::<i32>()
-                    .unwrap_or(0);
-                let num_zero_pts = vr
-                    .stream_info()
-                    .frame_times()
-                    .iter()
-                    .filter(|(_, v)| v.pts() <= &0)
-                    .collect::<Vec<_>>()
-                    .len();
-                let first_key_idx = vr.stream_info().key_frames()[0];
-                let (_, first_key) = vr
-                    .stream_info()
-                    .frame_times()
-                    .iter()
-                    .nth(first_key_idx)
-                    .unwrap();
-                // Try to detect weird cases and if so switch to decoding without seeking
-                // NOTE: start_time > 0 means we have B-frames. Currently `get_batch` does not guarantee
-                // that we get the exact frame we want in this case, so by setting with_fallback to True
-                // we can enable a more accurate method, namely `get_batch_safe`.
-                if with_fallback
-                    && ((num_zero_pts > 1)
-                        || (first_key.dur() <= &0)
-                        || (first_key.dts() < &0)
-                        || start_time > 0)
-                {
-                    debug!("Switching to get_batch_safe!");
+                // For videos with negative PTS/DTS, verify if seek actually works
+                // Some negative DTS videos work fine (e.g., time_base 1/15360)
+                // while others fail (e.g., time_base 1/1000000 or negative PTS)
+                let force_sequential = vr.needs_sequential_mode();
+                
+                // Determine which method to use
+                let use_sequential = match with_fallback {
+                    Some(true) => true,   // Explicitly use sequential
+                    Some(false) => {
+                        // User requested seek-based, but force sequential if seek is broken
+                        if force_sequential {
+                            debug!("Seek verification failed - forcing sequential mode");
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    None => {
+                        // Auto mode: if seek is broken, use sequential
+                        if force_sequential {
+                            debug!("Seek verification failed - using sequential mode");
+                            true
+                        } else {
+                            // estimate which is faster
+                            vr.should_use_sequential(&indices)
+                        }
+                    }
+                };
+
+                if use_sequential {
+                    debug!("Using sequential method (get_batch_safe)");
                     match vr.get_batch_safe(indices) {
                         Ok(batch) => Ok(batch.into_pyarray(py)),
                         Err(e) => Err(PyRuntimeError::new_err(format!("Error: {e}"))),
                     }
                 } else {
+                    debug!("Using seek-based method (get_batch)");
                     match vr.get_batch(indices) {
                         Ok(batch) => Ok(batch.into_pyarray(py)),
                         Err(e) => Err(PyRuntimeError::new_err(format!("Error: {e}"))),
                     }
                 }
             }
+            Err(e) => Err(PyRuntimeError::new_err(format!("Lock error: {e}"))),
+        }
+    }
+
+    /// Estimate decode cost for both methods.
+    /// Returns (seek_cost, sequential_cost) - the estimated number of frames to decode.
+    fn estimate_decode_cost(&self, indices: Vec<usize>) -> PyResult<(usize, usize)> {
+        match self.inner.lock() {
+            Ok(vr) => Ok(vr.estimate_decode_cost(&indices)),
+            Err(e) => Err(PyRuntimeError::new_err(format!("Lock error: {e}"))),
+        }
+    }
+
+    /// Detailed decode cost estimation.
+    /// Returns dict with: seek_frames, seek_count, sequential_frames, unique_count, max_index, recommendation
+    fn estimate_decode_cost_detailed(&self, indices: Vec<usize>) -> PyResult<std::collections::HashMap<String, usize>> {
+        match self.inner.lock() {
+            Ok(vr) => {
+                let (seek_frames, seek_count, sequential_frames, unique_count, max_index) = 
+                    vr.estimate_decode_cost_detailed(&indices);
+                let use_sequential = vr.should_use_sequential(&indices);
+                
+                let mut result = std::collections::HashMap::new();
+                result.insert("seek_frames".to_string(), seek_frames);
+                result.insert("seek_count".to_string(), seek_count);
+                result.insert("sequential_frames".to_string(), sequential_frames);
+                result.insert("unique_count".to_string(), unique_count);
+                result.insert("max_index".to_string(), max_index);
+                result.insert("recommendation".to_string(), if use_sequential { 1 } else { 0 }); // 1=True, 0=False
+                
+                // Calculate total cost with overhead
+                const SEEK_OVERHEAD_FRAMES: usize = 5;
+                result.insert("seek_total_cost".to_string(), seek_frames + seek_count * SEEK_OVERHEAD_FRAMES);
+                
+                Ok(result)
+            }
+            Err(e) => Err(PyRuntimeError::new_err(format!("Lock error: {e}"))),
+        }
+    }
+
+    /// Count actual decodable frames by decoding without color conversion.
+    /// This is slower than reading metadata but gives accurate results for B-frame videos.
+    /// Equivalent to ffprobe's `nb_read_frames` with `-count_frames` option.
+    fn count_actual_frames(&self) -> PyResult<usize> {
+        match self.inner.lock() {
+            Ok(mut vr) => Ok(vr.count_actual_frames()),
             Err(e) => Err(PyRuntimeError::new_err(format!("Lock error: {e}"))),
         }
     }

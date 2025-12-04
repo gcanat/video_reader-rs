@@ -245,22 +245,4 @@ impl VideoDecoder {
         }
         Ok(None)
     }
-    /// Decode frames
-    pub fn skip_and_decode_frames(
-        &mut self,
-        reducer: &mut VideoReducer,
-        indices: &[usize],
-        frame_map: &mut HashMap<usize, FrameArray>,
-    ) -> Result<(), ffmpeg::Error> {
-        let mut decoded = Video::empty();
-        while self.video.receive_frame(&mut decoded).is_ok() {
-            if indices.iter().any(|x| x == &reducer.get_frame_index()) {
-                if let Some(rgb_frame) = self.process_frame(&decoded) {
-                    frame_map.insert(reducer.get_frame_index(), rgb_frame);
-                }
-            }
-            reducer.incr_frame_index(1);
-        }
-        Ok(())
-    }
 }

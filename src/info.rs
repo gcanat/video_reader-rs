@@ -18,22 +18,18 @@ pub struct VideoParams {
 #[derive(Debug)]
 pub struct FrameTime {
     pts: i64,
-    dur: i64,
     dts: i64,
 }
 
 impl FrameTime {
-    pub fn new(pts: i64, dur: i64, dts: i64) -> Self {
-        FrameTime { pts, dur, dts }
+    pub fn new(pts: i64, _dur: i64, dts: i64) -> Self {
+        FrameTime { pts, dts }
     }
     pub fn pts(&self) -> &i64 {
         &self.pts
     }
     pub fn dts(&self) -> &i64 {
         &self.dts
-    }
-    pub fn dur(&self) -> &i64 {
-        &self.dur
     }
 }
 
@@ -42,6 +38,18 @@ pub struct StreamInfo {
     frame_count: usize,
     key_frames: Vec<usize>,
     frame_times: BTreeMap<usize, FrameTime>,
+    /// Mapping from presentation index to decode index (packet order)
+    /// Used to find which keyframe to seek to for a given presentation index
+    presentation_to_decode_idx: Vec<usize>,
+    /// Mapping from decode index to presentation index
+    /// Used to find which presentation frame we're at after seeking to a keyframe
+    decode_to_presentation_idx: Vec<usize>,
+    /// Whether the video has negative PTS values
+    /// Whether video has negative PTS frames (seek is completely broken)
+    /// FFmpeg decoder normalizes PTS, making our presentation mapping invalid
+    has_negative_pts: bool,
+    /// Whether video has negative DTS frames (seek may work with flag=0)
+    has_negative_dts: bool,
 }
 
 impl StreamInfo {
@@ -50,10 +58,44 @@ impl StreamInfo {
         key_frames: Vec<usize>,
         frame_times: BTreeMap<usize, FrameTime>,
     ) -> Self {
+        // Build presentation order mapping by sorting by PTS
+        // For B-frame videos, decode order != presentation order
+        let mut pts_sorted: Vec<(i64, usize)> = frame_times
+            .iter()
+            .map(|(decode_idx, ft)| (ft.pts, *decode_idx))
+            .collect();
+        pts_sorted.sort_by_key(|(pts, _)| *pts);
+
+        // presentation_idx -> decode_idx
+        let presentation_to_decode_idx: Vec<usize> = pts_sorted
+            .iter()
+            .map(|(_, decode_idx)| *decode_idx)
+            .collect();
+
+        // decode_idx -> presentation_idx (reverse mapping)
+        let mut decode_to_presentation_idx = vec![0usize; frame_count];
+        for (pres_idx, &decode_idx) in presentation_to_decode_idx.iter().enumerate() {
+            if decode_idx < frame_count {
+                decode_to_presentation_idx[decode_idx] = pres_idx;
+            }
+        }
+
+        // Check if any frame has negative PTS (seek is completely broken for such videos)
+        // FFmpeg decoder normalizes PTS by adding an offset to make min_pts=0
+        // This breaks our presentation order mapping which uses packet PTS
+        let has_negative_pts = frame_times.values().any(|ft| ft.pts < 0);
+        
+        // Check if any frame has negative DTS (seek may work with flag=0)
+        let has_negative_dts = frame_times.values().any(|ft| ft.dts < 0);
+
         StreamInfo {
             frame_count,
             key_frames,
             frame_times,
+            presentation_to_decode_idx,
+            decode_to_presentation_idx,
+            has_negative_pts,
+            has_negative_dts,
         }
     }
     pub fn frame_count(&self) -> &usize {
@@ -64,6 +106,34 @@ impl StreamInfo {
     }
     pub fn frame_times(&self) -> &BTreeMap<usize, FrameTime> {
         &self.frame_times
+    }
+    /// Get the decode index (packet order) for a presentation index
+    pub fn get_decode_idx_for_presentation(&self, presentation_idx: usize) -> Option<usize> {
+        self.presentation_to_decode_idx.get(presentation_idx).copied()
+    }
+    /// Get the presentation index for a decode index (packet order)
+    /// Used to find which presentation frame a keyframe corresponds to
+    pub fn get_presentation_idx_for_decode(&self, decode_idx: usize) -> Option<usize> {
+        self.decode_to_presentation_idx.get(decode_idx).copied()
+    }
+    /// Check if video has negative PTS values
+    /// Videos with negative PTS have completely broken seek (FFmpeg normalizes PTS)
+    pub fn has_negative_pts(&self) -> bool {
+        self.has_negative_pts
+    }
+    /// Check if video has negative DTS values (but positive PTS)
+    /// These videos may work with seek flag=0
+    pub fn has_negative_dts(&self) -> bool {
+        self.has_negative_dts
+    }
+    /// Get the raw PTS value for a decode index (packet order)
+    pub fn get_pts_for_decode_idx(&self, decode_idx: usize) -> Option<i64> {
+        self.frame_times.get(&decode_idx).map(|ft| ft.pts)
+    }
+    /// Get the raw PTS value for a presentation index (display order)
+    pub fn get_pts_for_presentation_idx(&self, presentation_idx: usize) -> Option<i64> {
+        let decode_idx = self.get_decode_idx_for_presentation(presentation_idx)?;
+        self.get_pts_for_decode_idx(decode_idx)
     }
     pub fn get_all_pts(&self, time_base: f64) -> Vec<f64> {
         self.frame_times
