@@ -120,6 +120,42 @@ fn transpose_filter(rotation: isize) -> String {
     }
 }
 
+/// Parse scale dimensions from filter string (e.g., "scale=w=256:h=256" or "scale=256:256")
+/// Returns (width, height) if found, None otherwise
+fn parse_scale_from_filter(filter_spec: &str) -> Option<(u32, u32)> {
+    // Try to match "scale=w=XXX:h=YYY" format
+    if let Some(scale_pos) = filter_spec.find("scale=") {
+        let scale_str = &filter_spec[scale_pos + 6..];
+        
+        // Try "w=XXX:h=YYY" format
+        if scale_str.starts_with("w=") {
+            let mut width = None;
+            let mut height = None;
+            
+            for part in scale_str.split(':') {
+                if part.starts_with("w=") {
+                    width = part[2..].parse().ok();
+                } else if part.starts_with("h=") {
+                    height = part[2..].parse().ok();
+                }
+            }
+            
+            if let (Some(w), Some(h)) = (width, height) {
+                return Some((w, h));
+            }
+        }
+        
+        // Try "WIDTH:HEIGHT" format (e.g., "scale=256:256")
+        let parts: Vec<&str> = scale_str.split(':').collect();
+        if parts.len() >= 2 {
+            if let (Ok(w), Ok(h)) = (parts[0].parse::<u32>(), parts[1].parse::<u32>()) {
+                return Some((w, h));
+            }
+        }
+    }
+    None
+}
+
 pub fn create_filter_spec(
     width: u32,
     height: u32,
@@ -128,9 +164,11 @@ pub fn create_filter_spec(
     hwaccel_context: Option<HardwareAccelerationContext>,
     hwaccel_fmt: AvPixel,
     rotation: isize,
-) -> Result<(String, Option<AvPixel>), ffmpeg_next::Error> {
+) -> Result<(String, Option<AvPixel>, u32, u32), ffmpeg_next::Error> {
     let pix_fmt = AvPixel::YUV420P;
     let mut hw_format: Option<AvPixel> = None;
+    let mut out_width = width;
+    let mut out_height = height;
 
     let filter_spec = match ff_filter {
         None => {
@@ -162,6 +200,13 @@ pub fn create_filter_spec(
             filter_spec
         }
         Some(spec) => {
+            // Parse scale dimensions from custom filter
+            if let Some((w, h)) = parse_scale_from_filter(&spec) {
+                out_width = w;
+                out_height = h;
+                debug!("Parsed scale from custom filter: {}x{}", w, h);
+            }
+            
             if let Some(hw_ctx) = hwaccel_context {
                 hw_format = Some(hw_ctx.format());
                 codec_context_get_hw_frames_ctx(video, hw_format.unwrap(), hwaccel_fmt)?;
@@ -169,5 +214,5 @@ pub fn create_filter_spec(
             spec
         }
     };
-    Ok((filter_spec, hw_format))
+    Ok((filter_spec, hw_format, out_width, out_height))
 }

@@ -146,7 +146,7 @@ impl VideoReader {
         );
 
         let is_hwaccel = hwaccel_context.is_some();
-        let (filter_spec, hw_format) = create_filter_spec(
+        let (filter_spec, hw_format, out_width, out_height) = create_filter_spec(
             width,
             height,
             &mut video,
@@ -156,7 +156,11 @@ impl VideoReader {
             video_params.rotation,
         )?;
 
-        debug!("Filter spec: {}", filter_spec);
+        // Use the actual output dimensions (may differ from input if custom filter has scale)
+        width = out_width;
+        height = out_height;
+
+        debug!("Filter spec: {}, output size: {}x{}", filter_spec, width, height);
         let filter_cfg = FilterConfig::new(
             orig_h,
             orig_w,

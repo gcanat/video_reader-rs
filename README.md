@@ -139,6 +139,124 @@ for i in range(0, video_length, chunk_size):
     # do something with this chunk of 800 `frames`
 ```
 
+## 🎨 Custom Filter Support
+
+You can use FFmpeg's powerful filter system to customize video processing. This is useful when you need:
+- Fixed output dimensions (not preserving aspect ratio)
+- Specific scaling algorithms
+- Additional filters like crop, pad, etc.
+
+### Basic Usage
+
+```python
+from video_reader import PyVideoReader
+
+# Scale to fixed 256x256 (no aspect ratio preservation)
+vr = PyVideoReader(
+    filename,
+    filter="format=yuv420p,scale=w=256:h=256:flags=fast_bilinear"
+)
+
+# Use higher quality scaling
+vr = PyVideoReader(
+    filename,
+    filter="format=yuv420p,scale=w=224:h=224:flags=lanczos"
+)
+```
+
+### ⚠️ Important: Always Start with `format=yuv420p`
+
+The internal YUV→RGB conversion **requires YUV420P format**. Without it, videos with different pixel formats (like `yuvj420p`, `yuv422p`) will cause errors.
+
+```python
+# ❌ Wrong - may crash on some videos
+filter="scale=w=256:h=256"
+
+# ✅ Correct - works with all videos
+filter="format=yuv420p,scale=w=256:h=256"
+```
+
+### Scale Filter Parameters
+
+**Syntax**: `scale=w=WIDTH:h=HEIGHT:flags=FLAGS`
+
+| Parameter | Description | Example |
+|-----------|-------------|---------|
+| `w` | Output width in pixels | `w=256` |
+| `h` | Output height in pixels | `h=256` |
+| `flags` | Scaling algorithm | `flags=lanczos` |
+
+**Alternative syntax** (shorter):
+```python
+filter="format=yuv420p,scale=256:256"  # width:height
+```
+
+### Scaling Algorithms (`flags`)
+
+| Flag | Quality | Speed | Best For |
+|------|---------|-------|----------|
+| `fast_bilinear` | ⭐⭐ | ⭐⭐⭐⭐⭐ | Real-time, ML training |
+| `bilinear` | ⭐⭐⭐ | ⭐⭐⭐⭐ | General use |
+| `bicubic` | ⭐⭐⭐⭐ | ⭐⭐⭐ | Good quality |
+| `lanczos` | ⭐⭐⭐⭐⭐ | ⭐⭐ | Highest quality, downscaling |
+| `neighbor` | ⭐ | ⭐⭐⭐⭐⭐ | Pixel art, nearest neighbor |
+| `area` | ⭐⭐⭐⭐ | ⭐⭐⭐ | Downscaling |
+| `gauss` | ⭐⭐⭐ | ⭐⭐⭐ | Smooth results |
+
+**Recommendation**:
+- ML training: `fast_bilinear` (fast, good enough)
+- High quality: `lanczos` (best for downscaling)
+- Pixel-perfect: `neighbor` (no interpolation)
+
+### Advanced Examples
+
+```python
+# Crop center 480x480 then scale to 256x256
+filter="format=yuv420p,crop=w=480:h=480,scale=w=256:h=256:flags=lanczos"
+
+# Scale width to 256, height auto (preserve aspect ratio)
+filter="format=yuv420p,scale=w=256:h=-1:flags=bilinear"
+
+# Scale height to 256, width auto (preserve aspect ratio)  
+filter="format=yuv420p,scale=w=-1:h=256:flags=bilinear"
+
+# Pad to square before scaling (letterbox)
+filter="format=yuv420p,pad=w=max(iw\,ih):h=max(iw\,ih):x=(ow-iw)/2:y=(oh-ih)/2,scale=w=256:h=256"
+```
+
+### Filter vs Built-in Resize
+
+| Feature | `filter=` | `resize_shorter_side=` |
+|---------|-----------|------------------------|
+| Aspect ratio | Configurable | Always preserved |
+| Pixel format | Must specify | Auto-handled |
+| Complexity | Full control | Simple |
+| Use case | Fixed dimensions | Variable dimensions |
+
+```python
+# These produce similar results for 16:9 video:
+vr = PyVideoReader(path, resize_shorter_side=256)  # → 455x256
+vr = PyVideoReader(path, filter="format=yuv420p,scale=w=455:h=256:flags=fast_bilinear")
+
+# But only filter can do fixed square output:
+vr = PyVideoReader(path, filter="format=yuv420p,scale=w=256:h=256:flags=fast_bilinear")  # → 256x256
+```
+
+### Combining with get_batch
+
+Custom filters work seamlessly with all methods:
+
+```python
+vr = PyVideoReader(path, filter="format=yuv420p,scale=w=224:h=224:flags=lanczos")
+
+# All these work correctly:
+frames = vr.decode()                           # Decode all
+batch = vr.get_batch([0, 10, 20])             # Random access
+batch = vr.get_batch([0, 10, 20], with_fallback=False)  # Seek-based
+for frame in vr:                               # Iteration
+    pass
+```
+
 ## 🧪 Experimental support for Hardware Acceleration
 You need to install `video-reader-rs` from source by cloning this repo and running `maturin develop -r`. Your ffmpeg installation should have support for cuda. Check with `ffmpeg -version | grep cuda` for example.
 
