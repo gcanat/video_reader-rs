@@ -1,11 +1,12 @@
 use crate::ffi_hwaccel::codec_context_get_hw_frames_ctx;
 use crate::hwaccel::HardwareAccelerationContext;
-use ffmpeg::ffi::{av_buffersrc_parameters_alloc, av_buffersrc_parameters_set, AVPixelFormat};
+use ffmpeg::ffi::{av_buffersrc_parameters_alloc, av_buffersrc_parameters_set, av_free, AVPixelFormat};
 use ffmpeg::filter;
 use ffmpeg::format::Pixel as AvPixel;
 use ffmpeg::util::rational::Rational;
 use ffmpeg_next as ffmpeg;
 use log::debug;
+use std::ffi::c_void;
 
 pub struct FilterConfig<'a> {
     height: u32,
@@ -85,6 +86,9 @@ pub fn create_hwbuffer_src(
 
     unsafe {
         let params_ptr = av_buffersrc_parameters_alloc();
+        if params_ptr.is_null() {
+            return Err(ffmpeg::error::Error::Bug);
+        }
         if let Some(params) = params_ptr.as_mut() {
             params.format = Into::<AVPixelFormat>::into(vid_format) as i32;
             params.width = width as i32;
@@ -98,7 +102,9 @@ pub fn create_hwbuffer_src(
                 params.hw_frames_ctx = (*codec_ctx.as_mut_ptr()).hw_frames_ctx;
             }
         };
-        match av_buffersrc_parameters_set(filt_ctx.as_mut_ptr(), params_ptr) {
+        let ret = av_buffersrc_parameters_set(filt_ctx.as_mut_ptr(), params_ptr);
+        av_free(params_ptr as *mut c_void);
+        match ret {
             n if n >= 0 => Ok(filter::Context::wrap(filt_ctx.as_mut_ptr())),
             e => Err(ffmpeg::Error::from(e)),
         }

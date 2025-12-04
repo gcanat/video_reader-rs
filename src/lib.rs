@@ -29,7 +29,7 @@ use once_cell::sync::Lazy;
 use tokio::runtime::{self, Runtime};
 
 static RUNTIME: Lazy<Runtime> = Lazy::new(|| {
-    runtime::Builder::new_multi_thread()
+    runtime::Builder::new_current_thread()
         .enable_io()
         .build()
         .unwrap()
@@ -153,7 +153,10 @@ impl PyVideoReader {
             Ok(mut vr) => {
                 let frame_count = *vr.stream_info().frame_count();
                 let index = key.to_indices(frame_count)?;
-                let res_array = vr.get_batch(index).unwrap().into_dyn();
+                let res_array = vr
+                    .get_batch(index)
+                    .map_err(|e| PyRuntimeError::new_err(format!("Error: {e}")))?
+                    .into_dyn();
                 // remove first dim if key was a single int
                 if matches!(key, IntOrSlice::Int { .. }) {
                     Ok(res_array.squeeze().into_pyarray(py))

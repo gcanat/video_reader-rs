@@ -73,7 +73,14 @@ impl VideoReducer {
         let start = start_frame.unwrap_or(0);
         let end = end_frame.unwrap_or(frame_count).min(frame_count);
 
-        let n_frames = ((end - start) as f64 * compression_factor.unwrap_or(1.0)).round() as usize;
+        let mut comp = compression_factor.unwrap_or(1.0);
+        if !comp.is_finite() || comp <= 0.0 {
+            comp = 1.0;
+        }
+        // Avoid creating more frames than exist and prevent huge allocations.
+        comp = comp.min(1.0);
+
+        let n_frames = ((end - start) as f64 * comp).round().max(1.0) as usize;
 
         let indices = Array::linspace(start as f64, end as f64 - 1., n_frames)
             .iter()
@@ -153,8 +160,6 @@ pub struct VideoDecoder {
     pub color_space: YuvStandardMatrix,
     pub color_range: YuvRange,
 }
-
-unsafe impl Send for VideoDecoder {}
 
 impl VideoDecoder {
     pub fn new(

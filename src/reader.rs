@@ -80,8 +80,6 @@ pub struct VideoReader {
     eof_sent: bool,
 }
 
-unsafe impl Send for VideoReader {}
-
 impl VideoReader {
     pub fn decoder(&self) -> &VideoDecoder {
         &self.decoder
