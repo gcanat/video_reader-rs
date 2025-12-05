@@ -1,3 +1,5 @@
+use ffmpeg_next as ffmpeg;
+use ffmpeg::log as ffmpeg_log;
 use numpy::ndarray::{Dim, IxDyn};
 mod convert;
 mod ffi_hwaccel;
@@ -95,7 +97,7 @@ struct PyVideoReader {
 #[pymethods]
 impl PyVideoReader {
     #[new]
-    #[pyo3(signature = (filename, threads=None, resize_shorter_side=None, resize_longer_side=None, device=None, filter=None))]
+    #[pyo3(signature = (filename, threads=None, resize_shorter_side=None, resize_longer_side=None, device=None, filter=None, log_level=None))]
     /// create an instance of VideoReader
     /// * `filename` - path to the video file
     /// * `threads` - number of threads to use. If None, let ffmpeg choose the optimal number.
@@ -114,7 +116,30 @@ impl PyVideoReader {
         resize_longer_side: Option<f64>,
         device: Option<&str>,
         filter: Option<String>,
+        log_level: Option<&str>,
     ) -> PyResult<Self> {
+        // Configure ffmpeg log level (global). Default to Error to抑制大量 warning。
+        let ffmpeg_level = match log_level {
+            None => ffmpeg_log::Level::Error,
+            Some(lv) => match lv.to_lowercase().as_str() {
+                "quiet" => ffmpeg_log::Level::Quiet,
+                "panic" => ffmpeg_log::Level::Panic,
+                "fatal" => ffmpeg_log::Level::Fatal,
+                "error" => ffmpeg_log::Level::Error,
+                "warning" | "warn" => ffmpeg_log::Level::Warning,
+                "info" => ffmpeg_log::Level::Info,
+                "verbose" => ffmpeg_log::Level::Verbose,
+                "debug" => ffmpeg_log::Level::Debug,
+                "trace" => ffmpeg_log::Level::Trace,
+                other => {
+                    return Err(PyRuntimeError::new_err(format!(
+                        "Invalid log_level: {other}. Use one of: quiet, panic, fatal, error, warning, info, verbose, debug, trace"
+                    )))
+                }
+            },
+        };
+        ffmpeg_log::set_level(ffmpeg_level);
+
         let hwaccel = match device {
             Some("cpu") | None => None,
             Some(other) => Some(
