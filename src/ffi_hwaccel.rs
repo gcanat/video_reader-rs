@@ -48,7 +48,9 @@ pub fn hwdevice_list_available_device_types() -> Vec<HardwareAccelerationDeviceT
         ffmpeg::ffi::av_hwdevice_iterate_types(ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_NONE)
     };
     while hwdevice_type != ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_NONE {
-        hwdevice_types.push(HardwareAccelerationDeviceType::from(hwdevice_type).unwrap());
+        if let Some(hw) = HardwareAccelerationDeviceType::from(hwdevice_type) {
+            hwdevice_types.push(hw);
+        }
         hwdevice_type = unsafe { ffmpeg::ffi::av_hwdevice_iterate_types(hwdevice_type) };
     }
     hwdevice_types

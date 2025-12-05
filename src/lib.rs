@@ -32,7 +32,7 @@ static RUNTIME: Lazy<Runtime> = Lazy::new(|| {
     runtime::Builder::new_current_thread()
         .enable_io()
         .build()
-        .unwrap()
+        .unwrap_or_else(|e| panic!("Failed to build tokio runtime: {e}"))
 });
 
 type Frame = PyArray<u8, Dim<[usize; 3]>>;
@@ -117,7 +117,11 @@ impl PyVideoReader {
     ) -> PyResult<Self> {
         let hwaccel = match device {
             Some("cpu") | None => None,
-            Some(other) => Some(HardwareAccelerationDeviceType::from_str(other).unwrap()),
+            Some(other) => Some(
+                HardwareAccelerationDeviceType::from_str(other).map_err(|_| {
+                    PyRuntimeError::new_err(format!("Invalid device: {other}"))
+                })?,
+            ),
         };
         let decoder_config = DecoderConfig::new(
             threads.unwrap_or(0),
@@ -141,11 +145,13 @@ impl PyVideoReader {
         slf: PyRefMut<'_, Self>,
         py: Python<'a>,
     ) -> Option<Bound<'a, PyArray<u8, Dim<[usize; 3]>>>> {
-        slf.inner
-            .lock()
-            .unwrap()
-            .next()
-            .map(|rgb_frame| rgb_frame.into_pyarray(py))
+        match slf.inner.lock() {
+            Ok(mut vr) => vr.next().map(|rgb_frame| rgb_frame.into_pyarray(py)),
+            Err(e) => {
+                debug!("Lock error in __next__: {e}");
+                None
+            }
+        }
     }
 
     fn __getitem__<'a>(&self, py: Python<'a>, key: IntOrSlice) -> PyResult<Bound<'a, FrameOrVid>> {
@@ -185,8 +191,13 @@ impl PyVideoReader {
     fn get_pts(&self, index: Option<IntOrSlice>) -> PyResult<Vec<f64>> {
         match self.inner.lock() {
             Ok(vr) => {
-                let time_base = vr.decoder().video_info().get("time_base").unwrap();
-                let time_base = f64::from_str(time_base).unwrap();
+                let time_base = vr
+                    .decoder()
+                    .video_info()
+                    .get("time_base")
+                    .ok_or_else(|| PyRuntimeError::new_err("time_base missing"))?;
+                let time_base = f64::from_str(time_base)
+                    .map_err(|e| PyRuntimeError::new_err(format!("Invalid time_base: {e}")))?;
                 match index {
                     None => Ok(vr.stream_info().get_all_pts(time_base)),
                     Some(int_or_slice) => {
@@ -283,8 +294,8 @@ impl PyVideoReader {
                     reader
                         .decode_video_fast(start_frame, end_frame, compression_factor)
                         .await
-                        .unwrap()
-                });
+                })
+                .map_err(|e| PyRuntimeError::new_err(format!("Error: {e}")))?;
                 Ok(res_decode
                     .into_iter()
                     .map(|x| x.into_pyarray(py))
@@ -312,7 +323,8 @@ impl PyVideoReader {
             Ok(mut reader) => match reader.decode_video(start_frame, end_frame, compression_factor)
             {
                 Ok(video) => {
-                    let gray_video = rgb2gray(video);
+                    let gray_video = rgb2gray(video)
+                        .map_err(|e| PyRuntimeError::new_err(format!("Error: {e}")))?;
                     Ok(gray_video.into_pyarray(py))
                 }
                 Err(e) => Err(PyRuntimeError::new_err(format!("Error: {e}"))),

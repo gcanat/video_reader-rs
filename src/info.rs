@@ -182,7 +182,8 @@ pub fn collect_video_metadata(
     info.insert("time_base", params.time_base.to_string());
     info.insert("time_base_rational", params.time_base_rational.to_string());
     info.insert("duration", params.duration.to_string());
-    info.insert("codec_id", format!("{:?}", video.codec().unwrap().id()));
+    let codec_id = video.codec().map(|c| format!("{:?}", c.id())).unwrap_or_else(|| "UNKNOWN".to_string());
+    info.insert("codec_id", codec_id);
     info.insert("height", video.height().to_string());
     info.insert("width", video.width().to_string());
     info.insert("bit_rate", video.bit_rate().to_string());
@@ -266,12 +267,16 @@ pub fn get_resized_dim(
 
     if !respect_aspect_ratio {
         // in this case both values are Some so it should be safe to unwrap
-        if shorter_is_height {
-            new_height = resize_shorter_side_to.unwrap();
-            new_width = resize_longer_side_to.unwrap();
+        if let (Some(s), Some(l)) = (resize_shorter_side_to, resize_longer_side_to) {
+            if shorter_is_height {
+                new_height = s;
+                new_width = l;
+            } else {
+                new_height = l;
+                new_width = s;
+            }
         } else {
-            new_height = resize_longer_side_to.unwrap();
-            new_width = resize_shorter_side_to.unwrap();
+            return (height as u32, width as u32);
         }
         return (new_height as u32, new_width as u32);
     }
@@ -287,12 +292,16 @@ pub fn get_resized_dim(
         }
     } else {
         // resize_longer_side_to can only be Some at this point
-        if shorter_is_height {
-            new_width = resize_longer_side_to.unwrap();
-            new_height = (height * new_width / width).round();
+        if let Some(res_long_side) = resize_longer_side_to {
+            if shorter_is_height {
+                new_width = res_long_side;
+                new_height = (height * new_width / width).round();
+            } else {
+                new_height = res_long_side;
+                new_width = (width * new_height / height).round();
+            }
         } else {
-            new_height = resize_longer_side_to.unwrap();
-            new_width = (width * new_height / height).round();
+            return (height as u32, width as u32);
         }
     }
     (new_height as u32, new_width as u32)

@@ -3,6 +3,7 @@ use ffmpeg::util::frame::video::Video;
 use ffmpeg_next as ffmpeg;
 use ndarray::parallel::prelude::*;
 use ndarray::{stack, Array2, Array3, Array4, ArrayView3, Axis};
+use log::debug;
 use yuv::{
     yuv420_to_rgb, yuv_nv12_to_rgb, YuvBiPlanarImage, YuvConversionMode, YuvPlanarImage, YuvRange,
     YuvStandardMatrix,
@@ -17,7 +18,7 @@ pub fn convert_yuv_to_ndarray_rgb24(
     frame: Video,
     color_space: YuvStandardMatrix,
     color_range: YuvRange,
-) -> Array3<u8> {
+) -> Result<Array3<u8>, ffmpeg::Error> {
     let (buf_vec, frame_width, frame_height, bytes_copied) =
         copy_image(frame, AVPixelFormat::AV_PIX_FMT_YUV420P);
 
@@ -44,10 +45,20 @@ pub fn convert_yuv_to_ndarray_rgb24(
             color_range,
             color_space,
         )
-        .unwrap();
-        Array3::from_shape_vec((frame_height as usize, frame_width as usize, 3_usize), rgb).unwrap()
+        .map_err(|e| {
+            debug!("yuv420_to_rgb failed: {e:?}");
+            ffmpeg::Error::Bug
+        })?;
+        Array3::from_shape_vec(
+            (frame_height as usize, frame_width as usize, 3_usize),
+            rgb,
+        )
+        .map_err(|e| {
+            debug!("from_shape_vec failed: {e:?}");
+            ffmpeg::Error::Bug
+        })
     } else {
-        Array3::zeros((frame_height as usize, frame_width as usize, 3_usize))
+        Err(ffmpeg::Error::InvalidData)
     }
 }
 
@@ -60,7 +71,7 @@ pub fn convert_nv12_to_ndarray_rgb24(
     frame: Video,
     color_space: YuvStandardMatrix,
     color_range: YuvRange,
-) -> Array3<u8> {
+) -> Result<Array3<u8>, ffmpeg::Error> {
     let (buf_vec, frame_width, frame_height, bytes_copied) =
         copy_image(frame, AVPixelFormat::AV_PIX_FMT_NV12);
 
@@ -85,10 +96,20 @@ pub fn convert_nv12_to_ndarray_rgb24(
             color_space,
             YuvConversionMode::Balanced,
         )
-        .unwrap();
-        Array3::from_shape_vec((frame_height as usize, frame_width as usize, 3_usize), rgb).unwrap()
+        .map_err(|e| {
+            debug!("yuv_nv12_to_rgb failed: {e:?}");
+            ffmpeg::Error::Bug
+        })?;
+        Array3::from_shape_vec(
+            (frame_height as usize, frame_width as usize, 3_usize),
+            rgb,
+        )
+        .map_err(|e| {
+            debug!("from_shape_vec failed: {e:?}");
+            ffmpeg::Error::Bug
+        })
     } else {
-        Array3::zeros((frame_height as usize, frame_width as usize, 3_usize))
+        Err(ffmpeg::Error::InvalidData)
     }
 }
 
@@ -148,7 +169,7 @@ pub fn get_colorrange(color_range: &str) -> YuvRange {
 
 /// Convert RGB video (N, H, W, C) to Grayscale video (N, H, W).
 /// Returns a 3D ndarray with shape (N, H, W).
-pub fn rgb2gray(frames: Array4<u8>) -> Array3<u8> {
+pub fn rgb2gray(frames: Array4<u8>) -> Result<Array3<u8>, ffmpeg::Error> {
     let mut gray = Vec::new();
     frames
         .axis_iter(Axis(0))
@@ -156,7 +177,10 @@ pub fn rgb2gray(frames: Array4<u8>) -> Array3<u8> {
         .map(rgb2gray_2d)
         .collect_into_vec(&mut gray);
     let views: Vec<_> = gray.iter().map(|x| x.view()).collect();
-    stack(Axis(0), &views[..]).unwrap()
+    stack(Axis(0), &views[..]).map_err(|e| {
+        debug!("stack failed: {e:?}");
+        ffmpeg::Error::Bug
+    })
 }
 
 /// Convert RGB Frame (H, W, C) to grayscale (H, W).

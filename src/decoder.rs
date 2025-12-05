@@ -171,8 +171,14 @@ impl VideoDecoder {
         is_hwaccel: bool,
         graph: filter::Graph,
     ) -> Self {
-        let cspace_string = video_info.get("color_space").unwrap();
-        let crange_string = video_info.get("color_range").unwrap();
+        let cspace_string = video_info
+            .get("color_space")
+            .map(|s| s.as_str())
+            .unwrap_or("BT709");
+        let crange_string = video_info
+            .get("color_range")
+            .map(|s| s.as_str())
+            .unwrap_or("");
         let color_space = get_colorspace(height as i32, cspace_string);
         let color_range = get_colorrange(crange_string);
         VideoDecoder {
@@ -200,34 +206,37 @@ impl VideoDecoder {
     pub fn decode_frames(&mut self) -> Result<Option<FrameArray>, ffmpeg::Error> {
         let mut decoded = Video::empty();
         if self.video.receive_frame(&mut decoded).is_ok() {
-            let rgb_frame = self.process_frame(&decoded);
+            let rgb_frame = self.process_frame(&decoded)?;
             return Ok(rgb_frame);
         }
         Ok(None)
     }
 
-    pub fn process_frame(&mut self, decoded: &Video) -> Option<FrameArray> {
-        self.graph.get("in").unwrap().source().add(decoded).unwrap();
+    pub fn process_frame(&mut self, decoded: &Video) -> Result<Option<FrameArray>, ffmpeg::Error> {
+        if let Some(mut in_ctx) = self.graph.get("in") {
+            if in_ctx.source().add(decoded).is_err() {
+                return Err(ffmpeg::Error::Bug);
+            }
+        } else {
+            return Err(ffmpeg::Error::Bug);
+        }
         let cspace = self.color_space;
         let crange = self.color_range;
 
         let mut yuv_frame = Video::empty();
-        if self
-            .graph
-            .get("out")
-            .unwrap()
-            .sink()
-            .frame(&mut yuv_frame)
-            .is_ok()
-        {
-            let rgb_frame: FrameArray = if self.is_hwaccel {
-                convert_nv12_to_ndarray_rgb24(yuv_frame, cspace, crange)
-            } else {
-                convert_yuv_to_ndarray_rgb24(yuv_frame, cspace, crange)
-            };
-            return Some(rgb_frame);
+        if let Some(mut out_ctx) = self.graph.get("out") {
+            if out_ctx.sink().frame(&mut yuv_frame).is_ok() {
+                let rgb_frame: FrameArray = if self.is_hwaccel {
+                    convert_nv12_to_ndarray_rgb24(yuv_frame, cspace, crange)?
+                } else {
+                    convert_yuv_to_ndarray_rgb24(yuv_frame, cspace, crange)?
+                };
+                return Ok(Some(rgb_frame));
+            }
+        } else {
+            return Err(ffmpeg::Error::Bug);
         }
-        None
+        Ok(None)
     }
 
     /// Decode all frames that match the frame indices
@@ -244,7 +253,7 @@ impl VideoDecoder {
             reducer.incr_frame_index(1);
             if let Some(match_idx) = match_index {
                 reducer.remove_idx(match_idx);
-                let rgb_frame = self.process_frame(&decoded);
+                let rgb_frame = self.process_frame(&decoded)?;
                 return Ok(rgb_frame);
             }
         }

@@ -161,11 +161,14 @@ impl VideoReader {
         height = out_height;
 
         debug!("Filter spec: {}, output size: {}x{}", filter_spec, width, height);
+        let time_base_rational = video_info
+            .get("time_base_rational")
+            .ok_or(ffmpeg::Error::InvalidData)?;
         let filter_cfg = FilterConfig::new(
             orig_h,
             orig_w,
             orig_fmt,
-            video_info.get("time_base_rational").unwrap(),
+            time_base_rational,
             filter_spec.as_str(),
             is_hwaccel,
         );
@@ -212,7 +215,7 @@ impl VideoReader {
             self.curr_frame = key_pos;
         }
 
-        let mut reducer = reducer.unwrap();
+        let mut reducer = reducer.ok_or(ffmpeg::Error::Bug)?;
         reducer.set_frame_index(self.curr_frame);
         let max_idx = reducer.get_indices().iter().max().unwrap_or(&0).to_owned();
         Ok((reducer, max_idx))
@@ -341,9 +344,9 @@ impl VideoReader {
             self.seek_frame(&key_pos)?;
         }
 
-        let mut reducer = reducer.unwrap();
+        let mut reducer = reducer.ok_or(ffmpeg::Error::Bug)?;
         reducer.set_frame_index(self.curr_frame);
-        let mut tasks = vec![];
+        let mut tasks: Vec<task::JoinHandle<Result<FrameArray, ffmpeg::Error>>> = vec![];
 
         let mut receive_and_process_decoded_frames = |decoder: &mut ffmpeg::decoder::Video,
                                                       mut curr_frame: usize|
@@ -354,16 +357,15 @@ impl VideoReader {
                     self.decoder
                         .graph
                         .get("in")
-                        .unwrap()
+                        .ok_or(ffmpeg::Error::Bug)?
                         .source()
-                        .add(&decoded)
-                        .unwrap();
+                        .add(&decoded)?;
                     let mut rgb_frame = Video::empty();
                     if self
                         .decoder
                         .graph
                         .get("out")
-                        .unwrap()
+                        .ok_or(ffmpeg::Error::Bug)?
                         .sink()
                         .frame(&mut rgb_frame)
                         .is_ok()
@@ -411,7 +413,7 @@ impl VideoReader {
 
         let mut outputs = Vec::with_capacity(tasks.len());
         for task_ in tasks {
-            outputs.push(task_.await.unwrap());
+            outputs.push(task_.await.map_err(|_| ffmpeg::Error::Bug)??);
         }
 
         // flush and go back to start
@@ -438,7 +440,7 @@ impl VideoReader {
         let needed_total = needed.len();
         let max_needed = indices.iter().max().copied().unwrap_or(0);
         let mut frame_map: HashMap<usize, FrameArray> = HashMap::with_capacity(needed.len());
-        let mut tasks: Vec<(usize, thread::JoinHandle<FrameArray>)> =
+        let mut tasks: Vec<(usize, thread::JoinHandle<Result<FrameArray, ffmpeg::Error>>)> =
             Vec::with_capacity(needed.len());
 
         let mut decoded = Video::empty();
@@ -457,16 +459,15 @@ impl VideoReader {
                     self.decoder
                         .graph
                         .get("in")
-                        .unwrap()
+                        .ok_or(ffmpeg::Error::Bug)?
                         .source()
-                        .add(&decoded)
-                        .unwrap();
+                        .add(&decoded)?;
                     let mut rgb_frame = Video::empty();
                     if self
                         .decoder
                         .graph
                         .get("out")
-                        .unwrap()
+                        .ok_or(ffmpeg::Error::Bug)?
                         .sink()
                         .frame(&mut rgb_frame)
                         .is_ok()
@@ -504,16 +505,15 @@ impl VideoReader {
                 self.decoder
                     .graph
                     .get("in")
-                    .unwrap()
+                    .ok_or(ffmpeg::Error::Bug)?
                     .source()
-                    .add(&decoded)
-                    .unwrap();
+                    .add(&decoded)?;
                 let mut rgb_frame = Video::empty();
                 if self
                     .decoder
                     .graph
                     .get("out")
-                    .unwrap()
+                    .ok_or(ffmpeg::Error::Bug)?
                     .sink()
                     .frame(&mut rgb_frame)
                     .is_ok()
@@ -546,7 +546,10 @@ impl VideoReader {
 
         // gather async conversions
         for (idx, task_) in tasks {
-            let frame = task_.join().unwrap();
+            let frame = task_
+                .join()
+                .map_err(|_| ffmpeg::Error::Bug)?
+                .map_err(|_| ffmpeg::Error::Bug)?;
             frame_map.insert(idx, frame);
         }
 
@@ -605,7 +608,8 @@ impl VideoReader {
         };
 
         // Collect YUV frames first, then convert to RGB in parallel
-        let mut tasks: Vec<(usize, thread::JoinHandle<FrameArray>)> = Vec::with_capacity(unique_frames.len());
+        let mut tasks: Vec<(usize, thread::JoinHandle<Result<FrameArray, ffmpeg::Error>>)> =
+            Vec::with_capacity(unique_frames.len());
         let mut frame_map: HashMap<usize, FrameArray> = HashMap::with_capacity(unique_frames.len());
 
         // make sure we are at the beginning of the stream
@@ -638,7 +642,10 @@ impl VideoReader {
 
         // Gather async conversions (keyed by frame_index)
         for (frame_idx, task_) in tasks {
-            let frame = task_.join().unwrap();
+            let frame = task_
+                .join()
+                .map_err(|_| ffmpeg::Error::Bug)?
+                .map_err(|_| ffmpeg::Error::Bug)?;
             frame_map.insert(frame_idx, frame);
         }
 
@@ -780,17 +787,33 @@ impl VideoReader {
             );
 
             // Push through filter graph and get YUV frame
-            self.decoder.graph.get("in").unwrap().source().add(&decoded).unwrap();
-            let mut yuv_frame = Video::empty();
-            
-            // For simple scale filters, output is immediate (no delay)
-            if self.decoder.graph.get("out").unwrap().sink().frame(&mut yuv_frame).is_ok() {
-                if self.curr_pres_idx == target_pres_idx {
-                    let out_pts = yuv_frame.pts().unwrap_or(-1);
-                    debug!("Found target frame at pres_idx={}, pts={}", target_pres_idx, out_pts);
-                    self.curr_pres_idx += 1;
-                    return (Some(yuv_frame), counter + 1);
+            if let Some(mut in_ctx) = self.decoder.graph.get("in") {
+                if let Err(e) = in_ctx.source().add(&decoded) {
+                    debug!("Failed to push frame into filter graph: {e}");
+                    return (None, counter);
                 }
+            } else {
+                debug!("Filter graph missing 'in' pad");
+                return (None, counter);
+            }
+
+            let mut yuv_frame = Video::empty();
+            // For simple scale filters, output is immediate (no delay)
+            if let Some(mut out_ctx) = self.decoder.graph.get("out") {
+                if out_ctx.sink().frame(&mut yuv_frame).is_ok() {
+                    if self.curr_pres_idx == target_pres_idx {
+                        let out_pts = yuv_frame.pts().unwrap_or(-1);
+                        debug!(
+                            "Found target frame at pres_idx={}, pts={}",
+                            target_pres_idx, out_pts
+                        );
+                        self.curr_pres_idx += 1;
+                        return (Some(yuv_frame), counter + 1);
+                    }
+                }
+            } else {
+                debug!("Filter graph missing 'out' pad");
+                return (None, counter);
             }
             
             self.curr_pres_idx += 1;
@@ -1199,10 +1222,8 @@ impl VideoReader {
             .decoder
             .graph
             .get("out")
-            .unwrap()
-            .sink()
-            .frame(&mut filter_frame)
-            .is_ok()
+            .and_then(|mut ctx| ctx.sink().frame(&mut filter_frame).ok())
+            .is_some()
         {
             debug!("Discarding buffered filter frame after flush");
         }
@@ -1234,12 +1255,12 @@ mod tests {
         let result = get_init_context(&filename);
         assert!(result.is_ok());
 
-        let (ctx, stream_index) = result.unwrap();
+        let (ctx, stream_index) = result.expect("context should be ok");
         assert!(stream_index < ctx.streams().count());
 
         let stream = ctx.streams().find(|s| s.index() == stream_index);
         assert!(stream.is_some());
-        let stream = stream.unwrap();
+        let stream = stream.expect("stream should exist");
         assert_eq!(stream.parameters().medium(), Type::Video);
     }
 
@@ -1261,8 +1282,8 @@ mod tests {
     #[test]
     fn test_setup_decoder_context_no_hwaccel() {
         let path = Path::new(TEST_VIDEO);
-        ffmpeg::init().unwrap();
-        let ictx = input(&path).unwrap();
+        ffmpeg::init().expect("ffmpeg init failed");
+        let ictx = input(&path).expect("open input failed");
         let stream = ictx
             .streams()
             .best(Type::Video)
@@ -1271,21 +1292,21 @@ mod tests {
         // test with multiple threads
         let result = setup_decoder_context(&stream, 4, None);
         assert!(result.is_ok());
-        let (context, hwaccel) = result.unwrap();
+        let (context, hwaccel) = result.expect("setup_decoder_context failed");
         assert!(hwaccel.is_none());
         assert!(context.decoder().video().is_ok());
 
         // Test with 1 thread
         let result = setup_decoder_context(&stream, 1, None);
         assert!(result.is_ok());
-        let (context, hwaccel) = result.unwrap();
+        let (context, hwaccel) = result.expect("setup_decoder_context failed");
         assert!(hwaccel.is_none());
         assert!(context.decoder().video().is_ok());
 
         // Test with threads set to 0
         let result = setup_decoder_context(&stream, 0, None);
         assert!(result.is_ok());
-        let (context, hwaccel) = result.unwrap();
+        let (context, hwaccel) = result.expect("setup_decoder_context failed");
         assert!(hwaccel.is_none());
         assert!(context.decoder().video().is_ok());
     }

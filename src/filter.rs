@@ -59,7 +59,8 @@ pub fn create_filters(
     );
     debug!("Buffer args: {}", args);
 
-    let mut buffersrc_ctx = graph.add(&filter::find("buffer").unwrap(), "in", args.as_str())?;
+    let buffer = filter::find("buffer").ok_or(ffmpeg::Error::Bug)?;
+    let mut buffersrc_ctx = graph.add(&buffer, "in", args.as_str())?;
     if let Some(hw_pix_fmt) = hw_fmt {
         create_hwbuffer_src(
             decoder_ctx,
@@ -71,7 +72,8 @@ pub fn create_filters(
             filter_cfg.is_hwaccel,
         )?;
     }
-    graph.add(&filter::find("buffersink").unwrap(), "out", "")?;
+    let buffersink = filter::find("buffersink").ok_or(ffmpeg::Error::Bug)?;
+    graph.add(&buffersink, "out", "")?;
     graph
         .output("in", 0)?
         .input("out", 0)?
@@ -89,7 +91,9 @@ pub fn create_hwbuffer_src(
     time_base: &str,
     is_hwaccel: bool,
 ) -> Result<filter::Context, ffmpeg::util::error::Error> {
-    let time_base = time_base.split_once('/').unwrap();
+    let Some(time_base) = time_base.split_once('/') else {
+        return Err(ffmpeg::Error::InvalidData);
+    };
 
     unsafe {
         let params_ptr = av_buffersrc_parameters_alloc();
@@ -100,11 +104,15 @@ pub fn create_hwbuffer_src(
             params.format = Into::<AVPixelFormat>::into(vid_format) as i32;
             params.width = width as i32;
             params.height = height as i32;
-            params.time_base = Rational(
-                time_base.0.parse::<i32>().unwrap(),
-                time_base.1.parse::<i32>().unwrap(),
-            )
-            .into();
+            let tb_num = time_base
+                .0
+                .parse::<i32>()
+                .map_err(|_| ffmpeg::Error::InvalidData)?;
+            let tb_den = time_base
+                .1
+                .parse::<i32>()
+                .map_err(|_| ffmpeg::Error::InvalidData)?;
+            params.time_base = Rational(tb_num, tb_den).into();
             if is_hwaccel {
                 params.hw_frames_ctx = (*codec_ctx.as_mut_ptr()).hw_frames_ctx;
             }
@@ -204,7 +212,11 @@ pub fn create_filter_spec(
                     hwaccel_fmt_name,
                     transpose_filter(rotation),
                 );
-                codec_context_get_hw_frames_ctx(video, hw_format.unwrap(), hwaccel_fmt)?;
+                if let Some(hwfmt) = hw_format {
+                    codec_context_get_hw_frames_ctx(video, hwfmt, hwaccel_fmt)?;
+                } else {
+                    return Err(ffmpeg::error::Error::DecoderNotFound);
+                }
             }
             filter_spec
         }
@@ -218,7 +230,11 @@ pub fn create_filter_spec(
             
             if let Some(hw_ctx) = hwaccel_context {
                 hw_format = Some(hw_ctx.format());
-                codec_context_get_hw_frames_ctx(video, hw_format.unwrap(), hwaccel_fmt)?;
+                if let Some(hwfmt) = hw_format {
+                    codec_context_get_hw_frames_ctx(video, hwfmt, hwaccel_fmt)?;
+                } else {
+                    return Err(ffmpeg::error::Error::DecoderNotFound);
+                }
             }
             spec
         }
