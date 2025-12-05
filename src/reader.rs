@@ -219,32 +219,36 @@ impl VideoReader {
     }
 
     pub fn decode_next(&mut self) -> Result<FrameArray, ffmpeg::Error> {
-        loop {
-            match self.ictx.packets().next() {
-                Some((stream, packet)) => {
+        // First, try to get a frame from decoder buffer (from previously sent packets)
+        if let Some(rgb_frame) = self.decoder.decode_frames()? {
+            return Ok(rgb_frame);
+        }
+
+        // Need more packets - read and send until we get a frame
+        for (stream, packet) in self.ictx.packets() {
                     if stream.index() == self.stream_index {
                         self.decoder.video.send_packet(&packet)?;
-                        match self.decoder.decode_frames()? {
-                            Some(rgb_frame) => break Ok(rgb_frame),
-                            None => continue,
-                        };
-                    }
+                if let Some(rgb_frame) = self.decoder.decode_frames()? {
+                    return Ok(rgb_frame);
                 }
-                None => {
+                // No frame yet, continue to next packet
+            }
+        }
+
+        // No more packets, drain the decoder
                     if !self.draining {
                         self.decoder.video.send_eof()?;
                         self.draining = true;
                     }
+
+        // Try to get remaining frames from decoder buffer
                     match self.decoder.decode_frames()? {
-                        Some(rgb_frame) => break Ok(rgb_frame),
+            Some(rgb_frame) => Ok(rgb_frame),
                         None => {
                             self.draining = false;
                             self.decoder.video.flush();
                             self.seek_to_start()?;
-                            break Err(ffmpeg::Error::Eof);
-                        }
-                    }
-                }
+                Err(ffmpeg::Error::Eof)
             }
         }
     }
@@ -731,6 +735,14 @@ impl VideoReader {
         let target_pres_idx = self.curr_pres_idx + skip_count;
         let mut failsafe = (self.stream_info.frame_count() * 2) as i32;
 
+        // First, try to get frame from decoder's existing buffer (from previous packets)
+        let (yuv_frame, counter) = self.get_frame_raw_by_count(target_pres_idx);
+        if yuv_frame.is_some() {
+            return Ok(yuv_frame);
+        }
+        failsafe -= counter;
+
+        // Need more packets
         while failsafe > -1 {
             match self.ictx.packets().next() {
                 Some((stream, packet)) => {
@@ -756,7 +768,6 @@ impl VideoReader {
 
     /// Get raw YUV frame (after filter graph) at target presentation index
     /// Counts decoded frames and returns when reaching the target
-    /// IMPORTANT: Stops immediately after finding target to preserve decoder state for subsequent frames
     pub fn get_frame_raw_by_count(&mut self, target_pres_idx: usize) -> (Option<Video>, i32) {
         let mut decoded = Video::empty();
         let mut counter = 0;
@@ -768,21 +779,24 @@ impl VideoReader {
                 self.curr_pres_idx, target_pres_idx, frame_pts
             );
 
-            if self.curr_pres_idx == target_pres_idx {
-                debug!("Found target frame at pres_idx={}, pts={}", target_pres_idx, frame_pts);
-                // Push through filter graph and get YUV frame
-                self.decoder.graph.get("in").unwrap().source().add(&decoded).unwrap();
-                let mut yuv_frame = Video::empty();
-                if self.decoder.graph.get("out").unwrap().sink().frame(&mut yuv_frame).is_ok() {
+            // Push through filter graph and get YUV frame
+            self.decoder.graph.get("in").unwrap().source().add(&decoded).unwrap();
+            let mut yuv_frame = Video::empty();
+            
+            // For simple scale filters, output is immediate (no delay)
+            if self.decoder.graph.get("out").unwrap().sink().frame(&mut yuv_frame).is_ok() {
+                if self.curr_pres_idx == target_pres_idx {
                     let out_pts = yuv_frame.pts().unwrap_or(-1);
-                    debug!("Filter output frame pts={}", out_pts);
-                    self.curr_pres_idx += 1;  // Increment for this frame
-                    return (Some(yuv_frame), counter + 1);  // Return immediately!
+                    debug!("Found target frame at pres_idx={}, pts={}", target_pres_idx, out_pts);
+                    self.curr_pres_idx += 1;
+                    return (Some(yuv_frame), counter + 1);
                 }
             }
+            
             self.curr_pres_idx += 1;
             counter += 1;
         }
+        
         (None, counter)
     }
 
