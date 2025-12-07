@@ -146,7 +146,7 @@ impl VideoReader {
         );
 
         let is_hwaccel = hwaccel_context.is_some();
-        let (filter_spec, hw_format, out_width, out_height) = create_filter_spec(
+        let (filter_spec, hw_format, out_width, out_height, rotation_applied) = create_filter_spec(
             width,
             height,
             &mut video,
@@ -178,7 +178,7 @@ impl VideoReader {
 
         let graph = create_filters(&mut video, hw_format, filter_cfg)?;
 
-        if video_params.rotation.abs() == 90 {
+        if rotation_applied && video_params.rotation.abs() == 90 {
             std::mem::swap(&mut height, &mut width);
         }
         Ok(VideoDecoder::new(

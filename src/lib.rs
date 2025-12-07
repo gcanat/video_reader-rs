@@ -241,6 +241,9 @@ impl PyVideoReader {
         match self.inner.lock() {
             Ok(vr) => {
                 let mut info_dict = vr.decoder().video_info().clone();
+                info_dict.insert("width", vr.decoder().width.to_string());
+                info_dict.insert("height", vr.decoder().height.to_string());
+
                 info_dict.insert("frame_count", vr.stream_info().frame_count().to_string());
                 Ok(info_dict.into_py_dict(py)?)
             }
@@ -263,8 +266,9 @@ impl PyVideoReader {
     fn get_shape<'a>(&'a self, py: Python<'a>) -> PyResult<Bound<'a, PyList>> {
         match self.inner.lock() {
             Ok(vr) => {
-                let width = vr.decoder().video().width() as usize;
-                let height = vr.decoder().video().height() as usize;
+                // Use decoded/output dimensions (after rotation/filters)
+                let width = vr.decoder().width as usize;
+                let height = vr.decoder().height as usize;
                 let num_frames = vr.stream_info().frame_count();
                 let list = PyList::new(py, [*num_frames, height, width]);
                 Ok(list?)

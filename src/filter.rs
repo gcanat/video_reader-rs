@@ -129,7 +129,8 @@ fn transpose_filter(rotation: isize) -> String {
     match rotation {
         -90 => ",transpose=1".to_owned(),
         90 => ",transpose=2".to_owned(),
-        180 | -180 => ",transport=1,transpose=1".to_owned(),
+        // Rotate twice to achieve 180 degrees
+        180 | -180 => ",transpose=1,transpose=1".to_owned(),
         _ => "".to_owned(),
     }
 }
@@ -178,21 +179,24 @@ pub fn create_filter_spec(
     hwaccel_context: Option<HardwareAccelerationContext>,
     hwaccel_fmt: AvPixel,
     rotation: isize,
-) -> Result<(String, Option<AvPixel>, u32, u32), ffmpeg_next::Error> {
+) -> Result<(String, Option<AvPixel>, u32, u32, bool), ffmpeg_next::Error> {
     let pix_fmt = AvPixel::YUV420P;
     let mut hw_format: Option<AvPixel> = None;
     let mut out_width = width;
     let mut out_height = height;
+    let rotation_applied: bool;
 
     let filter_spec = match ff_filter {
         None => {
             let pix_fmt_name = pix_fmt.descriptor().map(|d| d.name()).unwrap_or("yuv420p");
+            let transpose = transpose_filter(rotation);
+            rotation_applied = !transpose.is_empty();
             let mut filter_spec = format!(
                 "format={},scale=w={}:h={}:flags=fast_bilinear{}",
                 pix_fmt_name,
                 width,
                 height,
-                transpose_filter(rotation),
+                transpose,
             );
 
             if let Some(hw_ctx) = hwaccel_context {
@@ -209,7 +213,7 @@ pub fn create_filter_spec(
                     width,
                     height,
                     hwaccel_fmt_name,
-                    transpose_filter(rotation),
+                    transpose,
                 );
                 if let Some(hwfmt) = hw_format {
                     codec_context_get_hw_frames_ctx(video, hwfmt, hwaccel_fmt)?;
@@ -235,8 +239,16 @@ pub fn create_filter_spec(
                     return Err(ffmpeg::error::Error::DecoderNotFound);
                 }
             }
-            spec
+            let has_transpose = spec.to_lowercase().contains("transpose");
+            if has_transpose {
+                rotation_applied = true; // Assume user handled rotation; we won't alter spec
+                spec
+            } else {
+                let transpose = transpose_filter(rotation);
+                rotation_applied = !transpose.is_empty();
+                format!("{}{}", spec, transpose)
+            }
         }
     };
-    Ok((filter_spec, hw_format, out_width, out_height))
+    Ok((filter_spec, hw_format, out_width, out_height, rotation_applied))
 }
