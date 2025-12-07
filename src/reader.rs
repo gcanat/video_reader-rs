@@ -1292,11 +1292,28 @@ impl VideoReader {
         // Iterate through all packets and decode (without RGB conversion)
         for (stream, packet) in self.ictx.packets() {
             if stream.index() == self.stream_index {
-                if self.decoder.video.send_packet(&packet).is_ok() {
-                    // Count all frames that come out of the decoder
-                    while self.decoder.video.receive_frame(&mut decoded).is_ok() {
-                        count += 1;
+                // Try to send packet; if decoder queue is full (EAGAIN), drain frames then retry
+                let mut sent = false;
+                while !sent {
+                    match self.decoder.video.send_packet(&packet) {
+                        Ok(()) => {
+                            sent = true;
+                        }
+                        Err(ffmpeg::Error::Other { errno })
+                            if errno == ffmpeg::error::EAGAIN =>
+                        {
+                            while self.decoder.video.receive_frame(&mut decoded).is_ok() {
+                                count += 1;
+                            }
+                            continue; // Drain then retry send_packet
+                        }
+                        Err(_) => break, // Ignore other errors (e.g., corrupted packet)
                     }
+                }
+
+                // Count all frames that come out of the decoder
+                while self.decoder.video.receive_frame(&mut decoded).is_ok() {
+                    count += 1;
                 }
             }
         }
