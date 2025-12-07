@@ -1,6 +1,8 @@
 use crate::ffi_hwaccel::codec_context_get_hw_frames_ctx;
 use crate::hwaccel::HardwareAccelerationContext;
-use ffmpeg::ffi::{av_buffersrc_parameters_alloc, av_buffersrc_parameters_set, av_free, AVPixelFormat};
+use ffmpeg::ffi::{
+    av_buffersrc_parameters_alloc, av_buffersrc_parameters_set, av_free, AVPixelFormat,
+};
 use ffmpeg::filter;
 use ffmpeg::format::Pixel as AvPixel;
 use ffmpeg::util::rational::Rational;
@@ -52,10 +54,7 @@ pub fn create_filters(
 
     let args = format!(
         "video_size={}x{}:pix_fmt={}:time_base={}:pixel_aspect=1/1",
-        filter_cfg.width,
-        filter_cfg.height,
-        pix_fmt_name,
-        filter_cfg.time_base,
+        filter_cfg.width, filter_cfg.height, pix_fmt_name, filter_cfg.time_base,
     );
     debug!("Buffer args: {}", args);
 
@@ -141,12 +140,12 @@ fn parse_scale_from_filter(filter_spec: &str) -> Option<(u32, u32)> {
     // Try to match "scale=w=XXX:h=YYY" format
     if let Some(scale_pos) = filter_spec.find("scale=") {
         let scale_str = &filter_spec[scale_pos + 6..];
-        
+
         // Try "w=XXX:h=YYY" format
         if scale_str.starts_with("w=") {
             let mut width = None;
             let mut height = None;
-            
+
             for part in scale_str.split(':') {
                 if part.starts_with("w=") {
                     width = part[2..].parse().ok();
@@ -154,12 +153,12 @@ fn parse_scale_from_filter(filter_spec: &str) -> Option<(u32, u32)> {
                     height = part[2..].parse().ok();
                 }
             }
-            
+
             if let (Some(w), Some(h)) = (width, height) {
                 return Some((w, h));
             }
         }
-        
+
         // Try "WIDTH:HEIGHT" format (e.g., "scale=256:256")
         let parts: Vec<&str> = scale_str.split(':').collect();
         if parts.len() >= 2 {
@@ -227,7 +226,7 @@ pub fn create_filter_spec(
                 out_height = h;
                 debug!("Parsed scale from custom filter: {}x{}", w, h);
             }
-            
+
             if let Some(hw_ctx) = hwaccel_context {
                 hw_format = Some(hw_ctx.format());
                 if let Some(hwfmt) = hw_format {

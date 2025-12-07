@@ -1,9 +1,9 @@
 use ffmpeg::ffi::{av_image_copy_to_buffer, AVPixelFormat};
 use ffmpeg::util::frame::video::Video;
 use ffmpeg_next as ffmpeg;
+use log::debug;
 use ndarray::parallel::prelude::*;
 use ndarray::{stack, Array2, Array3, Array4, ArrayView3, Axis};
-use log::debug;
 use yuv::{
     yuv420_to_rgb, yuv_nv12_to_rgb, YuvBiPlanarImage, YuvConversionMode, YuvPlanarImage, YuvRange,
     YuvStandardMatrix,
@@ -49,14 +49,12 @@ pub fn convert_yuv_to_ndarray_rgb24(
             debug!("yuv420_to_rgb failed: {e:?}");
             ffmpeg::Error::Bug
         })?;
-        Array3::from_shape_vec(
-            (frame_height as usize, frame_width as usize, 3_usize),
-            rgb,
+        Array3::from_shape_vec((frame_height as usize, frame_width as usize, 3_usize), rgb).map_err(
+            |e| {
+                debug!("from_shape_vec failed: {e:?}");
+                ffmpeg::Error::Bug
+            },
         )
-        .map_err(|e| {
-            debug!("from_shape_vec failed: {e:?}");
-            ffmpeg::Error::Bug
-        })
     } else {
         Err(ffmpeg::Error::InvalidData)
     }
@@ -100,14 +98,12 @@ pub fn convert_nv12_to_ndarray_rgb24(
             debug!("yuv_nv12_to_rgb failed: {e:?}");
             ffmpeg::Error::Bug
         })?;
-        Array3::from_shape_vec(
-            (frame_height as usize, frame_width as usize, 3_usize),
-            rgb,
+        Array3::from_shape_vec((frame_height as usize, frame_width as usize, 3_usize), rgb).map_err(
+            |e| {
+                debug!("from_shape_vec failed: {e:?}");
+                ffmpeg::Error::Bug
+            },
         )
-        .map_err(|e| {
-            debug!("from_shape_vec failed: {e:?}");
-            ffmpeg::Error::Bug
-        })
     } else {
         Err(ffmpeg::Error::InvalidData)
     }

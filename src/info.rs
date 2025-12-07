@@ -84,7 +84,7 @@ impl StreamInfo {
         // FFmpeg decoder normalizes PTS by adding an offset to make min_pts=0
         // This breaks our presentation order mapping which uses packet PTS
         let has_negative_pts = frame_times.values().any(|ft| ft.pts < 0);
-        
+
         // Check if any frame has negative DTS (seek may work with flag=0)
         let has_negative_dts = frame_times.values().any(|ft| ft.dts < 0);
 
@@ -109,7 +109,9 @@ impl StreamInfo {
     }
     /// Get the decode index (packet order) for a presentation index
     pub fn get_decode_idx_for_presentation(&self, presentation_idx: usize) -> Option<usize> {
-        self.presentation_to_decode_idx.get(presentation_idx).copied()
+        self.presentation_to_decode_idx
+            .get(presentation_idx)
+            .copied()
     }
     /// Get the presentation index for a decode index (packet order)
     /// Used to find which presentation frame a keyframe corresponds to
@@ -182,7 +184,10 @@ pub fn collect_video_metadata(
     info.insert("time_base", params.time_base.to_string());
     info.insert("time_base_rational", params.time_base_rational.to_string());
     info.insert("duration", params.duration.to_string());
-    let codec_id = video.codec().map(|c| format!("{:?}", c.id())).unwrap_or_else(|| "UNKNOWN".to_string());
+    let codec_id = video
+        .codec()
+        .map(|c| format!("{:?}", c.id()))
+        .unwrap_or_else(|| "UNKNOWN".to_string());
     info.insert("codec_id", codec_id);
     info.insert("height", video.height().to_string());
     info.insert("width", video.width().to_string());

@@ -6,8 +6,8 @@ use ffmpeg::util::frame::video::Video;
 use ffmpeg_next as ffmpeg;
 use log::debug;
 use std::collections::{HashMap, HashSet};
-use std::thread;
 use std::path::Path;
+use std::time::Instant;
 
 use crate::convert::{convert_nv12_to_ndarray_rgb24, convert_yuv_to_ndarray_rgb24};
 use crate::decoder::{DecoderConfig, VideoDecoder, VideoReducer};
@@ -113,7 +113,7 @@ impl VideoReader {
             n_fails: 0,
             decoder,
             draining: false,
-            seek_verified: None,  // Will be tested on first get_batch
+            seek_verified: None, // Will be tested on first get_batch
             eof_sent: false,
         })
     }
@@ -160,7 +160,10 @@ impl VideoReader {
         width = out_width;
         height = out_height;
 
-        debug!("Filter spec: {}, output size: {}x{}", filter_spec, width, height);
+        debug!(
+            "Filter spec: {}, output size: {}x{}",
+            filter_spec, width, height
+        );
         let time_base_rational = video_info
             .get("time_base_rational")
             .ok_or(ffmpeg::Error::InvalidData)?;
@@ -229,8 +232,8 @@ impl VideoReader {
 
         // Need more packets - read and send until we get a frame
         for (stream, packet) in self.ictx.packets() {
-                    if stream.index() == self.stream_index {
-                        self.decoder.video.send_packet(&packet)?;
+            if stream.index() == self.stream_index {
+                self.decoder.video.send_packet(&packet)?;
                 if let Some(rgb_frame) = self.decoder.decode_frames()? {
                     return Ok(rgb_frame);
                 }
@@ -239,18 +242,18 @@ impl VideoReader {
         }
 
         // No more packets, drain the decoder
-                    if !self.draining {
-                        self.decoder.video.send_eof()?;
-                        self.draining = true;
-                    }
+        if !self.draining {
+            self.decoder.video.send_eof()?;
+            self.draining = true;
+        }
 
         // Try to get remaining frames from decoder buffer
-                    match self.decoder.decode_frames()? {
+        match self.decoder.decode_frames()? {
             Some(rgb_frame) => Ok(rgb_frame),
-                        None => {
-                            self.draining = false;
-                            self.decoder.video.flush();
-                            self.seek_to_start()?;
+            None => {
+                self.draining = false;
+                self.decoder.video.flush();
+                self.seek_to_start()?;
                 Err(ffmpeg::Error::Eof)
             }
         }
@@ -440,8 +443,6 @@ impl VideoReader {
         let needed_total = needed.len();
         let max_needed = indices.iter().max().copied().unwrap_or(0);
         let mut frame_map: HashMap<usize, FrameArray> = HashMap::with_capacity(needed.len());
-        let mut tasks: Vec<(usize, thread::JoinHandle<Result<FrameArray, ffmpeg::Error>>)> =
-            Vec::with_capacity(needed.len());
 
         let mut decoded = Video::empty();
         let mut curr_idx: usize = 0;
@@ -474,21 +475,12 @@ impl VideoReader {
                     {
                         let cspace = self.decoder.color_space;
                         let crange = self.decoder.color_range;
-                        if self.decoder.is_hwaccel {
-                            tasks.push((
-                                curr_idx,
-                                thread::spawn(move || {
-                                    convert_nv12_to_ndarray_rgb24(rgb_frame, cspace, crange)
-                                }),
-                            ));
+                        let frame = if self.decoder.is_hwaccel {
+                            convert_nv12_to_ndarray_rgb24(rgb_frame, cspace, crange)?
                         } else {
-                            tasks.push((
-                                curr_idx,
-                                thread::spawn(move || {
-                                    convert_yuv_to_ndarray_rgb24(rgb_frame, cspace, crange)
-                                }),
-                            ));
-                        }
+                            convert_yuv_to_ndarray_rgb24(rgb_frame, cspace, crange)?
+                        };
+                        frame_map.insert(curr_idx, frame);
                         collected += 1;
                     }
                 }
@@ -520,21 +512,12 @@ impl VideoReader {
                 {
                     let cspace = self.decoder.color_space;
                     let crange = self.decoder.color_range;
-                    if self.decoder.is_hwaccel {
-                        tasks.push((
-                            curr_idx,
-                            thread::spawn(move || {
-                                convert_nv12_to_ndarray_rgb24(rgb_frame, cspace, crange)
-                            }),
-                        ));
+                    let frame = if self.decoder.is_hwaccel {
+                        convert_nv12_to_ndarray_rgb24(rgb_frame, cspace, crange)?
                     } else {
-                        tasks.push((
-                            curr_idx,
-                            thread::spawn(move || {
-                                convert_yuv_to_ndarray_rgb24(rgb_frame, cspace, crange)
-                            }),
-                        ));
-                    }
+                        convert_yuv_to_ndarray_rgb24(rgb_frame, cspace, crange)?
+                    };
+                    frame_map.insert(curr_idx, frame);
                     collected += 1;
                 }
             }
@@ -542,15 +525,6 @@ impl VideoReader {
             if collected >= needed_total || curr_idx > max_needed {
                 break;
             }
-        }
-
-        // gather async conversions
-        for (idx, task_) in tasks {
-            let frame = task_
-                .join()
-                .map_err(|_| ffmpeg::Error::Bug)?
-                .map_err(|_| ffmpeg::Error::Bug)?;
-            frame_map.insert(idx, frame);
         }
 
         // Build output in the same order as requested (including duplicates)
@@ -563,9 +537,7 @@ impl VideoReader {
 
         for (out_i, idx) in indices.iter().enumerate() {
             if let Some(frame) = frame_map.get(idx) {
-                frame_batch
-                    .slice_mut(s![out_i, .., .., ..])
-                    .assign(frame);
+                frame_batch.slice_mut(s![out_i, .., .., ..]).assign(frame);
             } else {
                 debug!("No frame found for {}", idx);
             }
@@ -581,7 +553,6 @@ impl VideoReader {
     /// the frames until we reach the desired frame index. Heavily inspired by the implementation
     /// from decord library: https://github.com/dmlc/decord
     ///
-    /// Uses async conversion from YUV to RGB to speed things up.
     /// Sorts indices internally to minimize backward seeks.
     pub fn get_batch(&mut self, indices: Vec<usize>) -> Result<VideoArray, ffmpeg::Error> {
         // Sort indices to minimize backward seeks (keep track of original positions)
@@ -591,6 +562,12 @@ impl VideoReader {
             .map(|(orig_idx, &frame_idx)| (orig_idx, frame_idx))
             .collect();
         sorted_indices.sort_by_key(|&(_, frame_idx)| frame_idx);
+
+        // Map frame_idx -> all output positions needing it (to preserve caller order & handle duplicates)
+        let mut positions_map: HashMap<usize, Vec<usize>> = HashMap::new();
+        for (orig_idx, frame_idx) in &sorted_indices {
+            positions_map.entry(*frame_idx).or_default().push(*orig_idx);
+        }
 
         // Deduplicate frame indices (avoid decoding same frame twice)
         let unique_frames: Vec<usize> = {
@@ -607,49 +584,10 @@ impl VideoReader {
                 .collect()
         };
 
-        // Collect YUV frames first, then convert to RGB in parallel
-        let mut tasks: Vec<(usize, thread::JoinHandle<Result<FrameArray, ffmpeg::Error>>)> =
-            Vec::with_capacity(unique_frames.len());
-        let mut frame_map: HashMap<usize, FrameArray> = HashMap::with_capacity(unique_frames.len());
-
         // make sure we are at the beginning of the stream
         self.seek_to_start()?;
 
-        // Process frames in sorted order (minimizes seeks)
-        for frame_index in unique_frames {
-            self.n_fails = 0;
-            debug!("[NEXT INDICE] frame_index: {frame_index}");
-            
-            // Get the raw YUV frame instead of converting immediately
-            if let Some(yuv_frame) = self.seek_accurate_raw(frame_index)? {
-                let cspace = self.decoder.color_space;
-                let crange = self.decoder.color_range;
-                let is_hwaccel = self.decoder.is_hwaccel;
-                
-                // Spawn async conversion task
-                tasks.push((
-                    frame_index,  // Use frame_index as key (not output index)
-                    thread::spawn(move || {
-                        if is_hwaccel {
-                            convert_nv12_to_ndarray_rgb24(yuv_frame, cspace, crange)
-        } else {
-                            convert_yuv_to_ndarray_rgb24(yuv_frame, cspace, crange)
-                        }
-                    }),
-                ));
-            }
-        }
-
-        // Gather async conversions (keyed by frame_index)
-        for (frame_idx, task_) in tasks {
-            let frame = task_
-                .join()
-                .map_err(|_| ffmpeg::Error::Bug)?
-                .map_err(|_| ffmpeg::Error::Bug)?;
-            frame_map.insert(frame_idx, frame);
-        }
-
-        // Build output in the original requested order
+        // Allocate output buffer once
         let mut video_frames: VideoArray = Array::zeros((
             indices.len(),
             self.decoder.height as usize,
@@ -657,13 +595,36 @@ impl VideoReader {
             3,
         ));
 
-        for (out_i, &frame_idx) in indices.iter().enumerate() {
-            if let Some(frame) = frame_map.get(&frame_idx) {
-                video_frames
-                    .slice_mut(s![out_i, .., .., ..])
-                    .assign(frame);
-            } else {
-                debug!("No frame found for frame index {}", frame_idx);
+        let cspace = self.decoder.color_space;
+        let crange = self.decoder.color_range;
+        let is_hwaccel = self.decoder.is_hwaccel;
+
+        // Process frames in sorted order (minimizes seeks)
+        for frame_index in unique_frames {
+            self.n_fails = 0;
+            debug!("[NEXT INDICE] frame_index: {frame_index}");
+
+            match self.seek_accurate_raw(frame_index) {
+                Ok(Some(yuv_frame)) => {
+                    let rgb_frame = if is_hwaccel {
+                        convert_nv12_to_ndarray_rgb24(yuv_frame, cspace, crange)
+                    } else {
+                        convert_yuv_to_ndarray_rgb24(yuv_frame, cspace, crange)
+                    }?;
+
+                    if let Some(positions) = positions_map.get(&frame_index) {
+                        for pos in positions {
+                            video_frames
+                                .slice_mut(s![*pos, .., .., ..])
+                                .assign(&rgb_frame);
+                        }
+                    }
+                }
+                Ok(None) => debug!("No frame found for frame index {}", frame_index),
+                Err(e) => {
+                    debug!("seek_accurate_raw failed at {}: {:?}", frame_index, e);
+                    return Err(e);
+                }
             }
         }
 
@@ -678,22 +639,30 @@ impl VideoReader {
     ) -> Result<Option<Video>, ffmpeg::Error> {
         // Get the decode index (packet order) for this presentation index
         // This tells us which packet produces the frame we want
-        let target_decode_idx = match self.stream_info.get_decode_idx_for_presentation(presentation_idx) {
+        let target_decode_idx = match self
+            .stream_info
+            .get_decode_idx_for_presentation(presentation_idx)
+        {
             Some(idx) => idx,
             None => {
-                debug!("No decode index found for presentation index {}", presentation_idx);
+                debug!(
+                    "No decode index found for presentation index {}",
+                    presentation_idx
+                );
                 return Ok(None);
             }
         };
 
         // Find the keyframe before this decode index
         let key_decode_idx = self.locate_keyframes(&target_decode_idx);
-        
+
         // Get the presentation index of the keyframe
         // After seeking to this keyframe, the decoder will output frames starting from this presentation index
-        let key_pres_idx = self.stream_info.get_presentation_idx_for_decode(key_decode_idx)
+        let key_pres_idx = self
+            .stream_info
+            .get_presentation_idx_for_decode(key_decode_idx)
             .unwrap_or(key_decode_idx);
-        
+
         // Calculate how many frames to skip after seeking
         let frames_to_skip = presentation_idx.saturating_sub(key_pres_idx);
 
@@ -710,7 +679,10 @@ impl VideoReader {
             && self.curr_pres_idx >= key_pres_idx;
 
         if can_skip_forward {
-            debug!("No need to seek, we can directly skip frames (curr_pres: {})", self.curr_pres_idx);
+            debug!(
+                "No need to seek, we can directly skip frames (curr_pres: {})",
+                self.curr_pres_idx
+            );
             let skip_count = presentation_idx.saturating_sub(self.curr_pres_idx);
             match self.skip_frames_raw_by_count(skip_count) {
                 Ok(frame) => Ok(frame),
@@ -718,13 +690,13 @@ impl VideoReader {
             }
         } else {
             debug!("Seeking to keyframe at decode idx: {}", key_decode_idx);
-            
+
             self.seek_to_start()?;
             self.seek_frame_by_decode_idx(&key_decode_idx)?;
             self.curr_frame = key_decode_idx;
             self.curr_dec_idx = key_decode_idx;
             self.curr_pres_idx = key_pres_idx;
-            
+
             match self.skip_frames_raw_by_count(frames_to_skip) {
                 Ok(frame) => Ok(frame),
                 Err(_) => self.get_frame_raw_after_eof_by_count(presentation_idx),
@@ -738,7 +710,10 @@ impl VideoReader {
         &mut self,
         skip_count: usize,
     ) -> Result<Option<Video>, ffmpeg::Error> {
-        debug!("Skipping {} frames, starting from pres_idx={}", skip_count, self.curr_pres_idx);
+        debug!(
+            "Skipping {} frames, starting from pres_idx={}",
+            skip_count, self.curr_pres_idx
+        );
         let target_pres_idx = self.curr_pres_idx + skip_count;
         let mut failsafe = (self.stream_info.frame_count() * 2) as i32;
 
@@ -781,7 +756,7 @@ impl VideoReader {
 
         while self.decoder.video.receive_frame(&mut decoded).is_ok() {
             let frame_pts = decoded.pts().unwrap_or(-1);
-        debug!(
+            debug!(
                 "Decoded frame (raw): pres_idx={}, target={}, frame_pts={}",
                 self.curr_pres_idx, target_pres_idx, frame_pts
             );
@@ -815,11 +790,11 @@ impl VideoReader {
                 debug!("Filter graph missing 'out' pad");
                 return (None, counter);
             }
-            
+
             self.curr_pres_idx += 1;
             counter += 1;
         }
-        
+
         (None, counter)
     }
 
@@ -829,41 +804,107 @@ impl VideoReader {
         &mut self,
         target_pres_idx: usize,
     ) -> Result<Option<Video>, ffmpeg::Error> {
-        debug!("get_frame_raw_after_eof_by_count: target_pres_idx={}", target_pres_idx);
+        debug!(
+            "get_frame_raw_after_eof_by_count: target_pres_idx={}",
+            target_pres_idx
+        );
         self.decoder.video.send_eof()?;
-        self.eof_sent = true;  // Mark that we've sent EOF - need to re-seek before processing more frames
-        // Use the original target, not self.curr_pres_idx!
+        self.eof_sent = true; // Mark that we've sent EOF - need to re-seek before processing more frames
+                              // Use the original target, not self.curr_pres_idx!
         let (yuv_frame, _counter) = self.get_frame_raw_by_count(target_pres_idx);
         Ok(yuv_frame)
     }
 
     /// Find the closest key frame before or at `pos` using binary search
     pub fn locate_keyframes(&self, pos: &usize) -> usize {
+        // Borrow directly to avoid per-call cloning; borrow scope ends within this function
         let key_frames = self.stream_info.key_frames();
         if key_frames.is_empty() {
             return 0;
         }
-        
+
         // Binary search for the largest keyframe <= pos
         match key_frames.binary_search(pos) {
-            Ok(idx) => key_frames[idx],  // Exact match
+            Ok(idx) => key_frames[idx], // Exact match
             Err(idx) => {
                 if idx == 0 {
-                    0  // pos is before first keyframe
+                    0 // pos is before first keyframe
                 } else {
-                    key_frames[idx - 1]  // Keyframe just before pos
+                    key_frames[idx - 1] // Keyframe just before pos
                 }
             }
         }
     }
+    /// Quick static checks before runtime seek verification.
+    /// Returns (force_sequential, force_full_verify, summary)
+    fn quick_seek_static_check(&self) -> (bool, bool, String) {
+        let mut force_sequential = false;
+        let mut force_full_verify = false;
+        let mut reasons: Vec<String> = Vec::new();
+
+        let key_frames = self.stream_info.key_frames();
+        let frame_times = self.stream_info.frame_times();
+
+        // Missing timing info for keyframes: cannot trust seek -> force sequential
+        if key_frames.iter().any(|kf| !frame_times.contains_key(kf)) {
+            force_sequential = true;
+            reasons.push("missing frame_times for some keyframes".to_string());
+        }
+
+        // PTS monotonicity on keyframes (decode order) - if violated, do full verify
+        if key_frames.len() > 1 {
+            let mut monotonic_violation = 0usize;
+            for pair in key_frames.windows(2) {
+                if let (Some(a), Some(b)) = (frame_times.get(&pair[0]), frame_times.get(&pair[1])) {
+                    if b.pts() < a.pts() {
+                        monotonic_violation += 1;
+                    }
+                }
+            }
+            if monotonic_violation > 0 {
+                force_full_verify = true;
+                reasons.push(format!(
+                    "keyframe pts non-monotonic ({} windows)",
+                    monotonic_violation
+                ));
+            }
+        }
+
+        // Keyframe gap outlier check: very long gap relative to median -> full verify
+        if key_frames.len() > 4 {
+            let mut gaps: Vec<usize> = key_frames.windows(2).map(|w| w[1] - w[0]).collect();
+            gaps.sort();
+            let median = gaps[gaps.len() / 2].max(1);
+            let max_gap = *gaps.last().unwrap_or(&median);
+            if max_gap > median * 4 && max_gap > 200 {
+                force_full_verify = true;
+                reasons.push(format!(
+                    "keyframe gap outlier: max={} median={}",
+                    max_gap, median
+                ));
+            }
+        }
+
+        let summary = if reasons.is_empty() {
+            "ok".to_string()
+        } else {
+            reasons.join("; ")
+        };
+        (force_sequential, force_full_verify, summary)
+    }
+
     /// Check if this video needs sequential mode
     /// Returns true if seek is known to be unreliable for this video
     /// Result is cached after first call to avoid repeated verification overhead
     pub fn needs_sequential_mode(&mut self) -> bool {
+        let t0 = Instant::now();
         // Videos with negative PTS MUST use sequential mode
         // FFmpeg decoder normalizes PTS, making our presentation order mapping invalid
         if self.stream_info.has_negative_pts() {
-            debug!("needs_sequential_mode: Video has negative PTS - must use sequential");
+            debug!(
+                "needs_sequential_mode: Video has negative PTS - sequential (cost {:?})",
+                t0.elapsed()
+            );
             return true;
         }
 
@@ -873,131 +914,228 @@ impl VideoReader {
         // - Cannot reliably predict which keyframes will fail
         // - Runtime verification cannot cover all cases
         if self.stream_info.has_negative_dts() {
-            debug!("needs_sequential_mode: Video has negative DTS - must use sequential");
+            debug!(
+                "needs_sequential_mode: Video has negative DTS - sequential (cost {:?})",
+                t0.elapsed()
+            );
             return true;
         }
 
         // Check cached verification result
         if let Some(seek_works) = self.seek_verified {
             if !seek_works {
-                debug!("needs_sequential_mode: Cached result - seek failed");
+                debug!(
+                    "needs_sequential_mode: Cached result - seek failed (cost {:?})",
+                    t0.elapsed()
+                );
             }
             return !seek_works;
         }
 
         // For normal videos, do a runtime seek verification (only once)
         // Some videos have seek issues even with positive PTS/DTS
-        let seek_works = self.verify_seek_works();
-        self.seek_verified = Some(seek_works);  // Cache the result
-        
-        if !seek_works {
-            debug!("needs_sequential_mode: Runtime verification failed - must use sequential");
+        let quick_start = Instant::now();
+        let (force_seq, force_full_verify, quick_summary) = self.quick_seek_static_check();
+        let quick_elapsed = quick_start.elapsed();
+        if force_seq {
+            debug!(
+                "needs_sequential_mode: quick static check -> sequential (reason: {}) (quick {:?}, total {:?})",
+                quick_summary,
+                quick_elapsed,
+                t0.elapsed()
+            );
             return true;
         }
 
+        debug!(
+            "needs_sequential_mode: quick static check ok (reason: {}) force_full_verify={} (quick {:?})",
+            quick_summary,
+            force_full_verify,
+            quick_elapsed
+        );
+
+        let seek_works = self.verify_seek_works(force_full_verify);
+        self.seek_verified = Some(seek_works); // Cache the result
+
+        if !seek_works {
+            debug!(
+                "needs_sequential_mode: Runtime verification failed - sequential (cost {:?})",
+                t0.elapsed()
+            );
+            return true;
+        }
+
+        debug!(
+            "needs_sequential_mode: seek verified ok (cost {:?})",
+            t0.elapsed()
+        );
         // Normal videos that pass verification - seek should work fine
         false
     }
 
-    /// Verify if seek works correctly by testing a seek to a middle keyframe
-    /// Returns true if seek produces correct results, false otherwise
-    fn verify_seek_works(&mut self) -> bool {
-        let key_frames = self.stream_info.key_frames();
-        
-        // Need at least 2 keyframes to test (skip first keyframe since seek to 0 always works)
+    /// Verify if seek works correctly by testing seeks to several keyframes.
+    /// Two-phase sampling: a small set first, then remaining points if all pass.
+    /// `force_full_verify` skips the two-phase shortcut and verifies all points.
+    /// Returns true only if all sampled keyframes can be reached reliably.
+    fn verify_seek_works(&mut self, force_full_verify: bool) -> bool {
+        let verify_start = Instant::now();
+        let key_frames = self.stream_info.key_frames().clone();
+        // Need at least 2 keyframes to verify; otherwise assume ok
         if key_frames.len() < 2 {
-            return true;  // Can't verify, assume it works
+            return true;
         }
 
-        // Pick the second keyframe (or middle one if many keyframes)
-        let test_keyframe_idx = if key_frames.len() >= 4 {
-            key_frames.len() / 2
-        } else {
-            1
+        // Build full candidate set to avoid missing locally broken GOPs
+        let mut full_candidates: Vec<usize> = Vec::new();
+        if key_frames.len() > 1 {
+            full_candidates.push(1);
+        }
+        if key_frames.len() > 2 {
+            full_candidates.push(2);
+        }
+        if key_frames.len() > 4 {
+            full_candidates.push(4);
+        }
+        full_candidates.push(key_frames.len() / 2);
+        if key_frames.len() > 2 {
+            full_candidates.push(key_frames.len().saturating_sub(2));
+        }
+        full_candidates.sort();
+        full_candidates.dedup();
+
+        // Phase 1: small sample set
+        let mut phase1: Vec<usize> = Vec::new();
+        if key_frames.len() > 1 {
+            phase1.push(1);
+        }
+        phase1.push(key_frames.len() / 2);
+        if key_frames.len() > 2 {
+            phase1.push(key_frames.len().saturating_sub(2));
+        }
+        phase1.sort();
+        phase1.dedup();
+
+        // Helper to verify a list of keyframe indices
+        let mut verify_candidates = |candidates: &[usize]| -> bool {
+            for &key_idx in candidates {
+                let key_start = Instant::now();
+                let decode_idx = key_frames[key_idx];
+                let expected_pts = match self.stream_info.frame_times().get(&decode_idx) {
+                    Some(ft) => *ft.pts(),
+                    None => continue, // skip if missing pts
+                };
+
+                debug!(
+                    "verify_seek_works: testing keyframe_idx={} decode_idx={} expected_pts={}",
+                    key_idx, decode_idx, expected_pts
+                );
+
+                if self.seek_to_start().is_err() {
+                    return false;
+                }
+
+                if self.avseekframe(&decode_idx, expected_pts, 1).is_err() {
+                    debug!("verify_seek_works: seek failed at keyframe_idx={}", key_idx);
+                    return false;
+                }
+
+                let mut decoded_pts_values: Vec<i64> = Vec::new();
+                let mut packets_sent = 0;
+                let max_packets = 40;
+                for (stream, packet) in self.ictx.packets() {
+                    if stream.index() != self.stream_index {
+                        continue;
+                    }
+                    if self.decoder.video.send_packet(&packet).is_err() {
+                        continue;
+                    }
+                    packets_sent += 1;
+
+                    let mut decoded = Video::empty();
+                    while self.decoder.video.receive_frame(&mut decoded).is_ok() {
+                        if let Some(pts) = decoded.pts() {
+                            decoded_pts_values.push(pts);
+                        }
+                    }
+                    if packets_sent >= max_packets || decoded_pts_values.len() >= 8 {
+                        break;
+                    }
+                }
+
+                debug!(
+                    "verify_seek_works: keyframe_idx={} packets_sent={} decoded_frames={:?}",
+                    key_idx, packets_sent, decoded_pts_values
+                );
+
+                // Reset state for future operations
+                let _ = self.seek_to_start();
+
+                let found = decoded_pts_values.iter().any(|&pts| pts == expected_pts);
+                if !found {
+                    debug!(
+                        "verify_seek_works: FAILED keyframe_idx={} expected_pts={} got {:?} (cost {:?})",
+                        key_idx, expected_pts, decoded_pts_values, key_start.elapsed()
+                    );
+                    return false;
+                } else {
+                    debug!(
+                        "verify_seek_works: PASSED keyframe_idx={} expected_pts={} (cost {:?})",
+                        key_idx,
+                        expected_pts,
+                        key_start.elapsed()
+                    );
+                }
+            }
+            true
         };
-        let test_decode_idx = key_frames[test_keyframe_idx];
-        
-        // Get expected PTS for this keyframe
-        let expected_pts = match self.stream_info.frame_times().get(&test_decode_idx) {
-            Some(ft) => *ft.pts(),
-            None => return true,  // Can't verify
-        };
 
-        debug!(
-            "verify_seek_works: testing keyframe {} (decode_idx={}, expected_pts={})",
-            test_keyframe_idx, test_decode_idx, expected_pts
-        );
-
-        // Reset state
-        if self.seek_to_start().is_err() {
-            return false;
-        }
-
-        // Perform seek using pts with AVSEEK_FLAG_BACKWARD
-        if self.avseekframe(&test_decode_idx, expected_pts, 1).is_err() {
-            debug!("verify_seek_works: seek failed");
-            return false;
-        }
-
-        // Decode first few frames and check PTS
-        // B-frame videos may need many packets before outputting any frames
-        let mut decoded_pts_values: Vec<i64> = Vec::new();
-        let mut packets_sent = 0;
-        let max_packets = 30;
-
-        for (stream, packet) in self.ictx.packets() {
-            if stream.index() != self.stream_index {
-                continue;
-            }
-
-            if self.decoder.video.send_packet(&packet).is_err() {
-                continue;
-            }
-            packets_sent += 1;
-
-        let mut decoded = Video::empty();
-        while self.decoder.video.receive_frame(&mut decoded).is_ok() {
-                if let Some(pts) = decoded.pts() {
-                    decoded_pts_values.push(pts);
-            }
-        }
-
-            if packets_sent >= max_packets || decoded_pts_values.len() >= 5 {
-                break;
-            }
-    }
-
-        debug!(
-            "verify_seek_works: packets_sent={}, decoded_frames={}",
-            packets_sent, decoded_pts_values.len()
-        );
-
-        // Reset state for future operations
-        let _ = self.seek_to_start();
-
-        // Check if we got the expected PTS (or close to it) in decoded frames
-        // The expected PTS should appear in the first few decoded frames
-        let found = decoded_pts_values.iter().any(|&pts| {
-            // Allow some tolerance for B-frame reordering
-            // The keyframe PTS should be one of the first few decoded frames
-            pts == expected_pts
-        });
-
-        if !found {
+        // Decide phases
+        if force_full_verify {
+            let ok = verify_candidates(&full_candidates);
             debug!(
-                "verify_seek_works: FAILED - expected_pts={}, got {:?}",
-                expected_pts, decoded_pts_values
+                "verify_seek_works: full verification {} (cost {:?})",
+                if ok { "passed" } else { "failed" },
+                verify_start.elapsed()
             );
-        } else {
-            debug!("verify_seek_works: PASSED (found pts={})", expected_pts);
+            return ok;
         }
 
-        found
+        if !verify_candidates(&phase1) {
+            return false;
+        }
+
+        // Remaining candidates after phase1
+        let phase1_set: HashSet<usize> = phase1.iter().copied().collect();
+        let mut remaining: Vec<usize> = full_candidates
+            .into_iter()
+            .filter(|idx| !phase1_set.contains(idx))
+            .collect();
+        remaining.sort();
+        remaining.dedup();
+
+        if remaining.is_empty() {
+            debug!(
+                "verify_seek_works: phase1 passed; no remaining candidates (cost {:?})",
+                verify_start.elapsed()
+            );
+            return true;
+        }
+
+        let ok = verify_candidates(&remaining);
+        debug!(
+            "verify_seek_works: all sampled keyframes {} (cost {:?})",
+            if ok { "passed" } else { "failed" },
+            verify_start.elapsed()
+        );
+        ok
     }
 
     /// Detailed cost estimation for seek-based vs sequential methods
     /// Returns (seek_frames, seek_count, sequential_frames, unique_count, max_index)
-    pub fn estimate_decode_cost_detailed(&self, indices: &[usize]) -> (usize, usize, usize, usize, usize) {
+    pub fn estimate_decode_cost_detailed(
+        &self,
+        indices: &[usize],
+    ) -> (usize, usize, usize, usize, usize) {
         if indices.is_empty() {
             return (0, 0, 0, 0, 0);
         }
@@ -1007,6 +1145,9 @@ impl VideoReader {
         unique_sorted.sort();
         unique_sorted.dedup();
         let unique_count = unique_sorted.len();
+
+        let key_frames = self.stream_info.key_frames();
+        let has_keyframes = !key_frames.is_empty();
 
         // Sequential cost: decode from 0 to max_index
         let max_index = *unique_sorted.last().unwrap_or(&0);
@@ -1018,8 +1159,22 @@ impl VideoReader {
         let mut last_info: Option<(usize, usize)> = None; // (last_idx, last_keyframe)
 
         for &idx in &unique_sorted {
-            let keyframe = self.locate_keyframes(&idx);
-            
+            // Binary search keyframe on pre-fetched slice to avoid repeated method overhead
+            let keyframe = if has_keyframes {
+                match key_frames.binary_search(&idx) {
+                    Ok(i) => key_frames[i],
+                    Err(i) => {
+                        if i == 0 {
+                            0
+                        } else {
+                            key_frames[i - 1]
+                        }
+                    }
+                }
+            } else {
+                0
+            };
+
             match last_info {
                 Some((last_idx, last_keyframe)) => {
                     if keyframe == last_keyframe && idx > last_idx {
@@ -1041,7 +1196,13 @@ impl VideoReader {
             last_info = Some((idx, keyframe));
         }
 
-        (seek_frames, seek_count, sequential_frames, unique_count, max_index)
+        (
+            seek_frames,
+            seek_count,
+            sequential_frames,
+            unique_count,
+            max_index,
+        )
     }
 
     /// Estimate decode cost for seek-based vs sequential methods
@@ -1056,10 +1217,10 @@ impl VideoReader {
     pub fn should_use_sequential(&self, indices: &[usize]) -> bool {
         // Note: negative PTS/DTS check is now done at a higher level via needs_sequential_mode()
         // which actually verifies if seek works, rather than just checking metadata
-        
-        let (seek_frames, seek_count, sequential_frames, unique_count, _max_index) = 
+
+        let (seek_frames, seek_count, sequential_frames, unique_count, _max_index) =
             self.estimate_decode_cost_detailed(indices);
-        
+
         if unique_count == 0 {
             return true;
         }
@@ -1068,26 +1229,26 @@ impl VideoReader {
         // - When seek_frames ≈ sequential_frames, sequential wins (simpler, cache-friendly)
         // - Seek only wins when it can skip significant portions of the video
         // - Many GOP transitions (seek_count) add overhead even with skip-forward
-        
+
         debug!(
             "Cost estimation: seek_frames={}, seek_count={}, sequential={}",
             seek_frames, seek_count, sequential_frames
         );
-        
+
         // Decision rules:
         // 1. If seek_frames >= seq * 0.9, use sequential (not saving enough)
         // 2. If many GOP transitions (>5) AND seek_frames >= seq * 0.7, use sequential
         //    (each GOP transition has I/O and decoder reset overhead)
         // 3. Otherwise use seek
-        
+
         if seek_frames as f64 >= sequential_frames as f64 * 0.9 {
             return true; // Not saving enough, use sequential
         }
-        
+
         if seek_count > 5 && seek_frames as f64 >= sequential_frames as f64 * 0.7 {
             return true; // Many seeks and not saving much, use sequential
         }
-        
+
         false // Use seek - significant savings
     }
 
@@ -1098,7 +1259,7 @@ impl VideoReader {
         self.curr_dec_idx = 0;
         self.curr_frame = 0;
         self.curr_pres_idx = 0;
-        self.eof_sent = false;  // Reset EOF state after seeking
+        self.eof_sent = false; // Reset EOF state after seeking
         Ok(())
     }
 
@@ -1119,7 +1280,7 @@ impl VideoReader {
             if stream.index() == self.stream_index {
                 if self.decoder.video.send_packet(&packet).is_ok() {
                     // Count all frames that come out of the decoder
-        while self.decoder.video.receive_frame(&mut decoded).is_ok() {
+                    while self.decoder.video.receive_frame(&mut decoded).is_ok() {
                         count += 1;
                     }
                 }
@@ -1158,21 +1319,34 @@ impl VideoReader {
             // For negative DTS videos (PTS is positive), use flag=0
             // For normal videos, use flag=1 (AVSEEK_FLAG_BACKWARD) to seek to keyframe before timestamp
             // Note: Videos with negative PTS use sequential mode and won't reach this code
-            let seek_flag = if self.stream_info.has_negative_dts() { 0 } else { 1 };
-            
+            let seek_flag = if self.stream_info.has_negative_dts() {
+                0
+            } else {
+                1
+            };
+
             match self.avseekframe(decode_idx, pts, seek_flag) {
                 Ok(()) => {
-                    debug!("seek_frame_by_decode_idx: seek with pts={} (flag={}) succeeded", pts, seek_flag);
+                    debug!(
+                        "seek_frame_by_decode_idx: seek with pts={} (flag={}) succeeded",
+                        pts, seek_flag
+                    );
                     Ok(())
                 }
                 Err(_) => {
                     // Try with DTS
-                    debug!("seek_frame_by_decode_idx: trying with dts={} (flag={})", dts, seek_flag);
+                    debug!(
+                        "seek_frame_by_decode_idx: trying with dts={} (flag={})",
+                        dts, seek_flag
+                    );
                     self.avseekframe(decode_idx, dts, seek_flag)
                 }
             }
         } else {
-            debug!("seek_frame_by_decode_idx: decode_idx={}, no frame_times entry", decode_idx);
+            debug!(
+                "seek_frame_by_decode_idx: decode_idx={}, no frame_times entry",
+                decode_idx
+            );
             Err(ffmpeg::Error::Bug)
         }
     }

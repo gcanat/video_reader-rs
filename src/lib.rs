@@ -1,5 +1,5 @@
-use ffmpeg_next as ffmpeg;
 use ffmpeg::log as ffmpeg_log;
+use ffmpeg_next as ffmpeg;
 use numpy::ndarray::{Dim, IxDyn};
 mod convert;
 mod ffi_hwaccel;
@@ -118,7 +118,7 @@ impl PyVideoReader {
         filter: Option<String>,
         log_level: Option<&str>,
     ) -> PyResult<Self> {
-        // Configure ffmpeg log level (global). Default to Error to抑制大量 warning。
+        // Configure ffmpeg log level (global). Default to Error to suppress noisy warnings.
         let ffmpeg_level = match log_level {
             None => ffmpeg_log::Level::Error,
             Some(lv) => match lv.to_lowercase().as_str() {
@@ -143,9 +143,8 @@ impl PyVideoReader {
         let hwaccel = match device {
             Some("cpu") | None => None,
             Some(other) => Some(
-                HardwareAccelerationDeviceType::from_str(other).map_err(|_| {
-                    PyRuntimeError::new_err(format!("Invalid device: {other}"))
-                })?,
+                HardwareAccelerationDeviceType::from_str(other)
+                    .map_err(|_| PyRuntimeError::new_err(format!("Invalid device: {other}")))?,
             ),
         };
         let decoder_config = DecoderConfig::new(
@@ -315,12 +314,13 @@ impl PyVideoReader {
     ) -> PyResult<Vec<Bound<'a, Frame>>> {
         match self.inner.lock() {
             Ok(mut reader) => {
-                let res_decode = RUNTIME.block_on(async {
-                    reader
-                        .decode_video_fast(start_frame, end_frame, compression_factor)
-                        .await
-                })
-                .map_err(|e| PyRuntimeError::new_err(format!("Error: {e}")))?;
+                let res_decode = RUNTIME
+                    .block_on(async {
+                        reader
+                            .decode_video_fast(start_frame, end_frame, compression_factor)
+                            .await
+                    })
+                    .map_err(|e| PyRuntimeError::new_err(format!("Error: {e}")))?;
                 Ok(res_decode
                     .into_iter()
                     .map(|x| x.into_pyarray(py))
@@ -377,10 +377,10 @@ impl PyVideoReader {
                 // Some negative DTS videos work fine (e.g., time_base 1/15360)
                 // while others fail (e.g., time_base 1/1000000 or negative PTS)
                 let force_sequential = vr.needs_sequential_mode();
-                
+
                 // Determine which method to use
                 let use_sequential = match with_fallback {
-                    Some(true) => true,   // Explicitly use sequential
+                    Some(true) => true, // Explicitly use sequential
                     Some(false) => {
                         // User requested seek-based, but force sequential if seek is broken
                         if force_sequential {
@@ -431,25 +431,34 @@ impl PyVideoReader {
 
     /// Detailed decode cost estimation.
     /// Returns dict with: seek_frames, seek_count, sequential_frames, unique_count, max_index, recommendation
-    fn estimate_decode_cost_detailed(&self, indices: Vec<usize>) -> PyResult<std::collections::HashMap<String, usize>> {
+    fn estimate_decode_cost_detailed(
+        &self,
+        indices: Vec<usize>,
+    ) -> PyResult<std::collections::HashMap<String, usize>> {
         match self.inner.lock() {
             Ok(vr) => {
-                let (seek_frames, seek_count, sequential_frames, unique_count, max_index) = 
+                let (seek_frames, seek_count, sequential_frames, unique_count, max_index) =
                     vr.estimate_decode_cost_detailed(&indices);
                 let use_sequential = vr.should_use_sequential(&indices);
-                
+
                 let mut result = std::collections::HashMap::new();
                 result.insert("seek_frames".to_string(), seek_frames);
                 result.insert("seek_count".to_string(), seek_count);
                 result.insert("sequential_frames".to_string(), sequential_frames);
                 result.insert("unique_count".to_string(), unique_count);
                 result.insert("max_index".to_string(), max_index);
-                result.insert("recommendation".to_string(), if use_sequential { 1 } else { 0 }); // 1=True, 0=False
-                
+                result.insert(
+                    "recommendation".to_string(),
+                    if use_sequential { 1 } else { 0 },
+                ); // 1=True, 0=False
+
                 // Calculate total cost with overhead
                 const SEEK_OVERHEAD_FRAMES: usize = 5;
-                result.insert("seek_total_cost".to_string(), seek_frames + seek_count * SEEK_OVERHEAD_FRAMES);
-                
+                result.insert(
+                    "seek_total_cost".to_string(),
+                    seek_frames + seek_count * SEEK_OVERHEAD_FRAMES,
+                );
+
                 Ok(result)
             }
             Err(e) => Err(PyRuntimeError::new_err(format!("Lock error: {e}"))),

@@ -107,7 +107,9 @@ pub fn codec_context_get_hw_frames_ctx(
     unsafe {
         let mut hw_frame_ref = av_hwframe_ctx_alloc((*codec_context.as_mut_ptr()).hw_device_ctx);
         if hw_frame_ref.is_null() {
-            return Err(ffmpeg::error::Error::from(ffmpeg::ffi::AVERROR(libc::ENOMEM)));
+            return Err(ffmpeg::error::Error::from(ffmpeg::ffi::AVERROR(
+                libc::ENOMEM,
+            )));
         }
         (*codec_context.as_mut_ptr()).pix_fmt = hw_pixfmt.into();
         let frame_ctx = (*hw_frame_ref).data as *mut AVHWFramesContext;
