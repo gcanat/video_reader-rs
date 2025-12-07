@@ -17,6 +17,7 @@ pub struct FilterConfig<'a> {
     time_base: &'a str,
     spec: &'a str,
     is_hwaccel: bool,
+    pixel_aspect: Rational,
 }
 impl<'a> FilterConfig<'a> {
     pub fn new(
@@ -26,6 +27,7 @@ impl<'a> FilterConfig<'a> {
         time_base: &'a str,
         spec: &'a str,
         is_hwaccel: bool,
+        pixel_aspect: Rational,
     ) -> Self {
         FilterConfig {
             height,
@@ -34,6 +36,7 @@ impl<'a> FilterConfig<'a> {
             time_base,
             spec,
             is_hwaccel,
+            pixel_aspect,
         }
     }
 }
@@ -53,8 +56,13 @@ pub fn create_filters(
         .unwrap_or("yuv420p");
 
     let args = format!(
-        "video_size={}x{}:pix_fmt={}:time_base={}:pixel_aspect=1/1",
-        filter_cfg.width, filter_cfg.height, pix_fmt_name, filter_cfg.time_base,
+        "video_size={}x{}:pix_fmt={}:time_base={}:pixel_aspect={}/{}",
+        filter_cfg.width,
+        filter_cfg.height,
+        pix_fmt_name,
+        filter_cfg.time_base,
+        filter_cfg.pixel_aspect.numerator(),
+        filter_cfg.pixel_aspect.denominator(),
     );
     debug!("Buffer args: {}", args);
 

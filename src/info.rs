@@ -18,18 +18,22 @@ pub struct VideoParams {
 #[derive(Debug)]
 pub struct FrameTime {
     pts: i64,
+    dur: i64,
     dts: i64,
 }
 
 impl FrameTime {
-    pub fn new(pts: i64, _dur: i64, dts: i64) -> Self {
-        FrameTime { pts, dts }
+    pub fn new(pts: i64, dur: i64, dts: i64) -> Self {
+        FrameTime { pts, dur, dts }
     }
     pub fn pts(&self) -> &i64 {
         &self.pts
     }
     pub fn dts(&self) -> &i64 {
         &self.dts
+    }
+    pub fn dur(&self) -> &i64 {
+        &self.dur
     }
 }
 

@@ -3,6 +3,7 @@ use ffmpeg::ffi::*;
 use ffmpeg::format::input;
 use ffmpeg::media::Type;
 use ffmpeg::util::frame::video::Video;
+use ffmpeg::util::rational::Rational;
 use ffmpeg_next as ffmpeg;
 use log::debug;
 use std::collections::{HashMap, HashSet};
@@ -137,6 +138,18 @@ impl VideoReader {
         let video_info = collect_video_metadata(&video, &video_params, &fps);
 
         let (orig_h, orig_w, orig_fmt) = (video.height(), video.width(), video.format());
+        debug!(
+            "Original stream info: width={}, height={}, format={:?}",
+            orig_w, orig_h, orig_fmt
+        );
+        let pixel_aspect = {
+            let sar = video.aspect_ratio();
+            if sar.numerator() > 0 && sar.denominator() > 0 {
+                sar
+            } else {
+                Rational(1, 1)
+            }
+        };
 
         let (mut height, mut width) = get_resized_dim(
             orig_h as f64,
@@ -174,6 +187,7 @@ impl VideoReader {
             time_base_rational,
             filter_spec.as_str(),
             is_hwaccel,
+            pixel_aspect,
         );
 
         let graph = create_filters(&mut video, hw_format, filter_cfg)?;

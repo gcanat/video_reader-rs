@@ -136,9 +136,9 @@ fn copy_image(mut frame: Video, pix_fmt: AVPixelFormat) -> (Vec<u8>, i32, i32, i
 
 pub fn get_colorspace(height: i32, color_space: &str) -> YuvStandardMatrix {
     match color_space {
-        "BT709" => YuvStandardMatrix::Bt709,
-        "BT601" => YuvStandardMatrix::Bt601,
-        "BT2020" => YuvStandardMatrix::Bt2020,
+        "BT709" => YuvStandardMatrix::Bt709,  // HD, 720P/1080P
+        "BT601" => YuvStandardMatrix::Bt601,  // SD, 480P/576P
+        "BT2020" => YuvStandardMatrix::Bt2020, // UHD, 4K/8K
         "SMPTE240" => YuvStandardMatrix::Smpte240,
         "BT470_6" => YuvStandardMatrix::Bt470_6,
         _ => {
@@ -158,8 +158,8 @@ pub fn get_colorspace(height: i32, color_space: &str) -> YuvStandardMatrix {
 
 pub fn get_colorrange(color_range: &str) -> YuvRange {
     match color_range {
-        "FULL" | "PC" | "JPEG" => YuvRange::Full,
-        _ => YuvRange::Limited,
+        "FULL" | "PC" | "JPEG" => YuvRange::Full,  // 0 - 255
+        _ => YuvRange::Limited,  // 16 - 235
     }
 }
 
