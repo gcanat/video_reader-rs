@@ -584,19 +584,8 @@ impl VideoReader {
         }
 
         // Deduplicate frame indices (avoid decoding same frame twice)
-        let unique_frames: Vec<usize> = {
-            let mut seen = HashSet::new();
-            sorted_indices
-                .iter()
-                .filter_map(|&(_, frame_idx)| {
-                    if seen.insert(frame_idx) {
-                        Some(frame_idx)
-                    } else {
-                        None
-                    }
-                })
-                .collect()
-        };
+        let mut unique_frames: Vec<usize> = positions_map.keys().copied().collect();
+        unique_frames.sort_unstable();
 
         // make sure we are at the beginning of the stream
         self.seek_to_start()?;
