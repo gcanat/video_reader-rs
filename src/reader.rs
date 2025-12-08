@@ -83,6 +83,8 @@ pub struct VideoReader {
     eof_sent: bool,
     /// How to handle out-of-bounds or failed frame fetches
     oob_mode: OutOfBoundsMode,
+    /// Frame indices that failed (for error reporting)
+    failed_indices: Vec<usize>,
 }
 
 impl VideoReader {
@@ -91,6 +93,10 @@ impl VideoReader {
     }
     pub fn stream_info(&self) -> &StreamInfo {
         &self.stream_info
+    }
+    /// Get the last frame index that failed (for error reporting)
+    pub fn failed_indices(&self) -> &Vec<usize> {
+        &self.failed_indices
     }
     /// Create a new VideoReader instance
     /// * `filename` - Path to the video file.
@@ -121,6 +127,7 @@ impl VideoReader {
             seek_verified: None, // Will be tested on first get_batch
             eof_sent: false,
             oob_mode,
+            failed_indices: Vec::new(),
         })
     }
 
@@ -590,18 +597,21 @@ impl VideoReader {
                 batch
             }
             OutOfBoundsMode::Error => {
-                // Error if any frame is missing
+                // Collect all missing frames, then error
                 let mut batch = Array4::zeros((indices.len(), height, width, 3));
                 for (out_i, idx) in indices.iter().enumerate() {
                     if let Some(frame) = frame_map.get(idx) {
                         batch.slice_mut(s![out_i, .., .., ..]).assign(frame);
                     } else {
                         debug!("No frame found for {} (oob_mode=error)", idx);
-                        // reset decoder state before returning error
-                        self.decoder.video.flush();
-                        self.seek_to_start()?;
-                        return Err(ffmpeg::Error::Bug);
+                        self.failed_indices.push(*idx);
                     }
+                }
+                // Check if any failures occurred
+                if !self.failed_indices.is_empty() {
+                    self.decoder.video.flush();
+                    self.seek_to_start()?;
+                    return Err(ffmpeg::Error::Bug);
                 }
                 batch
             }
@@ -697,7 +707,7 @@ impl VideoReader {
                     debug!("No frame found for frame index {}", frame_index);
                     match self.oob_mode {
                         OutOfBoundsMode::Error => {
-                            return Err(ffmpeg::Error::Bug);
+                            self.failed_indices.push(frame_index);
                         }
                         OutOfBoundsMode::Skip => {
                             // Just skip - don't add to successful_frames
@@ -713,7 +723,7 @@ impl VideoReader {
                     debug!("seek_accurate_raw failed at {}: {:?}", frame_index, e);
                     match self.oob_mode {
                         OutOfBoundsMode::Error => {
-                            return Err(e);
+                            self.failed_indices.push(frame_index);
                         }
                         OutOfBoundsMode::Skip => {
                             debug!("Skipping frame {} due to error (oob_mode=skip)", frame_index);
@@ -724,6 +734,11 @@ impl VideoReader {
                     }
                 }
             }
+        }
+
+        // Check if any failures occurred in Error mode
+        if self.oob_mode == OutOfBoundsMode::Error && !self.failed_indices.is_empty() {
+            return Err(ffmpeg::Error::Bug);
         }
 
         // Build final output

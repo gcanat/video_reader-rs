@@ -425,15 +425,43 @@ impl PyVideoReader {
 
                 if use_sequential {
                     debug!("Using sequential method (get_batch_safe)");
-                    match vr.get_batch_safe(indices) {
+                    match vr.get_batch_safe(indices.clone()) {
                         Ok(batch) => Ok(batch.into_pyarray(py)),
-                        Err(e) => Err(PyRuntimeError::new_err(format!("Error: {e}"))),
+                        Err(e) => {
+                            // Convert Bug error to a more meaningful message
+                            let failed = vr.failed_indices();
+                            let msg = match e {
+                                ffmpeg::Error::Bug => {
+                                    if !failed.is_empty() {
+                                        format!("Out of bounds: frame indices {:?} exceed video length or could not be decoded", failed)
+                                    } else {
+                                        "Out of bounds: frame index exceeds video length or could not be decoded".to_string()
+                                    }
+                                }
+                                _ => format!("{e}"),
+                            };
+                            Err(PyRuntimeError::new_err(format!("Error: {msg}")))
+                        }
                     }
                 } else {
                     debug!("Using seek-based method (get_batch)");
-                    match vr.get_batch(indices) {
+                    match vr.get_batch(indices.clone()) {
                         Ok(batch) => Ok(batch.into_pyarray(py)),
-                        Err(e) => Err(PyRuntimeError::new_err(format!("Error: {e}"))),
+                        Err(e) => {
+                            // Convert Bug error to a more meaningful message
+                            let failed = vr.failed_indices();
+                            let msg = match e {
+                                ffmpeg::Error::Bug => {
+                                    if !failed.is_empty() {
+                                        format!("Out of bounds: frame indices {:?} exceed video length or could not be decoded", failed)
+                                    } else {
+                                        "Out of bounds: frame index exceeds video length or could not be decoded".to_string()
+                                    }
+                                }
+                                _ => format!("{e}"),
+                            };
+                            Err(PyRuntimeError::new_err(format!("Error: {msg}")))
+                        }
                     }
                 }
             }
