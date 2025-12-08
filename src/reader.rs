@@ -636,47 +636,39 @@ impl VideoReader {
 
     /// Returns the raw YUV frame (after filter graph) for a given presentation index.
     /// Uses frame counting to handle B-frame reordering correctly.
+    /// For Open GOP videos, automatically seeks to an earlier keyframe to ensure
+    /// all reference frames are available.
     pub fn seek_accurate_raw(
         &mut self,
         presentation_idx: usize,
     ) -> Result<Option<Video>, ffmpeg::Error> {
-        // Get the decode index (packet order) for this presentation index
-        // This tells us which packet produces the frame we want
-        let target_decode_idx = match self
+        // Use the safe keyframe finder which handles Open GOP correctly
+        let (key_decode_idx, key_pres_idx, min_pres_in_gop) = match self
             .stream_info
-            .get_decode_idx_for_presentation(presentation_idx)
+            .find_safe_keyframe_for_pres_idx(presentation_idx)
         {
-            Some(idx) => idx,
+            Some(info) => info,
             None => {
                 debug!(
-                    "No decode index found for presentation index {}",
+                    "No safe keyframe found for presentation index {}",
                     presentation_idx
                 );
                 return Ok(None);
             }
         };
 
-        // Find the keyframe before this decode index
-        let key_decode_idx = self.locate_keyframes(&target_decode_idx);
-
-        // Get the presentation index of the keyframe
-        // After seeking to this keyframe, the decoder will output frames starting from this presentation index
-        let key_pres_idx = self
-            .stream_info
-            .get_presentation_idx_for_decode(key_decode_idx)
-            .unwrap_or(key_decode_idx);
-
         debug!(
-            "    - [RAW] Presentation idx: {}, decode idx: {}, keyframe decode: {}, keyframe pres: {}",
-            presentation_idx, target_decode_idx, key_decode_idx, key_pres_idx
+            "    - [RAW] Presentation idx: {}, keyframe decode: {}, keyframe pres: {}, min_pres_in_gop: {}",
+            presentation_idx, key_decode_idx, key_pres_idx, min_pres_in_gop
         );
 
         // Check if we can skip forward without seeking
         // We track curr_pres_idx (presentation order count)
         // IMPORTANT: If we've sent EOF, we MUST re-seek because the decoder state is invalid
+        // For Open GOP, we also need to ensure we're past the B-frames that need previous GOP refs
         let can_skip_forward = !self.eof_sent
             && presentation_idx >= self.curr_pres_idx
-            && self.curr_pres_idx >= key_pres_idx;
+            && self.curr_pres_idx >= min_pres_in_gop;
 
         if can_skip_forward {
             debug!(
@@ -695,10 +687,9 @@ impl VideoReader {
             self.seek_frame_by_decode_idx(&key_decode_idx)?;
             self.curr_frame = key_decode_idx;
             self.curr_dec_idx = key_decode_idx;
-            // Note: For Open GOP, key_pres_idx might be > presentation_idx
-            // We still set curr_pres_idx to key_pres_idx as a hint, but find_frame_by_pres_idx
-            // uses PTS matching which handles this correctly
-            self.curr_pres_idx = key_pres_idx;
+            // For Open GOP, the first decoded output may have pres_idx > or < key_pres_idx
+            // We use min_pres_in_gop as a better estimate for where we'll start decoding from
+            self.curr_pres_idx = min_pres_in_gop.min(key_pres_idx);
 
             // Pass target presentation index directly - uses PTS matching internally
             match self.find_frame_by_pres_idx(presentation_idx) {
@@ -903,14 +894,8 @@ impl VideoReader {
             force_sequential = true;
             reasons.push("non-monotonic dts".to_string());
         }
-        // Open GOP detection: B-frames after keyframe display before keyframe
-        // These B-frames cannot be decoded correctly after seeking to the keyframe
-        // because they require reference frames from the previous GOP
-        let (has_open_gop, open_gop_count) = self.stream_info.has_open_gop();
-        if has_open_gop {
-            force_sequential = true;
-            reasons.push(format!("open gop ({} keyframes affected)", open_gop_count));
-        }
+        // NOTE: Open GOP is now handled in seek_accurate_raw by using find_safe_keyframe_for_pres_idx
+        // which automatically seeks to an earlier keyframe when needed
 
         // Missing timing info for keyframes: cannot trust seek -> force sequential
         if key_frames.iter().any(|kf| !frame_times.contains_key(kf)) {

@@ -333,6 +333,89 @@ impl StreamInfo {
         
         (open_gop_count > 0, open_gop_count)
     }
+    /// Check if a specific keyframe is Closed GOP (no B-frames after it that display before it)
+    pub fn is_closed_gop_keyframe(&self, kf_decode_idx: usize) -> bool {
+        let kf_pres_idx = match self.decode_to_presentation_idx.get(kf_decode_idx) {
+            Some(&idx) => idx,
+            None => return true, // Assume closed if no info
+        };
+        
+        // Find next keyframe's decode index
+        let kf_pos = self.key_frames.iter().position(|&kf| kf == kf_decode_idx);
+        let next_kf_decode_idx = match kf_pos {
+            Some(pos) if pos + 1 < self.key_frames.len() => self.key_frames[pos + 1],
+            _ => self.frame_count,
+        };
+        
+        // Check if any frame after this keyframe has lower pres_idx
+        for decode_idx in (kf_decode_idx + 1)..next_kf_decode_idx.min(kf_decode_idx + 10) {
+            if let Some(&pres_idx) = self.decode_to_presentation_idx.get(decode_idx) {
+                if pres_idx < kf_pres_idx {
+                    return false; // This is Open GOP
+                }
+            }
+        }
+        true
+    }
+    
+    /// Find a safe keyframe for seeking to the target presentation index.
+    /// For Open GOP, this may return a keyframe earlier than the one containing the target,
+    /// ensuring all reference frames are available.
+    /// Returns (keyframe_decode_idx, keyframe_pres_idx, min_pres_idx_in_gop)
+    pub fn find_safe_keyframe_for_pres_idx(&self, target_pres_idx: usize) -> Option<(usize, usize, usize)> {
+        // Get decode index for target
+        let target_decode_idx = self.presentation_to_decode_idx.get(target_pres_idx)?;
+        
+        // Find keyframe index (position in key_frames array)
+        let mut kf_array_idx = match self.key_frames.binary_search(target_decode_idx) {
+            Ok(idx) => idx,       // Exact match
+            Err(0) => return None, // Before first keyframe
+            Err(idx) => idx - 1,  // Keyframe before target
+        };
+        
+        // Walk backwards until we find a Closed GOP keyframe
+        // or until the keyframe's pres_idx <= target_pres_idx
+        loop {
+            let kf_decode_idx = self.key_frames[kf_array_idx];
+            let kf_pres_idx = self.decode_to_presentation_idx
+                .get(kf_decode_idx)
+                .copied()
+                .unwrap_or(kf_decode_idx);
+            
+            // Find minimum pres_idx in this GOP (for B-frames before keyframe)
+            let next_kf_decode = if kf_array_idx + 1 < self.key_frames.len() {
+                self.key_frames[kf_array_idx + 1]
+            } else {
+                self.frame_count
+            };
+            
+            let mut min_pres_in_gop = kf_pres_idx;
+            for decode_idx in (kf_decode_idx + 1)..next_kf_decode.min(kf_decode_idx + 20) {
+                if let Some(&pres_idx) = self.decode_to_presentation_idx.get(decode_idx) {
+                    min_pres_in_gop = min_pres_in_gop.min(pres_idx);
+                }
+            }
+            
+            // If this keyframe can reach our target (its GOP contains the target),
+            // and either it's Closed GOP or we can decode from here with all refs
+            if min_pres_in_gop <= target_pres_idx && self.is_closed_gop_keyframe(kf_decode_idx) {
+                return Some((kf_decode_idx, kf_pres_idx, min_pres_in_gop));
+            }
+            
+            // If target is >= keyframe's pres_idx, this keyframe is safe
+            // (we don't need B-frames from before the keyframe)
+            if target_pres_idx >= kf_pres_idx {
+                return Some((kf_decode_idx, kf_pres_idx, min_pres_in_gop));
+            }
+            
+            // Need to go to previous keyframe for proper reference frames
+            if kf_array_idx == 0 {
+                // Already at first keyframe, use it
+                return Some((kf_decode_idx, kf_pres_idx, min_pres_in_gop));
+            }
+            kf_array_idx -= 1;
+        }
+    }
     pub fn keyframe_pts_monotonic_norm(&self) -> (bool, usize) {
         let offset = self.min_pts_offset();
         let key_frames = self.key_frames();
