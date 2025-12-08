@@ -896,6 +896,10 @@ impl VideoReader {
         }
         // NOTE: Open GOP is now handled in seek_accurate_raw by using find_safe_keyframe_for_pres_idx
         // which automatically seeks to an earlier keyframe when needed
+        let (has_open_gop, open_gop_count) = self.stream_info.has_open_gop();
+        if has_open_gop {
+            debug!("Video has Open GOP structure ({} keyframes affected)", open_gop_count);
+        }
 
         // Missing timing info for keyframes: cannot trust seek -> force sequential
         if key_frames.iter().any(|kf| !frame_times.contains_key(kf)) {

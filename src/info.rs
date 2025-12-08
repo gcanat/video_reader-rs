@@ -320,7 +320,7 @@ impl StreamInfo {
                 self.frame_count
             };
             
-            for decode_idx in (kf_decode_idx + 1)..next_kf_decode_idx.min(kf_decode_idx + 10) {
+            for decode_idx in (kf_decode_idx + 1)..next_kf_decode_idx.min(kf_decode_idx + 32) {
                 if let Some(&pres_idx) = self.decode_to_presentation_idx.get(decode_idx) {
                     if pres_idx < kf_pres_idx {
                         // Found a frame that displays before the keyframe but is decoded after
@@ -348,7 +348,7 @@ impl StreamInfo {
         };
         
         // Check if any frame after this keyframe has lower pres_idx
-        for decode_idx in (kf_decode_idx + 1)..next_kf_decode_idx.min(kf_decode_idx + 10) {
+        for decode_idx in (kf_decode_idx + 1)..next_kf_decode_idx.min(kf_decode_idx + 32) {
             if let Some(&pres_idx) = self.decode_to_presentation_idx.get(decode_idx) {
                 if pres_idx < kf_pres_idx {
                     return false; // This is Open GOP
@@ -367,10 +367,15 @@ impl StreamInfo {
         let target_decode_idx = self.presentation_to_decode_idx.get(target_pres_idx)?;
         
         // Find keyframe index (position in key_frames array)
+        // IMPORTANT: When target is itself a keyframe (Ok case), we still use the PREVIOUS keyframe.
+        // This is because after seeking to a keyframe, the packet iterator may not have any packets
+        // ready to send (FFmpeg seek behavior). Using previous keyframe ensures at least one packet
+        // (the target keyframe itself) is available to send to the decoder.
         let mut kf_array_idx = match self.key_frames.binary_search(target_decode_idx) {
-            Ok(idx) => idx,       // Exact match
-            Err(0) => return None, // Before first keyframe
-            Err(idx) => idx - 1,  // Keyframe before target
+            Ok(0) => 0,                      // Target is first keyframe: must use it
+            Ok(idx) => idx - 1,              // Target is keyframe: use previous keyframe
+            Err(0) => return None,           // Before first keyframe
+            Err(idx) => idx - 1,             // Keyframe before target
         };
         
         // Walk backwards until we find a Closed GOP keyframe
@@ -390,7 +395,7 @@ impl StreamInfo {
             };
             
             let mut min_pres_in_gop = kf_pres_idx;
-            for decode_idx in (kf_decode_idx + 1)..next_kf_decode.min(kf_decode_idx + 20) {
+            for decode_idx in (kf_decode_idx + 1)..next_kf_decode.min(kf_decode_idx + 32) {
                 if let Some(&pres_idx) = self.decode_to_presentation_idx.get(decode_idx) {
                     min_pres_in_gop = min_pres_in_gop.min(pres_idx);
                 }
