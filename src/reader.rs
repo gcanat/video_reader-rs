@@ -1271,16 +1271,27 @@ impl VideoReader {
             seek_frames, seek_count, sequential_frames
         );
 
-        // Decision rules:
-        // 1. If seek_frames >= seq * 0.9, use sequential (not saving enough)
-        // 2. If many GOP transitions (>5) AND seek_frames >= seq * 0.7, use sequential
-        //    (each GOP transition has I/O and decoder reset overhead)
-        // 3. Otherwise use seek
+        // Decision rules with seek overhead consideration:
+        // Each seek has overhead (I/O + decoder reset) roughly equivalent to decoding a few frames
+        const SEEK_OVERHEAD_FRAMES: usize = 10;
+        let seek_total_cost = seek_frames + seek_count * SEEK_OVERHEAD_FRAMES;
+        
+        debug!(
+            "Cost estimation: seek_frames={}, seek_count={}, seek_overhead={}, seek_total={}, sequential={}",
+            seek_frames, seek_count, seek_count * SEEK_OVERHEAD_FRAMES, seek_total_cost, sequential_frames
+        );
 
+        // 1. If total seek cost (including overhead) >= sequential, use sequential
+        if seek_total_cost >= sequential_frames {
+            return true; // Seek not worth it with overhead
+        }
+
+        // 2. If seek_frames alone >= 90% of sequential, use sequential (not saving enough)
         if seek_frames as f64 >= sequential_frames as f64 * 0.9 {
             return true; // Not saving enough, use sequential
         }
 
+        // 3. If many GOP transitions (>5) AND seek_frames >= 70% of sequential, use sequential
         if seek_count > 5 && seek_frames as f64 >= sequential_frames as f64 * 0.7 {
             return true; // Many seeks and not saving much, use sequential
         }
