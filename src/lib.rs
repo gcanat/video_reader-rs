@@ -200,10 +200,29 @@ impl PyVideoReader {
             Ok(mut vr) => {
                 let frame_count = *vr.stream_info().frame_count();
                 let index = key.to_indices(frame_count)?;
-                let res_array = vr
-                    .get_batch(index)
-                    .map_err(|e| PyRuntimeError::new_err(format!("Error: {e}")))?
-                    .into_dyn();
+                let index_clone = index.clone();
+                let res_array = vr.get_batch(index).map_err(|e| {
+                    // Convert Bug error to a more meaningful message
+                    let failed = vr.failed_indices();
+                    let msg = match e {
+                        ffmpeg::Error::Bug => {
+                            if !failed.is_empty() {
+                                format!(
+                                    "Failed to decode frame(s) at index {:?} (requested {:?}, frame_count={})",
+                                    failed, index_clone, frame_count
+                                )
+                            } else {
+                                format!(
+                                    "Failed to decode frame(s) at index {:?} (frame_count={})",
+                                    index_clone, frame_count
+                                )
+                            }
+                        }
+                        _ => format!("{e}"),
+                    };
+                    PyRuntimeError::new_err(format!("Error: {msg}"))
+                })?;
+                let res_array = res_array.into_dyn();
                 // remove first dim if key was a single int
                 if matches!(key, IntOrSlice::Int { .. }) {
                     Ok(res_array.squeeze().into_pyarray(py))

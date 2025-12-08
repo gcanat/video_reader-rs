@@ -460,6 +460,9 @@ impl VideoReader {
     /// - `Skip`: Skip missing frames - returned array may have fewer frames than requested
     /// - `Black`: Return black (all-zero) frames for missing frames
     pub fn get_batch_safe(&mut self, indices: Vec<usize>) -> Result<VideoArray, ffmpeg::Error> {
+        // Clear any stale failure state from previous calls
+        self.failed_indices.clear();
+
         // Simple and robust implementation: iterate once from the start and grab the requested
         // frames in presentation order. This avoids any reliance on seeking or timestamp quirks
         // (B-frames, non-monotonic DTS/PTS, etc.).
@@ -634,6 +637,9 @@ impl VideoReader {
     /// - `Skip`: Skip failed frames - returned array may have fewer frames than requested
     /// - `Black`: Return black (all-zero) frames for failed fetches
     pub fn get_batch(&mut self, indices: Vec<usize>) -> Result<VideoArray, ffmpeg::Error> {
+        // Clear any stale failure state from previous calls
+        self.failed_indices.clear();
+
         // Sort indices to minimize backward seeks (keep track of original positions)
         let mut sorted_indices: Vec<(usize, usize)> = indices
             .iter()
@@ -738,6 +744,9 @@ impl VideoReader {
 
         // Check if any failures occurred in Error mode
         if self.oob_mode == OutOfBoundsMode::Error && !self.failed_indices.is_empty() {
+            // Reset decoder state before returning error
+            self.decoder.video.flush();
+            let _ = self.seek_to_start(); // Ignore error here to ensure cleanup
             return Err(ffmpeg::Error::Bug);
         }
 
