@@ -297,6 +297,42 @@ impl StreamInfo {
             false
         }
     }
+    /// Detect if video has Open GOP structure.
+    /// Open GOP means some keyframes have B-frames that depend on the previous GOP.
+    /// This is detected when a keyframe's presentation index is greater than
+    /// some frames that come AFTER it in decode order (i.e., those frames display before the keyframe).
+    /// Returns (has_open_gop, number of open GOP keyframes).
+    pub fn has_open_gop(&self) -> (bool, usize) {
+        let mut open_gop_count = 0usize;
+        
+        for i in 0..self.key_frames.len() {
+            let kf_decode_idx = self.key_frames[i];
+            let kf_pres_idx = match self.decode_to_presentation_idx.get(kf_decode_idx) {
+                Some(&idx) => idx,
+                None => continue,
+            };
+            
+            // Check next few frames after this keyframe (in decode order)
+            // If any of them have lower presentation index, this is Open GOP
+            let next_kf_decode_idx = if i + 1 < self.key_frames.len() {
+                self.key_frames[i + 1]
+            } else {
+                self.frame_count
+            };
+            
+            for decode_idx in (kf_decode_idx + 1)..next_kf_decode_idx.min(kf_decode_idx + 10) {
+                if let Some(&pres_idx) = self.decode_to_presentation_idx.get(decode_idx) {
+                    if pres_idx < kf_pres_idx {
+                        // Found a frame that displays before the keyframe but is decoded after
+                        open_gop_count += 1;
+                        break;  // Count each keyframe only once
+                    }
+                }
+            }
+        }
+        
+        (open_gop_count > 0, open_gop_count)
+    }
     pub fn keyframe_pts_monotonic_norm(&self) -> (bool, usize) {
         let offset = self.min_pts_offset();
         let key_frames = self.key_frames();

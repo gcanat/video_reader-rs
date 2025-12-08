@@ -666,12 +666,9 @@ impl VideoReader {
             .get_presentation_idx_for_decode(key_decode_idx)
             .unwrap_or(key_decode_idx);
 
-        // Calculate how many frames to skip after seeking
-        let frames_to_skip = presentation_idx.saturating_sub(key_pres_idx);
-
         debug!(
-            "    - [RAW] Presentation idx: {}, decode idx: {}, keyframe decode: {}, keyframe pres: {}, skip: {}",
-            presentation_idx, target_decode_idx, key_decode_idx, key_pres_idx, frames_to_skip
+            "    - [RAW] Presentation idx: {}, decode idx: {}, keyframe decode: {}, keyframe pres: {}",
+            presentation_idx, target_decode_idx, key_decode_idx, key_pres_idx
         );
 
         // Check if we can skip forward without seeking
@@ -686,8 +683,8 @@ impl VideoReader {
                 "No need to seek, we can directly skip frames (curr_pres: {})",
                 self.curr_pres_idx
             );
-            let skip_count = presentation_idx.saturating_sub(self.curr_pres_idx);
-            match self.skip_frames_raw_by_count(skip_count) {
+            // Pass target presentation index directly - uses PTS matching internally
+            match self.find_frame_by_pres_idx(presentation_idx) {
                 Ok(frame) => Ok(frame),
                 Err(_) => self.get_frame_raw_after_eof_by_count(presentation_idx),
             }
@@ -698,26 +695,30 @@ impl VideoReader {
             self.seek_frame_by_decode_idx(&key_decode_idx)?;
             self.curr_frame = key_decode_idx;
             self.curr_dec_idx = key_decode_idx;
+            // Note: For Open GOP, key_pres_idx might be > presentation_idx
+            // We still set curr_pres_idx to key_pres_idx as a hint, but find_frame_by_pres_idx
+            // uses PTS matching which handles this correctly
             self.curr_pres_idx = key_pres_idx;
 
-            match self.skip_frames_raw_by_count(frames_to_skip) {
+            // Pass target presentation index directly - uses PTS matching internally
+            match self.find_frame_by_pres_idx(presentation_idx) {
                 Ok(frame) => Ok(frame),
                 Err(_) => self.get_frame_raw_after_eof_by_count(presentation_idx),
             }
         }
     }
 
-    /// Skip `skip_count` frames and return the next raw YUV frame
-    /// Used for frame counting approach (handles B-frame reordering)
-    pub fn skip_frames_raw_by_count(
+    /// Find and return the raw YUV frame at the target presentation index.
+    /// Uses PTS-based matching which correctly handles Open GOP structures
+    /// where keyframe's presentation index may be greater than target.
+    pub fn find_frame_by_pres_idx(
         &mut self,
-        skip_count: usize,
+        target_pres_idx: usize,
     ) -> Result<Option<Video>, ffmpeg::Error> {
         debug!(
-            "Skipping {} frames, starting from pres_idx={}",
-            skip_count, self.curr_pres_idx
+            "Finding frame at pres_idx={}, curr_pres_idx={}",
+            target_pres_idx, self.curr_pres_idx
         );
-        let target_pres_idx = self.curr_pres_idx + skip_count;
         let mut failsafe = (self.stream_info.frame_count() * 2) as i32;
 
         // First, try to get frame from decoder's existing buffer (from previous packets)
@@ -901,6 +902,14 @@ impl VideoReader {
         if self.stream_info.has_non_monotonic_dts() {
             force_sequential = true;
             reasons.push("non-monotonic dts".to_string());
+        }
+        // Open GOP detection: B-frames after keyframe display before keyframe
+        // These B-frames cannot be decoded correctly after seeking to the keyframe
+        // because they require reference frames from the previous GOP
+        let (has_open_gop, open_gop_count) = self.stream_info.has_open_gop();
+        if has_open_gop {
+            force_sequential = true;
+            reasons.push(format!("open gop ({} keyframes affected)", open_gop_count));
         }
 
         // Missing timing info for keyframes: cannot trust seek -> force sequential
