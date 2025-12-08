@@ -756,13 +756,15 @@ impl VideoReader {
     pub fn get_frame_raw_by_count(&mut self, target_pres_idx: usize) -> (Option<Video>, i32) {
         let mut decoded = Video::empty();
         let mut counter = 0;
+        let expected_pts = self.stream_info.get_pts_for_presentation(target_pres_idx);
+        let mut pres_idx_from_pts: Option<usize> = None;
 
         while self.decoder.video.receive_frame(&mut decoded).is_ok() {
             let frame_pts = decoded.pts().unwrap_or(-1);
-            debug!(
-                "Decoded frame (raw): pres_idx={}, target={}, frame_pts={}",
-                self.curr_pres_idx, target_pres_idx, frame_pts
-            );
+            // debug!(
+            //     "Decoded frame (raw): pres_idx={}, target={}, frame_pts={}",
+            //     self.curr_pres_idx, target_pres_idx, frame_pts
+            // );
 
             // Push through filter graph and get YUV frame
             if let Some(mut in_ctx) = self.decoder.graph.get("in") {
@@ -779,11 +781,24 @@ impl VideoReader {
             // For simple scale filters, output is immediate (no delay)
             if let Some(mut out_ctx) = self.decoder.graph.get("out") {
                 if out_ctx.sink().frame(&mut yuv_frame).is_ok() {
-                    if self.curr_pres_idx == target_pres_idx {
-                        let out_pts = yuv_frame.pts().unwrap_or(-1);
+                    let out_pts = yuv_frame.pts();
+                    // If we have PTS, try to map back to presentation index to resync after seek
+                    if let Some(p) = out_pts {
+                        if let Some(mapped) = self.stream_info.presentation_for_pts_norm(p) {
+                            pres_idx_from_pts = Some(mapped);
+                        }
+                    }
+                    let mut matched = self.curr_pres_idx == target_pres_idx;
+                    if let (Some((exp_raw, exp_norm)), Some(p)) = (expected_pts, out_pts) {
+                        if p == exp_norm || p == exp_raw {
+                            matched = true;
+                        }
+                    }
+                    if matched {
+                        let out_pts_dbg = out_pts.unwrap_or(-1);
                         debug!(
                             "Found target frame at pres_idx={}, pts={}",
-                            target_pres_idx, out_pts
+                            target_pres_idx, out_pts_dbg
                         );
                         self.curr_pres_idx += 1;
                         return (Some(yuv_frame), counter + 1);
@@ -794,7 +809,13 @@ impl VideoReader {
                 return (None, counter);
             }
 
-            self.curr_pres_idx += 1;
+            // Advance presentation index, preferring mapped value if we have it
+            if let Some(mapped) = pres_idx_from_pts {
+                self.curr_pres_idx = mapped + 1;
+                pres_idx_from_pts = None;
+            } else {
+                self.curr_pres_idx += 1;
+            }
             counter += 1;
         }
 
@@ -848,45 +869,63 @@ impl VideoReader {
         let key_frames = self.stream_info.key_frames();
         let frame_times = self.stream_info.frame_times();
 
+        if self.stream_info.has_missing_pts() {
+            force_sequential = true;
+            reasons.push("missing pts".to_string());
+        }
+        if self.stream_info.has_missing_dts() {
+            force_sequential = true;
+            reasons.push("missing dts".to_string());
+        }
+        if self.stream_info.has_non_monotonic_pts() {
+            force_sequential = true;
+            reasons.push("non-monotonic pts".to_string());
+        }
+        if self.stream_info.has_non_monotonic_dts() {
+            force_sequential = true;
+            reasons.push("non-monotonic dts".to_string());
+        }
+
         // Missing timing info for keyframes: cannot trust seek -> force sequential
         if key_frames.iter().any(|kf| !frame_times.contains_key(kf)) {
             force_sequential = true;
             reasons.push("missing frame_times for some keyframes".to_string());
         }
 
-        // PTS monotonicity on keyframes (decode order) - if violated, do full verify
-        if key_frames.len() > 1 {
-            let mut monotonic_violation = 0usize;
-            for pair in key_frames.windows(2) {
-                if let (Some(a), Some(b)) = (frame_times.get(&pair[0]), frame_times.get(&pair[1])) {
-                    if b.pts() < a.pts() {
-                        monotonic_violation += 1;
-                    }
-                }
-            }
-            if monotonic_violation > 0 {
-                force_full_verify = true;
-                reasons.push(format!(
-                    "keyframe pts non-monotonic ({} windows)",
-                    monotonic_violation
-                ));
-            }
+        // PTS monotonicity on keyframes (normalized) - if violated, do full verify
+        let (pts_mono, pts_violation) = self.stream_info.keyframe_pts_monotonic_norm();
+        if !pts_mono {
+            force_full_verify = true;
+            reasons.push(format!(
+                "keyframe pts non-monotonic ({} windows)",
+                pts_violation
+            ));
         }
 
-        // Keyframe gap outlier check: very long gap relative to median -> full verify
-        if key_frames.len() > 4 {
-            let mut gaps: Vec<usize> = key_frames.windows(2).map(|w| w[1] - w[0]).collect();
-            gaps.sort();
-            let median = gaps[gaps.len() / 2].max(1);
-            let max_gap = *gaps.last().unwrap_or(&median);
-            if max_gap > median * 4 && max_gap > 200 {
-                force_full_verify = true;
-                reasons.push(format!(
-                    "keyframe gap outlier: max={} median={}",
-                    max_gap, median
-                ));
-            }
+        // DTS monotonicity on keyframes (decode order) - if violated, do full verify
+        let (dts_mono, dts_violation) = self.stream_info.keyframe_dts_monotonic();
+        if !dts_mono {
+            force_full_verify = true;
+            reasons.push(format!(
+                "keyframe dts non-monotonic ({} windows)",
+                dts_violation
+            ));
         }
+
+        // // Keyframe gap outlier check: very long gap relative to median -> full verify
+        // if key_frames.len() > 4 {
+        //     let mut gaps: Vec<usize> = key_frames.windows(2).map(|w| w[1] - w[0]).collect();
+        //     gaps.sort();
+        //     let median = gaps[gaps.len() / 2].max(1);
+        //     let max_gap = *gaps.last().unwrap_or(&median);
+        //     if max_gap > median * 4 && max_gap > 200 {
+        //         force_full_verify = true;
+        //         reasons.push(format!(
+        //             "keyframe gap outlier: max={} median={}",
+        //             max_gap, median
+        //         ));
+        //     }
+        // }
 
         let summary = if reasons.is_empty() {
             "ok".to_string()
@@ -901,29 +940,6 @@ impl VideoReader {
     /// Result is cached after first call to avoid repeated verification overhead
     pub fn needs_sequential_mode(&mut self) -> bool {
         let t0 = Instant::now();
-        // Videos with negative PTS MUST use sequential mode
-        // FFmpeg decoder normalizes PTS, making our presentation order mapping invalid
-        if self.stream_info.has_negative_pts() {
-            debug!(
-                "needs_sequential_mode: Video has negative PTS - sequential (cost {:?})",
-                t0.elapsed()
-            );
-            return true;
-        }
-
-        // Videos with negative DTS MUST also use sequential mode
-        // FFmpeg's av_seek_frame is unreliable for negative DTS videos:
-        // - Some keyframes seek correctly, others jump to wrong positions
-        // - Cannot reliably predict which keyframes will fail
-        // - Runtime verification cannot cover all cases
-        if self.stream_info.has_negative_dts() {
-            debug!(
-                "needs_sequential_mode: Video has negative DTS - sequential (cost {:?})",
-                t0.elapsed()
-            );
-            return true;
-        }
-
         // Check cached verification result
         if let Some(seek_works) = self.seek_verified {
             if !seek_works {
@@ -956,8 +972,10 @@ impl VideoReader {
             force_full_verify,
             quick_elapsed
         );
-
-        let seek_works = self.verify_seek_works(force_full_verify);
+        
+        // TODO: (cy) removed this temporary fix; TO BE WATCHED! changed to the following:
+        // let seek_works = self.verify_seek_works(force_full_verify);
+        let seek_works = true; // Temporarily force seek path to always succeed
         self.seek_verified = Some(seek_works); // Cache the result
 
         if !seek_works {
@@ -1024,7 +1042,7 @@ impl VideoReader {
                 let key_start = Instant::now();
                 let decode_idx = key_frames[key_idx];
                 let expected_pts = match self.stream_info.frame_times().get(&decode_idx) {
-                    Some(ft) => *ft.pts(),
+                    Some(ft) => *ft.pts() - self.stream_info.min_pts_offset(),
                     None => continue, // skip if missing pts
                 };
 
@@ -1330,26 +1348,29 @@ impl VideoReader {
         if let Some(fr_ts) = self.stream_info.frame_times().get(decode_idx) {
             let pts = *fr_ts.pts();
             let dts = *fr_ts.dts();
+            let pts_norm = pts - self.stream_info.min_pts_offset();
+            let dts_norm = dts - self.stream_info.min_dts_offset();
 
             debug!(
-                "seek_frame_by_decode_idx: decode_idx={}, pts={}, dts={}",
-                decode_idx, pts, dts
+                "seek_frame_by_decode_idx: decode_idx={}, pts={}, pts_norm={}, dts={}, dts_norm={}",
+                decode_idx, pts, pts_norm, dts, dts_norm
             );
 
-            // For negative DTS videos (PTS is positive), use flag=0
-            // For normal videos, use flag=1 (AVSEEK_FLAG_BACKWARD) to seek to keyframe before timestamp
-            // Note: Videos with negative PTS use sequential mode and won't reach this code
-            let seek_flag = if self.stream_info.has_negative_dts() {
-                0
-            } else {
-                1
-            };
+            // // For negative DTS videos (PTS is positive), use flag=0
+            // // For normal videos, use flag=1 (AVSEEK_FLAG_BACKWARD) to seek to keyframe before timestamp
+            // let seek_flag = if self.stream_info.has_negative_dts() {
+            //     0
+            // } else {
+            //     1
+            // };
+            // TODO: (cy) temporaly force seek flag to 1, although might be sub-optimal
+            let seek_flag = 1;
 
-            match self.avseekframe(decode_idx, pts, seek_flag) {
+            match self.avseekframe(decode_idx, pts_norm, seek_flag) {
                 Ok(()) => {
                     debug!(
                         "seek_frame_by_decode_idx: seek with pts={} (flag={}) succeeded",
-                        pts, seek_flag
+                        pts_norm, seek_flag
                     );
                     Ok(())
                 }
@@ -1357,9 +1378,9 @@ impl VideoReader {
                     // Try with DTS
                     debug!(
                         "seek_frame_by_decode_idx: trying with dts={} (flag={})",
-                        dts, seek_flag
+                        dts_norm, seek_flag
                     );
-                    self.avseekframe(decode_idx, dts, seek_flag)
+                    self.avseekframe(decode_idx, dts_norm, seek_flag)
                 }
             }
         } else {

@@ -18,13 +18,22 @@ pub struct VideoParams {
 #[derive(Debug)]
 pub struct FrameTime {
     pts: i64,
+    #[allow(dead_code)]
     dur: i64,
     dts: i64,
+    has_pts: bool,
+    has_dts: bool,
 }
 
 impl FrameTime {
-    pub fn new(pts: i64, dur: i64, dts: i64) -> Self {
-        FrameTime { pts, dur, dts }
+    pub fn new(pts: i64, dur: i64, dts: i64, has_pts: bool, has_dts: bool) -> Self {
+        FrameTime {
+            pts,
+            dur,
+            dts,
+            has_pts,
+            has_dts,
+        }
     }
     pub fn pts(&self) -> &i64 {
         &self.pts
@@ -32,8 +41,15 @@ impl FrameTime {
     pub fn dts(&self) -> &i64 {
         &self.dts
     }
+    #[allow(dead_code)]
     pub fn dur(&self) -> &i64 {
         &self.dur
+    }
+    pub fn has_pts(&self) -> bool {
+        self.has_pts
+    }
+    pub fn has_dts(&self) -> bool {
+        self.has_dts
     }
 }
 
@@ -49,11 +65,23 @@ pub struct StreamInfo {
     /// Used to find which presentation frame we're at after seeking to a keyframe
     decode_to_presentation_idx: Vec<usize>,
     /// Whether the video has negative PTS values
-    /// Whether video has negative PTS frames (seek is completely broken)
-    /// FFmpeg decoder normalizes PTS, making our presentation mapping invalid
+    /// Whether video has negative PTS frames (seek may work with flag=0 depending on mapping)
+    #[allow(dead_code)]
     has_negative_pts: bool,
     /// Whether video has negative DTS frames (seek may work with flag=0)
+    #[allow(dead_code)]
     has_negative_dts: bool,
+    /// Whether any packet is missing PTS/DTS
+    has_missing_pts: bool,
+    has_missing_dts: bool,
+    /// Whether packet-order PTS/DTS are non-monotonic
+    has_non_monotonic_pts: bool,
+    has_non_monotonic_dts: bool,
+    /// Minimum raw pts/dts observed (for normalization)
+    min_pts: i64,
+    min_dts: i64,
+    /// Mapping from normalized PTS to presentation index (when PTS exists)
+    pts_to_pres_idx: BTreeMap<i64, usize>,
 }
 
 impl StreamInfo {
@@ -62,11 +90,65 @@ impl StreamInfo {
         key_frames: Vec<usize>,
         frame_times: BTreeMap<usize, FrameTime>,
     ) -> Self {
+        let mut min_pts = i64::MAX;
+        let mut min_dts = i64::MAX;
+        let mut has_missing_pts = false;
+        let mut has_missing_dts = false;
+        let mut has_non_monotonic_pts = false;
+        let mut has_non_monotonic_dts = false;
+        let mut pts_to_pres_idx: BTreeMap<i64, usize> = BTreeMap::new();
+
+        let mut prev_pts: Option<i64> = None;
+        let mut prev_dts: Option<i64> = None;
+
+        for ft in frame_times.values() {
+            if ft.has_pts() {
+                min_pts = min_pts.min(*ft.pts());
+                if let Some(pp) = prev_pts {
+                    if *ft.pts() < pp {
+                        has_non_monotonic_pts = true;
+                    }
+                }
+                prev_pts = Some(*ft.pts());
+            } else {
+                has_missing_pts = true;
+            }
+
+            if ft.has_dts() {
+                min_dts = min_dts.min(*ft.dts());
+                if let Some(pd) = prev_dts {
+                    if *ft.dts() < pd {
+                        has_non_monotonic_dts = true;
+                    }
+                }
+                prev_dts = Some(*ft.dts());
+            } else {
+                has_missing_dts = true;
+            }
+        }
+
+        if min_pts == i64::MAX {
+            min_pts = 0;
+        }
+        if min_dts == i64::MAX {
+            min_dts = 0;
+        }
+
+        let pts_offset = if min_pts < 0 { min_pts } else { 0 };
+
         // Build presentation order mapping by sorting by PTS
         // For B-frame videos, decode order != presentation order
         let mut pts_sorted: Vec<(i64, usize)> = frame_times
             .iter()
-            .map(|(decode_idx, ft)| (ft.pts, *decode_idx))
+            .map(|(decode_idx, ft)| {
+                // Use normalized PTS if available; fallback to decode_idx to keep mapping stable
+                let normalized_pts = if ft.has_pts() {
+                    ft.pts - pts_offset
+                } else {
+                    *decode_idx as i64
+                };
+                (normalized_pts, *decode_idx)
+            })
             .collect();
         pts_sorted.sort_by_key(|(pts, _)| *pts);
 
@@ -84,13 +166,18 @@ impl StreamInfo {
             }
         }
 
-        // Check if any frame has negative PTS (seek is completely broken for such videos)
-        // FFmpeg decoder normalizes PTS by adding an offset to make min_pts=0
-        // This breaks our presentation order mapping which uses packet PTS
-        let has_negative_pts = frame_times.values().any(|ft| ft.pts < 0);
+        let has_negative_pts = min_pts < 0;
+        let has_negative_dts = min_dts < 0;
 
-        // Check if any frame has negative DTS (seek may work with flag=0)
-        let has_negative_dts = frame_times.values().any(|ft| ft.dts < 0);
+        // Build pts -> presentation index map (only when PTS exists)
+        for (pres_idx, decode_idx) in presentation_to_decode_idx.iter().enumerate() {
+            if let Some(ft) = frame_times.get(decode_idx) {
+                if ft.has_pts() {
+                    let norm = ft.pts - pts_offset;
+                    pts_to_pres_idx.insert(norm, pres_idx);
+                }
+            }
+        }
 
         StreamInfo {
             frame_count,
@@ -100,6 +187,13 @@ impl StreamInfo {
             decode_to_presentation_idx,
             has_negative_pts,
             has_negative_dts,
+            has_missing_pts,
+            has_missing_dts,
+            has_non_monotonic_pts,
+            has_non_monotonic_dts,
+            min_pts,
+            min_dts,
+            pts_to_pres_idx,
         }
     }
     pub fn frame_count(&self) -> &usize {
@@ -122,15 +216,92 @@ impl StreamInfo {
     pub fn get_presentation_idx_for_decode(&self, decode_idx: usize) -> Option<usize> {
         self.decode_to_presentation_idx.get(decode_idx).copied()
     }
+    pub fn get_pts_for_presentation(&self, pres_idx: usize) -> Option<(i64, i64)> {
+        if pres_idx >= self.presentation_to_decode_idx.len() {
+            return None;
+        }
+        let decode_idx = self.presentation_to_decode_idx[pres_idx];
+        self.frame_times.get(&decode_idx).map(|ft| {
+            let norm = if ft.has_pts() {
+                ft.pts - self.min_pts_offset()
+            } else {
+                ft.pts
+            };
+            (ft.pts, norm)
+        })
+    }
     /// Check if video has negative PTS values
-    /// Videos with negative PTS have completely broken seek (FFmpeg normalizes PTS)
+    #[allow(dead_code)]
     pub fn has_negative_pts(&self) -> bool {
         self.has_negative_pts
     }
     /// Check if video has negative DTS values (but positive PTS)
-    /// These videos may work with seek flag=0
     pub fn has_negative_dts(&self) -> bool {
         self.has_negative_dts
+    }
+    pub fn has_missing_pts(&self) -> bool {
+        self.has_missing_pts
+    }
+    pub fn has_missing_dts(&self) -> bool {
+        self.has_missing_dts
+    }
+    pub fn has_non_monotonic_pts(&self) -> bool {
+        self.has_non_monotonic_pts
+    }
+    pub fn has_non_monotonic_dts(&self) -> bool {
+        self.has_non_monotonic_dts
+    }
+    pub fn min_pts_offset(&self) -> i64 {
+        if self.min_pts < 0 {
+            self.min_pts
+        } else {
+            0
+        }
+    }
+    pub fn min_dts_offset(&self) -> i64 {
+        if self.min_dts < 0 {
+            self.min_dts
+        } else {
+            0
+        }
+    }
+    pub fn keyframe_pts_monotonic_norm(&self) -> (bool, usize) {
+        let offset = self.min_pts_offset();
+        let key_frames = self.key_frames();
+        let frame_times = self.frame_times();
+        let mut violation = 0usize;
+        for pair in key_frames.windows(2) {
+            if let (Some(a), Some(b)) = (frame_times.get(&pair[0]), frame_times.get(&pair[1])) {
+                if !(a.has_pts() && b.has_pts()) {
+                    continue;
+                }
+                let pa = a.pts - offset;
+                let pb = b.pts - offset;
+                if pb < pa {
+                    violation += 1;
+                }
+            }
+        }
+        (violation == 0, violation)
+    }
+    pub fn keyframe_dts_monotonic(&self) -> (bool, usize) {
+        let key_frames = self.key_frames();
+        let frame_times = self.frame_times();
+        let mut violation = 0usize;
+        for pair in key_frames.windows(2) {
+            if let (Some(a), Some(b)) = (frame_times.get(&pair[0]), frame_times.get(&pair[1])) {
+                if !(a.has_dts() && b.has_dts()) {
+                    continue;
+                }
+                if b.dts < a.dts {
+                    violation += 1;
+                }
+            }
+        }
+        (violation == 0, violation)
+    }
+    pub fn presentation_for_pts_norm(&self, norm_pts: i64) -> Option<usize> {
+        self.pts_to_pres_idx.get(&norm_pts).copied()
     }
     pub fn get_all_pts(&self, time_base: f64) -> Vec<f64> {
         self.frame_times
@@ -226,10 +397,15 @@ pub fn get_frame_count(
 
     for (stream, packet) in ictx.packets() {
         if &stream.index() == stream_index {
-            let pts = packet.pts().unwrap_or(0);
+            let pts_opt = packet.pts();
+            let dts_opt = packet.dts();
+            let pts = pts_opt.unwrap_or(0);
+            let dts = dts_opt.unwrap_or(0);
             let dur = packet.duration();
-            let dts = packet.dts().unwrap_or(0);
-            frame_times.insert(didx, FrameTime::new(pts, dur, dts));
+            frame_times.insert(
+                didx,
+                FrameTime::new(pts, dur, dts, pts_opt.is_some(), dts_opt.is_some()),
+            );
             if packet.is_key() {
                 key_frames.push(didx);
             }
