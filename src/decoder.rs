@@ -9,6 +9,18 @@ use ndarray::{s, Array, Array4, ArrayViewMut3};
 use std::collections::HashMap;
 use yuv::{YuvRange, YuvStandardMatrix};
 
+/// How to handle out-of-bounds or failed frame fetches in get_batch
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum OutOfBoundsMode {
+    /// Raise an error when frame fetch fails (default, current behavior)
+    #[default]
+    Error,
+    /// Skip failed frames - returned array may have fewer frames
+    Skip,
+    /// Return black (all-zero) frames for failed fetches
+    Black,
+}
+
 /// Struct used when we want to decode the whole video with a compression_factor
 #[derive(Clone)]
 pub struct VideoReducer {

@@ -13,7 +13,7 @@ mod decoder;
 mod reader;
 mod utils;
 use convert::rgb2gray;
-use decoder::DecoderConfig;
+use decoder::{DecoderConfig, OutOfBoundsMode};
 use log::debug;
 use ndarray::Array;
 use pyo3::{
@@ -97,7 +97,7 @@ struct PyVideoReader {
 #[pymethods]
 impl PyVideoReader {
     #[new]
-    #[pyo3(signature = (filename, threads=None, resize_shorter_side=None, resize_longer_side=None, device=None, filter=None, log_level=None))]
+    #[pyo3(signature = (filename, threads=None, resize_shorter_side=None, resize_longer_side=None, device=None, filter=None, log_level=None, oob_mode=None))]
     /// create an instance of VideoReader
     /// * `filename` - path to the video file
     /// * `threads` - number of threads to use. If None, let ffmpeg choose the optimal number.
@@ -108,6 +108,10 @@ impl PyVideoReader {
     /// * `device` - type of hardware acceleration, eg: 'cuda', 'vdpau', 'drm', etc.
     /// * `filter` - custome ffmpeg filter to use, eg "format=rgb24,scale=w=256:h=256:flags=fast_bilinear"
     /// If set to None (default) or 'cpu' then cpu is used.
+    /// * `oob_mode` - how to handle out-of-bounds or failed frame fetches:
+    ///   - None or "error": raise an error (default, current behavior)
+    ///   - "skip": skip failed frames - returned array may have fewer frames
+    ///   - "black": return black (all-zero) frames for failed fetches
     /// * returns a PyVideoReader instance.
     fn new(
         filename: &str,
@@ -117,6 +121,7 @@ impl PyVideoReader {
         device: Option<&str>,
         filter: Option<String>,
         log_level: Option<&str>,
+        oob_mode: Option<&str>,
     ) -> PyResult<Self> {
         // Configure ffmpeg log level (global). Default to Error to suppress noisy warnings.
         let ffmpeg_level = match log_level {
@@ -140,6 +145,18 @@ impl PyVideoReader {
         };
         ffmpeg_log::set_level(ffmpeg_level);
 
+        // Parse oob_mode
+        let out_of_bounds_mode = match oob_mode {
+            None | Some("error") => OutOfBoundsMode::Error,
+            Some("skip") => OutOfBoundsMode::Skip,
+            Some("black") => OutOfBoundsMode::Black,
+            Some(other) => {
+                return Err(PyRuntimeError::new_err(format!(
+                    "Invalid oob_mode: {other}. Use one of: error, skip, black"
+                )))
+            }
+        };
+
         let hwaccel = match device {
             Some("cpu") | None => None,
             Some(other) => Some(
@@ -154,7 +171,7 @@ impl PyVideoReader {
             hwaccel,
             filter,
         );
-        match VideoReader::new(filename.to_string(), decoder_config) {
+        match VideoReader::new(filename.to_string(), decoder_config, out_of_bounds_mode) {
             Ok(reader) => Ok(PyVideoReader {
                 inner: Mutex::new(reader),
             }),

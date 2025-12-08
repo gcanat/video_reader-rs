@@ -11,7 +11,7 @@ use std::path::Path;
 use std::time::Instant;
 
 use crate::convert::{convert_nv12_to_ndarray_rgb24, convert_yuv_to_ndarray_rgb24};
-use crate::decoder::{DecoderConfig, VideoDecoder, VideoReducer};
+use crate::decoder::{DecoderConfig, OutOfBoundsMode, VideoDecoder, VideoReducer};
 use crate::filter::{create_filter_spec, create_filters, FilterConfig};
 use crate::hwaccel::{HardwareAccelerationContext, HardwareAccelerationDeviceType};
 use crate::info::{
@@ -81,6 +81,8 @@ pub struct VideoReader {
     seek_verified: Option<bool>,
     /// True if we've sent EOF and need to re-seek before processing more frames
     eof_sent: bool,
+    /// How to handle out-of-bounds or failed frame fetches
+    oob_mode: OutOfBoundsMode,
 }
 
 impl VideoReader {
@@ -93,11 +95,13 @@ impl VideoReader {
     /// Create a new VideoReader instance
     /// * `filename` - Path to the video file.
     /// * `decoder_config` - Config for the decoder see: [`DecoderConfig`]
+    /// * `oob_mode` - How to handle out-of-bounds or failed frame fetches
     ///
     /// Returns: a VideoReader instance.
     pub fn new(
         filename: String,
         decoder_config: DecoderConfig,
+        oob_mode: OutOfBoundsMode,
     ) -> Result<VideoReader, ffmpeg::Error> {
         let (mut ictx, stream_index) = get_init_context(&filename)?;
         let stream_info = get_frame_count(&mut ictx, &stream_index)?;
@@ -116,6 +120,7 @@ impl VideoReader {
             draining: false,
             seek_verified: None, // Will be tested on first get_batch
             eof_sent: false,
+            oob_mode,
         })
     }
 
@@ -442,6 +447,11 @@ impl VideoReader {
     /// Safely get the batch of frames from the video by iterating over all frames and decoding
     /// only the ones we need. This can be more accurate when the video's metadata is not reliable,
     /// or when the video has B-frames.
+    /// 
+    /// Behavior depends on `oob_mode`:
+    /// - `Error`: Return error if any requested frame is not found (default)
+    /// - `Skip`: Skip missing frames - returned array may have fewer frames than requested
+    /// - `Black`: Return black (all-zero) frames for missing frames
     pub fn get_batch_safe(&mut self, indices: Vec<usize>) -> Result<VideoArray, ffmpeg::Error> {
         // Simple and robust implementation: iterate once from the start and grab the requested
         // frames in presentation order. This avoids any reliance on seeking or timestamp quirks
@@ -541,21 +551,61 @@ impl VideoReader {
             }
         }
 
-        // Build output in the same order as requested (including duplicates)
-        let mut frame_batch: VideoArray = Array4::zeros((
-            indices.len(),
-            self.decoder.height as usize,
-            self.decoder.width as usize,
-            3,
-        ));
+        let height = self.decoder.height as usize;
+        let width = self.decoder.width as usize;
 
-        for (out_i, idx) in indices.iter().enumerate() {
-            if let Some(frame) = frame_map.get(idx) {
-                frame_batch.slice_mut(s![out_i, .., .., ..]).assign(frame);
-            } else {
-                debug!("No frame found for {}", idx);
+        // Build output based on oob_mode
+        let frame_batch = match self.oob_mode {
+            OutOfBoundsMode::Skip => {
+                // Collect only found frames, maintaining request order
+                let mut frames: Vec<FrameArray> = Vec::new();
+                for idx in &indices {
+                    if let Some(frame) = frame_map.get(idx) {
+                        frames.push(frame.clone());
+                    } else {
+                        debug!("Skipping frame {} (oob_mode=skip)", idx);
+                    }
+                }
+                
+                if frames.is_empty() {
+                    Array4::zeros((0, height, width, 3))
+                } else {
+                    let mut batch = Array4::zeros((frames.len(), height, width, 3));
+                    for (i, frame) in frames.iter().enumerate() {
+                        batch.slice_mut(s![i, .., .., ..]).assign(frame);
+                    }
+                    batch
+                }
             }
-        }
+            OutOfBoundsMode::Black => {
+                // Return zeros for missing frames
+                let mut batch = Array4::zeros((indices.len(), height, width, 3));
+                for (out_i, idx) in indices.iter().enumerate() {
+                    if let Some(frame) = frame_map.get(idx) {
+                        batch.slice_mut(s![out_i, .., .., ..]).assign(frame);
+                    } else {
+                        debug!("Using black frame for {} (oob_mode=black)", idx);
+                    }
+                }
+                batch
+            }
+            OutOfBoundsMode::Error => {
+                // Error if any frame is missing
+                let mut batch = Array4::zeros((indices.len(), height, width, 3));
+                for (out_i, idx) in indices.iter().enumerate() {
+                    if let Some(frame) = frame_map.get(idx) {
+                        batch.slice_mut(s![out_i, .., .., ..]).assign(frame);
+                    } else {
+                        debug!("No frame found for {} (oob_mode=error)", idx);
+                        // reset decoder state before returning error
+                        self.decoder.video.flush();
+                        self.seek_to_start()?;
+                        return Err(ffmpeg::Error::Bug);
+                    }
+                }
+                batch
+            }
+        };
 
         // reset decoder state for subsequent calls
         self.decoder.video.flush();
@@ -568,6 +618,11 @@ impl VideoReader {
     /// from decord library: https://github.com/dmlc/decord
     ///
     /// Sorts indices internally to minimize backward seeks.
+    /// 
+    /// Behavior depends on `oob_mode`:
+    /// - `Error`: Return error on any failed frame fetch (default)
+    /// - `Skip`: Skip failed frames - returned array may have fewer frames than requested
+    /// - `Black`: Return black (all-zero) frames for failed fetches
     pub fn get_batch(&mut self, indices: Vec<usize>) -> Result<VideoArray, ffmpeg::Error> {
         // Sort indices to minimize backward seeks (keep track of original positions)
         let mut sorted_indices: Vec<(usize, usize)> = indices
@@ -590,17 +645,21 @@ impl VideoReader {
         // make sure we are at the beginning of the stream
         self.seek_to_start()?;
 
-        // Allocate output buffer once
-        let mut video_frames: VideoArray = Array::zeros((
-            indices.len(),
-            self.decoder.height as usize,
-            self.decoder.width as usize,
-            3,
-        ));
-
         let cspace = self.decoder.color_space;
         let crange = self.decoder.color_range;
         let is_hwaccel = self.decoder.is_hwaccel;
+        let height = self.decoder.height as usize;
+        let width = self.decoder.width as usize;
+
+        // For Skip mode, we need to collect successful frames and track their positions
+        let mut successful_frames: Vec<(usize, ndarray::Array3<u8>)> = Vec::new();
+        
+        // For Black/Error mode, allocate output buffer once (pre-filled with zeros)
+        let mut video_frames: Option<VideoArray> = if self.oob_mode != OutOfBoundsMode::Skip {
+            Some(Array::zeros((indices.len(), height, width, 3)))
+        } else {
+            None
+        };
 
         // Process frames in sorted order (minimizes seeks)
         for frame_index in unique_frames {
@@ -616,22 +675,76 @@ impl VideoReader {
                     }?;
 
                     if let Some(positions) = positions_map.get(&frame_index) {
-                        for pos in positions {
-                            video_frames
-                                .slice_mut(s![*pos, .., .., ..])
-                                .assign(&rgb_frame);
+                        match self.oob_mode {
+                            OutOfBoundsMode::Skip => {
+                                // Store the frame for each position
+                                for pos in positions {
+                                    successful_frames.push((*pos, rgb_frame.clone()));
+                                }
+                            }
+                            OutOfBoundsMode::Black | OutOfBoundsMode::Error => {
+                                // Write directly to pre-allocated buffer
+                                if let Some(ref mut vf) = video_frames {
+                                    for pos in positions {
+                                        vf.slice_mut(s![*pos, .., .., ..]).assign(&rgb_frame);
+                                    }
+                                }
+                            }
                         }
                     }
                 }
-                Ok(None) => debug!("No frame found for frame index {}", frame_index),
+                Ok(None) => {
+                    debug!("No frame found for frame index {}", frame_index);
+                    match self.oob_mode {
+                        OutOfBoundsMode::Error => {
+                            return Err(ffmpeg::Error::Bug);
+                        }
+                        OutOfBoundsMode::Skip => {
+                            // Just skip - don't add to successful_frames
+                            debug!("Skipping frame {} (oob_mode=skip)", frame_index);
+                        }
+                        OutOfBoundsMode::Black => {
+                            // Already zeros, just log
+                            debug!("Using black frame for {} (oob_mode=black)", frame_index);
+                        }
+                    }
+                }
                 Err(e) => {
                     debug!("seek_accurate_raw failed at {}: {:?}", frame_index, e);
-                    return Err(e);
+                    match self.oob_mode {
+                        OutOfBoundsMode::Error => {
+                            return Err(e);
+                        }
+                        OutOfBoundsMode::Skip => {
+                            debug!("Skipping frame {} due to error (oob_mode=skip)", frame_index);
+                        }
+                        OutOfBoundsMode::Black => {
+                            debug!("Using black frame for {} due to error (oob_mode=black)", frame_index);
+                        }
+                    }
                 }
             }
         }
 
-        Ok(video_frames)
+        // Build final output
+        if self.oob_mode == OutOfBoundsMode::Skip {
+            // Sort by original position to maintain requested order
+            successful_frames.sort_by_key(|(pos, _)| *pos);
+            
+            let n_successful = successful_frames.len();
+            if n_successful == 0 {
+                // Return empty array
+                return Ok(Array::zeros((0, height, width, 3)));
+            }
+            
+            let mut output = Array::zeros((n_successful, height, width, 3));
+            for (i, (_, frame)) in successful_frames.into_iter().enumerate() {
+                output.slice_mut(s![i, .., .., ..]).assign(&frame);
+            }
+            Ok(output)
+        } else {
+            Ok(video_frames.unwrap())
+        }
     }
 
     /// Returns the raw YUV frame (after filter graph) for a given presentation index.
