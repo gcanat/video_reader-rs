@@ -77,6 +77,9 @@ pub struct StreamInfo {
     /// Whether packet-order PTS/DTS are non-monotonic
     has_non_monotonic_pts: bool,
     has_non_monotonic_dts: bool,
+    /// Whether any packets share the same PTS/DTS values
+    has_duplicate_pts: bool,
+    has_duplicate_dts: bool,
     /// Minimum raw pts/dts observed (for normalization)
     min_pts: i64,
     min_dts: i64,
@@ -96,7 +99,11 @@ impl StreamInfo {
         let mut has_missing_dts = false;
         let mut has_non_monotonic_pts = false;
         let mut has_non_monotonic_dts = false;
+        let mut has_duplicate_pts = false;
+        let mut has_duplicate_dts = false;
         let mut pts_to_pres_idx: BTreeMap<i64, usize> = BTreeMap::new();
+        let mut seen_pts: std::collections::HashSet<i64> = std::collections::HashSet::new();
+        let mut seen_dts: std::collections::HashSet<i64> = std::collections::HashSet::new();
 
         let mut prev_pts: Option<i64> = None;
         let mut prev_dts: Option<i64> = None;
@@ -110,6 +117,10 @@ impl StreamInfo {
                     }
                 }
                 prev_pts = Some(*ft.pts());
+                // Check for duplicate PTS
+                if !seen_pts.insert(*ft.pts()) {
+                    has_duplicate_pts = true;
+                }
             } else {
                 has_missing_pts = true;
             }
@@ -122,6 +133,10 @@ impl StreamInfo {
                     }
                 }
                 prev_dts = Some(*ft.dts());
+                // Check for duplicate DTS
+                if !seen_dts.insert(*ft.dts()) {
+                    has_duplicate_dts = true;
+                }
             } else {
                 has_missing_dts = true;
             }
@@ -191,6 +206,8 @@ impl StreamInfo {
             has_missing_dts,
             has_non_monotonic_pts,
             has_non_monotonic_dts,
+            has_duplicate_pts,
+            has_duplicate_dts,
             min_pts,
             min_dts,
             pts_to_pres_idx,
@@ -250,6 +267,12 @@ impl StreamInfo {
     }
     pub fn has_non_monotonic_dts(&self) -> bool {
         self.has_non_monotonic_dts
+    }
+    pub fn has_duplicate_pts(&self) -> bool {
+        self.has_duplicate_pts
+    }
+    pub fn has_duplicate_dts(&self) -> bool {
+        self.has_duplicate_dts
     }
     pub fn min_pts_offset(&self) -> i64 {
         if self.min_pts < 0 {

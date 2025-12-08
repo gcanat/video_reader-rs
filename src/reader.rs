@@ -877,6 +877,14 @@ impl VideoReader {
             force_sequential = true;
             reasons.push("missing dts".to_string());
         }
+        if self.stream_info.has_duplicate_pts() {
+            force_sequential = true;
+            reasons.push("duplicate pts".to_string());
+        }
+        if self.stream_info.has_duplicate_dts() {
+            force_sequential = true;
+            reasons.push("duplicate dts".to_string());
+        }
         // Detect videos with undecodable frames at the start
         // Case 1: First keyframe's presentation index > 0 means frames before it cannot be decoded
         // Case 2: First keyframe has negative PTS typically indicates B-frames at video start
