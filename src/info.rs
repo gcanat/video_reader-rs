@@ -265,6 +265,38 @@ impl StreamInfo {
             0
         }
     }
+    /// Get the presentation index offset of the first keyframe.
+    /// If first keyframe (decode_idx=0) has pres_idx > 0, it means there are
+    /// frames that should be displayed before the first keyframe but cannot be decoded
+    /// (typically B-frames at the start of a video with missing references).
+    /// Returns 0 for normal videos, > 0 for videos with this issue.
+    pub fn first_keyframe_pres_offset(&self) -> usize {
+        if self.key_frames.is_empty() {
+            return 0;
+        }
+        let first_keyframe_decode_idx = self.key_frames[0];
+        // Get the presentation index for the first keyframe
+        self.decode_to_presentation_idx
+            .get(first_keyframe_decode_idx)
+            .copied()
+            .unwrap_or(0)
+    }
+    /// Check if first keyframe has negative PTS.
+    /// When first keyframe has negative PTS, it typically indicates the video
+    /// starts with B-frames that depend on reference frames decoded later.
+    /// These B-frames often cannot be decoded properly, causing packet-frame
+    /// count mismatch and presentation index misalignment.
+    pub fn first_keyframe_has_negative_pts(&self) -> bool {
+        if self.key_frames.is_empty() {
+            return false;
+        }
+        let first_keyframe_decode_idx = self.key_frames[0];
+        if let Some(ft) = self.frame_times.get(&first_keyframe_decode_idx) {
+            ft.pts < 0
+        } else {
+            false
+        }
+    }
     pub fn keyframe_pts_monotonic_norm(&self) -> (bool, usize) {
         let offset = self.min_pts_offset();
         let key_frames = self.key_frames();

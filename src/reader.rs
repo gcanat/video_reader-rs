@@ -757,15 +757,8 @@ impl VideoReader {
         let mut decoded = Video::empty();
         let mut counter = 0;
         let expected_pts = self.stream_info.get_pts_for_presentation(target_pres_idx);
-        let mut pres_idx_from_pts: Option<usize> = None;
 
         while self.decoder.video.receive_frame(&mut decoded).is_ok() {
-            let frame_pts = decoded.pts().unwrap_or(-1);
-            // debug!(
-            //     "Decoded frame (raw): pres_idx={}, target={}, frame_pts={}",
-            //     self.curr_pres_idx, target_pres_idx, frame_pts
-            // );
-
             // Push through filter graph and get YUV frame
             if let Some(mut in_ctx) = self.decoder.graph.get("in") {
                 if let Err(e) = in_ctx.source().add(&decoded) {
@@ -782,18 +775,38 @@ impl VideoReader {
             if let Some(mut out_ctx) = self.decoder.graph.get("out") {
                 if out_ctx.sink().frame(&mut yuv_frame).is_ok() {
                     let out_pts = yuv_frame.pts();
-                    // If we have PTS, try to map back to presentation index to resync after seek
+                    
+                    // PRIORITY 1: Use PTS to resync curr_pres_idx IMMEDIATELY
+                    // This ensures we track position accurately even after seeks,
+                    // which is critical for videos with non-monotonic packet-order PTS (B-frames)
+                    // NOTE: presentation_for_pts_norm expects NORMALIZED PTS (raw - min_offset)
                     if let Some(p) = out_pts {
-                        if let Some(mapped) = self.stream_info.presentation_for_pts_norm(p) {
-                            pres_idx_from_pts = Some(mapped);
+                        let pts_offset = self.stream_info.min_pts_offset();
+                        let norm_p = p - pts_offset;
+                        if let Some(mapped) = self.stream_info.presentation_for_pts_norm(norm_p) {
+                            self.curr_pres_idx = mapped;
                         }
                     }
-                    let mut matched = self.curr_pres_idx == target_pres_idx;
+                    
+                    // Check for match - first by PTS (most reliable), then by count
+                    let mut matched = false;
+                    
+                    // PTS-based match (primary method - most reliable after seeks)
+                    // expected_pts returns (raw_pts, normalized_pts)
+                    // out_pts is raw from decoder, so compare with exp_raw OR normalize and compare with exp_norm
                     if let (Some((exp_raw, exp_norm)), Some(p)) = (expected_pts, out_pts) {
-                        if p == exp_norm || p == exp_raw {
+                        let pts_offset = self.stream_info.min_pts_offset();
+                        let norm_p = p - pts_offset;
+                        if p == exp_raw || norm_p == exp_norm {
                             matched = true;
                         }
                     }
+                    
+                    // Count-based match (fallback when PTS doesn't match directly)
+                    if !matched && self.curr_pres_idx == target_pres_idx {
+                        matched = true;
+                    }
+                    
                     if matched {
                         let out_pts_dbg = out_pts.unwrap_or(-1);
                         debug!(
@@ -809,13 +822,8 @@ impl VideoReader {
                 return (None, counter);
             }
 
-            // Advance presentation index, preferring mapped value if we have it
-            if let Some(mapped) = pres_idx_from_pts {
-                self.curr_pres_idx = mapped + 1;
-                pres_idx_from_pts = None;
-            } else {
-                self.curr_pres_idx += 1;
-            }
+            // Advance presentation index for next iteration
+            self.curr_pres_idx += 1;
             counter += 1;
         }
 
@@ -877,9 +885,18 @@ impl VideoReader {
             force_sequential = true;
             reasons.push("missing dts".to_string());
         }
-        if self.stream_info.has_non_monotonic_pts() {
+        // Detect videos with undecodable frames at the start
+        // Case 1: First keyframe's presentation index > 0 means frames before it cannot be decoded
+        // Case 2: First keyframe has negative PTS typically indicates B-frames at video start
+        //         that depend on future reference frames and cannot be decoded properly
+        let first_kf_offset = self.stream_info.first_keyframe_pres_offset();
+        let first_kf_neg_pts = self.stream_info.first_keyframe_has_negative_pts();
+        if first_kf_offset > 0 || first_kf_neg_pts {
             force_sequential = true;
-            reasons.push("non-monotonic pts".to_string());
+            reasons.push(format!(
+                "undecodable frames at start (pres_offset={}, neg_pts={})",
+                first_kf_offset, first_kf_neg_pts
+            ));
         }
         if self.stream_info.has_non_monotonic_dts() {
             force_sequential = true;
