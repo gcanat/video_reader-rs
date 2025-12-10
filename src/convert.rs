@@ -200,7 +200,7 @@ mod tests {
             [[[128, 128, 128], [0, 0, 0]], [[255, 0, 255], [0, 255, 255]]],
         );
         let expected = arr3(&[[[54, 182], [18, 255]], [[128, 0], [73, 201]]]);
-        let result = rgb2gray(input);
+        let result = rgb2gray(input).unwrap();
         assert_eq!(result, expected);
     }
 

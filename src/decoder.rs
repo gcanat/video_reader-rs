@@ -3,6 +3,7 @@ use crate::convert::{get_colorrange, get_colorspace};
 use crate::hwaccel::HardwareAccelerationDeviceType;
 use crate::utils::{FrameArray, VideoArray};
 use ffmpeg::filter;
+use ffmpeg::software::scaling;
 use ffmpeg::util::frame::video::Video;
 use ffmpeg_next as ffmpeg;
 use ndarray::{s, Array, Array4, ArrayViewMut3};
@@ -19,6 +20,25 @@ pub enum OutOfBoundsMode {
     Skip,
     /// Return black (all-zero) frames for failed fetches
     Black,
+}
+
+/// Wrapper for scaling::Context to implement Send
+/// SAFETY: sws_scale is used within a single thread (protected by mutex in PyVideoReader)
+pub struct SendableScaler(pub scaling::Context);
+
+unsafe impl Send for SendableScaler {}
+
+impl std::ops::Deref for SendableScaler {
+    type Target = scaling::Context;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for SendableScaler {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
 }
 
 /// Struct used when we want to decode the whole video with a compression_factor
@@ -123,6 +143,8 @@ pub struct DecoderConfig {
     threads: usize,
     resize_shorter_side: Option<f64>,
     resize_longer_side: Option<f64>,
+    target_width: Option<u32>,
+    target_height: Option<u32>,
     hw_accel: Option<HardwareAccelerationDeviceType>,
     ff_filter: Option<String>,
 }
@@ -132,6 +154,8 @@ impl DecoderConfig {
         threads: usize,
         resize_shorter_side: Option<f64>,
         resize_longer_side: Option<f64>,
+        target_width: Option<u32>,
+        target_height: Option<u32>,
         hw_accel: Option<HardwareAccelerationDeviceType>,
         ff_filter: Option<String>,
     ) -> Self {
@@ -139,6 +163,8 @@ impl DecoderConfig {
             threads,
             resize_shorter_side,
             resize_longer_side,
+            target_width,
+            target_height,
             hw_accel,
             ff_filter,
         }
@@ -154,6 +180,15 @@ impl DecoderConfig {
     }
     pub fn resize_longer_side(&self) -> Option<f64> {
         self.resize_longer_side
+    }
+    pub fn target_width(&self) -> Option<u32> {
+        self.target_width
+    }
+    pub fn target_height(&self) -> Option<u32> {
+        self.target_height
+    }
+    pub fn ff_filter_ref(&self) -> Option<&str> {
+        self.ff_filter.as_deref()
     }
     pub fn ff_filter(self) -> Option<String> {
         self.ff_filter
@@ -171,6 +206,8 @@ pub struct VideoDecoder {
     pub graph: filter::Graph,
     pub color_space: YuvStandardMatrix,
     pub color_range: YuvRange,
+    /// Optional direct scaler for resize (bypasses filter graph scale)
+    pub scaler: Option<SendableScaler>,
 }
 
 impl VideoDecoder {
@@ -182,6 +219,7 @@ impl VideoDecoder {
         video_info: HashMap<&'static str, String>,
         is_hwaccel: bool,
         graph: filter::Graph,
+        scaler: Option<SendableScaler>,
     ) -> Self {
         let cspace_string = video_info
             .get("color_space")
@@ -203,6 +241,7 @@ impl VideoDecoder {
             graph,
             color_space,
             color_range,
+            scaler,
         }
     }
     pub fn video_info(&self) -> &HashMap<&'static str, String> {
@@ -238,10 +277,19 @@ impl VideoDecoder {
         let mut yuv_frame = Video::empty();
         if let Some(mut out_ctx) = self.graph.get("out") {
             if out_ctx.sink().frame(&mut yuv_frame).is_ok() {
-                let rgb_frame: FrameArray = if self.is_hwaccel {
-                    convert_nv12_to_ndarray_rgb24(yuv_frame, cspace, crange)?
+                // If we have a direct scaler, resize the YUV frame before color conversion
+                let frame_to_convert = if let Some(ref mut scaler) = self.scaler {
+                    let mut scaled_frame = Video::empty();
+                    scaler.run(&yuv_frame, &mut scaled_frame)?;
+                    scaled_frame
                 } else {
-                    convert_yuv_to_ndarray_rgb24(yuv_frame, cspace, crange)?
+                    yuv_frame
+                };
+
+                let rgb_frame: FrameArray = if self.is_hwaccel {
+                    convert_nv12_to_ndarray_rgb24(frame_to_convert, cspace, crange)?
+                } else {
+                    convert_yuv_to_ndarray_rgb24(frame_to_convert, cspace, crange)?
                 };
                 return Ok(Some(rgb_frame));
             }

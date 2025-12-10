@@ -187,6 +187,7 @@ pub fn create_filter_spec(
     hwaccel_context: Option<HardwareAccelerationContext>,
     hwaccel_fmt: AvPixel,
     rotation: isize,
+    skip_scale: bool,
 ) -> Result<(String, Option<AvPixel>, u32, u32, bool), ffmpeg_next::Error> {
     let pix_fmt = AvPixel::YUV420P;
     let mut hw_format: Option<AvPixel> = None;
@@ -199,13 +200,26 @@ pub fn create_filter_spec(
             let pix_fmt_name = pix_fmt.descriptor().map(|d| d.name()).unwrap_or("yuv420p");
             let transpose = transpose_filter(rotation);
             rotation_applied = !transpose.is_empty();
-            let mut filter_spec = format!(
-                "format={},scale=w={}:h={}:flags=fast_bilinear{}",
-                pix_fmt_name,
-                width,
-                height,
-                transpose,
-            );
+            // If skip_scale is true, only do format conversion (no scale filter)
+            let mut filter_spec = if skip_scale {
+                // When skip_scale, we need to update output dimensions if transpose is applied
+                // Transpose (90/270 degree) swaps width and height
+                if rotation_applied && (rotation.abs() == 90 || rotation.abs() == 270) {
+                    std::mem::swap(&mut out_width, &mut out_height);
+                }
+                format!("format={}{}", pix_fmt_name, transpose)
+            } else {
+                // Order: format -> transpose -> scale
+                // This ensures rotation happens before resize, so scale dimensions 
+                // are applied to the rotated frame (not the original orientation)
+                format!(
+                    "format={}{},scale=w={}:h={}:flags=fast_bilinear",
+                    pix_fmt_name,
+                    transpose,
+                    width,
+                    height,
+                )
+            };
 
             if let Some(hw_ctx) = hwaccel_context {
                 hw_format = Some(hw_ctx.format());

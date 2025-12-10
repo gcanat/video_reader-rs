@@ -2,6 +2,7 @@ use ffmpeg::codec::threading;
 use ffmpeg::ffi::*;
 use ffmpeg::format::input;
 use ffmpeg::media::Type;
+use ffmpeg::software::scaling;
 use ffmpeg::util::frame::video::Video;
 use ffmpeg::util::rational::Rational;
 use ffmpeg_next as ffmpeg;
@@ -11,7 +12,7 @@ use std::path::Path;
 use std::time::Instant;
 
 use crate::convert::{convert_nv12_to_ndarray_rgb24, convert_yuv_to_ndarray_rgb24};
-use crate::decoder::{DecoderConfig, OutOfBoundsMode, VideoDecoder, VideoReducer};
+use crate::decoder::{DecoderConfig, OutOfBoundsMode, SendableScaler, VideoDecoder, VideoReducer};
 use crate::filter::{create_filter_spec, create_filters, FilterConfig};
 use crate::hwaccel::{HardwareAccelerationContext, HardwareAccelerationDeviceType};
 use crate::info::{
@@ -163,31 +164,83 @@ impl VideoReader {
             }
         };
 
-        let (mut height, mut width) = get_resized_dim(
-            orig_h as f64,
-            orig_w as f64,
-            config.resize_shorter_side(),
-            config.resize_longer_side(),
-        );
+        // Determine resize method with mutual exclusion
+        // Priority: target_width/height > resize_shorter_side/longer_side > filter scale
+        let has_target_dims = config.target_width().is_some() && config.target_height().is_some();
+        let has_resize_side = config.resize_shorter_side().is_some() || config.resize_longer_side().is_some();
+        let filter_has_scale = config.ff_filter_ref()
+            .map(|f| f.to_lowercase().contains("scale"))
+            .unwrap_or(false);
+
+        // Check for mutual exclusion conflicts
+        let resize_methods_count = [has_target_dims, has_resize_side, filter_has_scale]
+            .iter()
+            .filter(|&&x| x)
+            .count();
+        
+        if resize_methods_count > 1 {
+            log::error!(
+                "Multiple resize methods specified. Use only ONE of: \
+                 target_width/target_height, resize_shorter_side/resize_longer_side, or filter with scale."
+            );
+            return Err(ffmpeg::Error::InvalidData);
+        }
+
+        // Determine use_direct_resize and final dimensions
+        let use_direct_resize = has_target_dims;
+        
+        // Calculate dimensions based on resize method
+        let (mut height, mut width, target_w, target_h) = if has_target_dims {
+            // Use target dimensions directly (safe: checked has_target_dims)
+            let tw = config.target_width().ok_or(ffmpeg::Error::InvalidData)?;
+            let th = config.target_height().ok_or(ffmpeg::Error::InvalidData)?;
+            (th, tw, tw, th)
+        } else if has_resize_side {
+            // Use resize_shorter/longer_side
+            let (h, w) = get_resized_dim(
+                orig_h as f64,
+                orig_w as f64,
+                config.resize_shorter_side(),
+                config.resize_longer_side(),
+            );
+            (h, w, w, h)
+        } else {
+            // No resize specified (filter may handle it)
+            (orig_h, orig_w, orig_w, orig_h)
+        };
 
         let is_hwaccel = hwaccel_context.is_some();
+        
+        // If using direct resize, skip scale in filter (only format conversion)
+        // Otherwise, pass dimensions as-is for filter to handle
+        let filter_width = if use_direct_resize { orig_w } else { width };
+        let filter_height = if use_direct_resize { orig_h } else { height };
+        
         let (filter_spec, hw_format, out_width, out_height, rotation_applied) = create_filter_spec(
-            width,
-            height,
+            filter_width,
+            filter_height,
             &mut video,
             config.ff_filter(),
             hwaccel_context,
             HWACCEL_PIXEL_FORMAT,
             video_params.rotation,
+            use_direct_resize, // skip_scale when using direct resize
         )?;
 
-        // Use the actual output dimensions (may differ from input if custom filter has scale)
-        width = out_width;
-        height = out_height;
+        // Update dimensions based on method used
+        if use_direct_resize {
+            // For direct resize, target dimensions are final
+            width = target_w;
+            height = target_h;
+        } else {
+            // For filter-based resize, use filter output dimensions
+            width = out_width;
+            height = out_height;
+        }
 
         debug!(
-            "Filter spec: {}, output size: {}x{}",
-            filter_spec, width, height
+            "Filter spec: {}, output size: {}x{}, direct_resize: {}",
+            filter_spec, width, height, use_direct_resize
         );
         let time_base_rational = video_info
             .get("time_base_rational")
@@ -204,11 +257,33 @@ impl VideoReader {
 
         let graph = create_filters(&mut video, hw_format, filter_cfg)?;
 
-        if rotation_applied && video_params.rotation.abs() == 90 {
+        // Create direct scaler if target dimensions are specified
+        let scaler = if use_direct_resize {
+            // Get the format after the filter (should be YUV420P)
+            let src_format = ffmpeg::format::Pixel::YUV420P;
+            let dst_format = ffmpeg::format::Pixel::YUV420P;
+            
+            // Source dimensions are the filter output (original for direct resize)
+            let src_w = out_width;
+            let src_h = out_height;
+            
+            let ctx = scaling::Context::get(
+                src_format, src_w, src_h,
+                dst_format, target_w, target_h,
+                scaling::Flags::FAST_BILINEAR,
+            )?;
+            Some(SendableScaler(ctx))
+        } else {
+            None
+        };
+
+        // Swap dimensions for 90/270 rotation, but NOT when using direct resize 
+        // (target dimensions are already the final output dimensions)
+        if !use_direct_resize && rotation_applied && (video_params.rotation.abs() == 90 || video_params.rotation.abs() == 270) {
             std::mem::swap(&mut height, &mut width);
         }
         Ok(VideoDecoder::new(
-            video, height, width, fps, video_info, is_hwaccel, graph,
+            video, height, width, fps, video_info, is_hwaccel, graph, scaler,
         ))
     }
 
@@ -507,12 +582,21 @@ impl VideoReader {
                         .frame(&mut rgb_frame)
                         .is_ok()
                     {
+                        // Apply scaler if configured (for direct resize mode)
+                        let frame_to_convert = if let Some(ref mut scaler) = self.decoder.scaler {
+                            let mut scaled_frame = Video::empty();
+                            scaler.run(&rgb_frame, &mut scaled_frame)?;
+                            scaled_frame
+                        } else {
+                            rgb_frame
+                        };
+
                         let cspace = self.decoder.color_space;
                         let crange = self.decoder.color_range;
                         let frame = if self.decoder.is_hwaccel {
-                            convert_nv12_to_ndarray_rgb24(rgb_frame, cspace, crange)?
+                            convert_nv12_to_ndarray_rgb24(frame_to_convert, cspace, crange)?
                         } else {
-                            convert_yuv_to_ndarray_rgb24(rgb_frame, cspace, crange)?
+                            convert_yuv_to_ndarray_rgb24(frame_to_convert, cspace, crange)?
                         };
                         frame_map.insert(curr_idx, frame);
                         collected += 1;
@@ -544,12 +628,21 @@ impl VideoReader {
                     .frame(&mut rgb_frame)
                     .is_ok()
                 {
+                    // Apply scaler if configured (for direct resize mode)
+                    let frame_to_convert = if let Some(ref mut scaler) = self.decoder.scaler {
+                        let mut scaled_frame = Video::empty();
+                        scaler.run(&rgb_frame, &mut scaled_frame)?;
+                        scaled_frame
+                    } else {
+                        rgb_frame
+                    };
+
                     let cspace = self.decoder.color_space;
                     let crange = self.decoder.color_range;
                     let frame = if self.decoder.is_hwaccel {
-                        convert_nv12_to_ndarray_rgb24(rgb_frame, cspace, crange)?
+                        convert_nv12_to_ndarray_rgb24(frame_to_convert, cspace, crange)?
                     } else {
-                        convert_yuv_to_ndarray_rgb24(rgb_frame, cspace, crange)?
+                        convert_yuv_to_ndarray_rgb24(frame_to_convert, cspace, crange)?
                     };
                     frame_map.insert(curr_idx, frame);
                     collected += 1;
@@ -684,10 +777,19 @@ impl VideoReader {
 
             match self.seek_accurate_raw(frame_index) {
                 Ok(Some(yuv_frame)) => {
-                    let rgb_frame = if is_hwaccel {
-                        convert_nv12_to_ndarray_rgb24(yuv_frame, cspace, crange)
+                    // Apply scaler if configured (for direct resize mode)
+                    let frame_to_convert = if let Some(ref mut scaler) = self.decoder.scaler {
+                        let mut scaled_frame = Video::empty();
+                        scaler.run(&yuv_frame, &mut scaled_frame)?;
+                        scaled_frame
                     } else {
-                        convert_yuv_to_ndarray_rgb24(yuv_frame, cspace, crange)
+                        yuv_frame
+                    };
+
+                    let rgb_frame = if is_hwaccel {
+                        convert_nv12_to_ndarray_rgb24(frame_to_convert, cspace, crange)
+                    } else {
+                        convert_yuv_to_ndarray_rgb24(frame_to_convert, cspace, crange)
                     }?;
 
                     if let Some(positions) = positions_map.get(&frame_index) {
