@@ -179,6 +179,45 @@ fn parse_scale_from_filter(filter_spec: &str) -> Option<(u32, u32)> {
     None
 }
 
+/// Swap w and h values in a filter string's scale parameter
+/// e.g., "scale=w=360:h=640" -> "scale=w=640:h=360"
+fn swap_scale_dimensions(filter_spec: &str) -> String {
+    // Parse scale dimensions first
+    if let Some((w, h)) = parse_scale_from_filter(filter_spec) {
+        // Find and replace the scale parameter
+        if let Some(scale_pos) = filter_spec.find("scale=") {
+            let before = &filter_spec[..scale_pos];
+            let after_scale = &filter_spec[scale_pos + 6..];
+            
+            // Find end of scale params (next comma or end)
+            let scale_end = after_scale.find(',').unwrap_or(after_scale.len());
+            let rest = &after_scale[scale_end..];
+            
+            // Check format and rebuild with swapped dimensions
+            if after_scale.starts_with("w=") {
+                // "scale=w=XXX:h=YYY:flags=..." format - preserve extra params like flags
+                let scale_parts: Vec<&str> = after_scale[..scale_end].split(':').collect();
+                let mut new_parts = Vec::new();
+                for part in &scale_parts {
+                    if part.starts_with("w=") {
+                        new_parts.push(format!("w={}", h));
+                    } else if part.starts_with("h=") {
+                        new_parts.push(format!("h={}", w));
+                    } else {
+                        new_parts.push(part.to_string());
+                    }
+                }
+                return format!("{}scale={}{}", before, new_parts.join(":"), rest);
+            } else {
+                // "scale=XXX:YYY" format
+                return format!("{}scale={}:{}{}", before, h, w, rest);
+            }
+        }
+    }
+    // No scale found or parse failed, return as-is
+    filter_spec.to_string()
+}
+
 pub fn create_filter_spec(
     width: u32,
     height: u32,
@@ -204,32 +243,34 @@ pub fn create_filter_spec(
             // (e.g., videos that change pixel format mid-stream like yuv420p -> yuv444p)
             // The scale filter with original dimensions acts as a format normalizer
             let mut filter_spec = if skip_scale {
-                // When skip_scale, we need to update output dimensions if transpose is applied
-                // Transpose (90/270 degree) swaps width and height
+                // When skip_scale, we need to:
+                // 1. Scale uses ORIGINAL dimensions (width, height) - before rotation
+                // 2. Transpose happens after scale, which swaps the output dimensions
+                // 3. Return out_width/out_height as the POST-transpose dimensions
+                
+                // First, update out_width/out_height to reflect post-transpose output
                 if rotation_applied && (rotation.abs() == 90 || rotation.abs() == 270) {
                     std::mem::swap(&mut out_width, &mut out_height);
                 }
-                // Use scale with original dimensions to normalize format without changing size
+                // Use original width/height for scale (before transpose)
                 // This handles videos that change pixel format mid-stream
+                // Order: format -> scale(original) -> transpose
                 format!(
-                    "format={}{},scale=w={}:h={}:flags=fast_bilinear",
+                    "format={},scale=w={}:h={}:flags=fast_bilinear{}",
                     pix_fmt_name,
+                    width,   // Original width, not swapped
+                    height,  // Original height, not swapped
                     transpose,
-                    out_width,
-                    out_height,
                 )
             } else {
-                // Order: format -> transpose -> scale
-                // This ensures rotation happens before resize, so scale dimensions 
-                // are applied to the rotated frame (not the original orientation)
-                // Note: width/height passed here are already display dimensions (swapped if needed)
-                
+                // Order: format -> scale -> transpose (old order, precise)
+                // Scale first, then rotate - this matches the old behavior for accuracy
                 format!(
-                    "format={}{},scale=w={}:h={}:flags=fast_bilinear",
+                    "format={},scale=w={}:h={}:flags=fast_bilinear{}",
                     pix_fmt_name,
-                    transpose,
                     width,
                     height,
+                    transpose,
                 )
             };
 
@@ -280,31 +321,17 @@ pub fn create_filter_spec(
             } else {
                 let transpose = transpose_filter(rotation);
                 rotation_applied = !transpose.is_empty();
-                if rotation_applied {
-                    // Insert transpose right after format= filter (before scale)
-                    // This ensures rotation happens before any resize operations
-                    if let Some(pos) = spec.find(",scale") {
-                        // Insert transpose before scale
-                        let (before, after) = spec.split_at(pos);
-                        format!("{}{}{}", before, transpose, after)
-                    } else if let Some(pos) = spec.find("format=") {
-                        // No scale filter, just append transpose after format
-                        // Find the end of format filter (next comma or end)
-                        let start = pos + 7; // length of "format="
-                        if let Some(comma_pos) = spec[start..].find(',') {
-                            let insert_pos = start + comma_pos;
-                            let (before, after) = spec.split_at(insert_pos);
-                            format!("{}{}{}", before, transpose, after)
-                        } else {
-                            format!("{}{}", spec, transpose)
-                        }
-                    } else {
-                        // No format filter, prepend transpose
-                        format!("{}{}", transpose.trim_start_matches(','), &spec)
-                    }
+                // If rotation is 90/270, user expects filter dimensions relative to rotated display
+                // But scale happens before transpose, so we need to swap w/h in the filter
+                let adjusted_spec = if rotation_applied && (rotation.abs() == 90 || rotation.abs() == 270) {
+                    swap_scale_dimensions(&spec)
                 } else {
                     spec
-                }
+                };
+                // out_width/out_height remain as user specified (the final output after transpose)
+                // No need to swap them since they represent what user expects
+                // Append transpose at the end
+                format!("{}{}", adjusted_spec, transpose)
             }
         }
     };
