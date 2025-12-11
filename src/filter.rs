@@ -200,14 +200,24 @@ pub fn create_filter_spec(
             let pix_fmt_name = pix_fmt.descriptor().map(|d| d.name()).unwrap_or("yuv420p");
             let transpose = transpose_filter(rotation);
             rotation_applied = !transpose.is_empty();
-            // If skip_scale is true, only do format conversion (no scale filter)
+            // If skip_scale is true, we still need a scale filter to handle format changes
+            // (e.g., videos that change pixel format mid-stream like yuv420p -> yuv444p)
+            // The scale filter with original dimensions acts as a format normalizer
             let mut filter_spec = if skip_scale {
                 // When skip_scale, we need to update output dimensions if transpose is applied
                 // Transpose (90/270 degree) swaps width and height
                 if rotation_applied && (rotation.abs() == 90 || rotation.abs() == 270) {
                     std::mem::swap(&mut out_width, &mut out_height);
                 }
-                format!("format={}{}", pix_fmt_name, transpose)
+                // Use scale with original dimensions to normalize format without changing size
+                // This handles videos that change pixel format mid-stream
+                format!(
+                    "format={}{},scale=w={}:h={}:flags=fast_bilinear",
+                    pix_fmt_name,
+                    transpose,
+                    out_width,
+                    out_height,
+                )
             } else {
                 // Order: format -> transpose -> scale
                 // This ensures rotation happens before resize, so scale dimensions 
