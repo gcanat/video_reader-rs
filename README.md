@@ -247,22 +247,74 @@ filter="format=yuv420p,scale=w=-1:h=256:flags=bilinear"
 filter="format=yuv420p,pad=w=max(iw\,ih):h=max(iw\,ih):x=(ow-iw)/2:y=(oh-ih)/2,scale=w=256:h=256"
 ```
 
-### Filter vs Built-in Resize
+### Filter vs Built-in Resize Options
 
-| Feature | `filter=` | `resize_shorter_side=` |
-|---------|-----------|------------------------|
-| Aspect ratio | Configurable | Always preserved |
-| Pixel format | Must specify | Auto-handled |
-| Complexity | Full control | Simple |
-| Use case | Fixed dimensions | Variable dimensions |
+There are **three ways** to resize video frames, and they are **mutually exclusive**:
+
+| Method | Use Case | Aspect Ratio |
+|--------|----------|--------------|
+| `resize_shorter_side` / `resize_longer_side` | Simple resize with aspect ratio preserved | Preserved |
+| `target_width` + `target_height` | Fixed output dimensions, direct sws_scale | User-controlled |
+| `filter="...scale=..."` | Custom FFmpeg filter with full control | User-controlled |
+
+⚠️ **You can only use ONE resize method at a time.** Combining them will raise an error:
+
+```python
+# ❌ Error: Multiple resize methods
+vr = PyVideoReader(path, target_width=224, target_height=224, resize_shorter_side=256)
+
+# ❌ Error: Multiple resize methods  
+vr = PyVideoReader(path, target_width=224, target_height=224, filter="scale=256:256")
+
+# ✅ Correct: Use only one method
+vr = PyVideoReader(path, target_width=224, target_height=224)
+```
+
+### Direct Resize with `target_width` / `target_height`
+
+For ML use cases where you need fixed output dimensions, `target_width` and `target_height` provide a simpler and slightly faster alternative to custom filters:
+
+```python
+# Resize to fixed 224x224
+vr = PyVideoReader(path, target_width=224, target_height=224)
+
+# With custom scaling algorithm
+vr = PyVideoReader(path, target_width=224, target_height=224, resize_algo="lanczos")
+```
+
+**Parameters:**
+- `target_width`: Output width in pixels (required with target_height)
+- `target_height`: Output height in pixels (required with target_width)  
+- `resize_algo`: Scaling algorithm (optional, default: `fast_bilinear`)
+
+**Scaling Algorithms (`resize_algo`):**
+
+| Value | Quality | Speed | Description |
+|-------|---------|-------|-------------|
+| `fast_bilinear` | ⭐⭐ | ⭐⭐⭐⭐⭐ | Default, fastest |
+| `bilinear` | ⭐⭐⭐ | ⭐⭐⭐⭐ | Bilinear interpolation |
+| `bicubic` | ⭐⭐⭐⭐ | ⭐⭐⭐ | Bicubic interpolation |
+| `nearest` | ⭐ | ⭐⭐⭐⭐⭐ | Nearest neighbor, no interpolation |
+| `area` | ⭐⭐⭐⭐ | ⭐⭐⭐ | Area averaging, good for downscaling |
+| `lanczos` | ⭐⭐⭐⭐⭐ | ⭐⭐ | Highest quality, best for downscaling |
+
+**Note:** You can use `target_width/height` together with non-scale filters like rotation:
+
+```python
+# ✅ This works: non-scale filter + target dimensions
+vr = PyVideoReader(path, filter="format=yuv420p", target_width=224, target_height=224)
+```
+
+### Comparison
 
 ```python
 # These produce similar results for 16:9 video:
 vr = PyVideoReader(path, resize_shorter_side=256)  # → 455x256
 vr = PyVideoReader(path, filter="format=yuv420p,scale=w=455:h=256:flags=fast_bilinear")
 
-# But only filter can do fixed square output:
-vr = PyVideoReader(path, filter="format=yuv420p,scale=w=256:h=256:flags=fast_bilinear")  # → 256x256
+# Fixed square output - two equivalent methods:
+vr = PyVideoReader(path, target_width=256, target_height=256)  # Simpler, recommended
+vr = PyVideoReader(path, filter="format=yuv420p,scale=w=256:h=256:flags=fast_bilinear")
 ```
 
 ### Combining with get_batch

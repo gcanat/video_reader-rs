@@ -216,6 +216,9 @@ impl VideoReader {
         let filter_width = if use_direct_resize { orig_w } else { width };
         let filter_height = if use_direct_resize { orig_h } else { height };
         
+        // Get resize algorithm before config is consumed by ff_filter
+        let resize_algo = config.resize_algo();
+        
         let (filter_spec, hw_format, out_width, out_height, rotation_applied) = create_filter_spec(
             filter_width,
             filter_height,
@@ -267,10 +270,13 @@ impl VideoReader {
             let src_w = out_width;
             let src_h = out_height;
             
+            // Use the configured resize algorithm
+            let scaling_flags = resize_algo.to_scaling_flags();
+            
             let ctx = scaling::Context::get(
                 src_format, src_w, src_h,
                 dst_format, target_w, target_h,
-                scaling::Flags::FAST_BILINEAR,
+                scaling_flags,
             )?;
             Some(SendableScaler(ctx))
         } else {

@@ -13,7 +13,7 @@ mod decoder;
 mod reader;
 mod utils;
 use convert::rgb2gray;
-use decoder::{DecoderConfig, OutOfBoundsMode};
+use decoder::{DecoderConfig, OutOfBoundsMode, ResizeAlgo};
 use log::debug;
 use ndarray::Array;
 use pyo3::{
@@ -97,7 +97,7 @@ struct PyVideoReader {
 #[pymethods]
 impl PyVideoReader {
     #[new]
-    #[pyo3(signature = (filename, threads=None, resize_shorter_side=None, resize_longer_side=None, target_width=None, target_height=None, device=None, filter=None, log_level=None, oob_mode=None))]
+    #[pyo3(signature = (filename, threads=None, resize_shorter_side=None, resize_longer_side=None, target_width=None, target_height=None, resize_algo=None, device=None, filter=None, log_level=None, oob_mode=None))]
     /// create an instance of VideoReader
     /// * `filename` - path to the video file
     /// * `threads` - number of threads to use. If None, let ffmpeg choose the optimal number.
@@ -124,6 +124,7 @@ impl PyVideoReader {
         resize_longer_side: Option<f64>,
         target_width: Option<u32>,
         target_height: Option<u32>,
+        resize_algo: Option<&str>,
         device: Option<&str>,
         filter: Option<String>,
         log_level: Option<&str>,
@@ -170,12 +171,29 @@ impl PyVideoReader {
                     .map_err(|_| PyRuntimeError::new_err(format!("Invalid device: {other}")))?,
             ),
         };
+        
+        // Parse resize algorithm
+        let resize_algorithm = match resize_algo {
+            None | Some("fast_bilinear") => ResizeAlgo::FastBilinear,
+            Some("bilinear") => ResizeAlgo::Bilinear,
+            Some("bicubic") => ResizeAlgo::Bicubic,
+            Some("nearest") => ResizeAlgo::Nearest,
+            Some("area") => ResizeAlgo::Area,
+            Some("lanczos") => ResizeAlgo::Lanczos,
+            Some(other) => {
+                return Err(PyRuntimeError::new_err(format!(
+                    "Invalid resize_algo: {other}. Use one of: fast_bilinear, bilinear, bicubic, nearest, area, lanczos"
+                )))
+            }
+        };
+        
         let decoder_config = DecoderConfig::new(
             threads.unwrap_or(0),
             resize_shorter_side,
             resize_longer_side,
             target_width,
             target_height,
+            resize_algorithm,
             hwaccel,
             filter,
         );

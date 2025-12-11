@@ -138,6 +138,32 @@ impl VideoReducer {
 /// * hw_accel: hardware acceleration device type, eg cuda, qsv, etc
 /// * ff_filter: optional custom ffmpeg filter to use, eg:
 ///   "format=rgb24,scale=w=256:h=256:flags=fast_bilinear"
+
+/// Scaling algorithm for resize operations
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub enum ResizeAlgo {
+    #[default]
+    FastBilinear,
+    Bilinear,
+    Bicubic,
+    Nearest,
+    Area,
+    Lanczos,
+}
+
+impl ResizeAlgo {
+    pub fn to_scaling_flags(&self) -> scaling::Flags {
+        match self {
+            ResizeAlgo::FastBilinear => scaling::Flags::FAST_BILINEAR,
+            ResizeAlgo::Bilinear => scaling::Flags::BILINEAR,
+            ResizeAlgo::Bicubic => scaling::Flags::BICUBIC,
+            ResizeAlgo::Nearest => scaling::Flags::POINT,
+            ResizeAlgo::Area => scaling::Flags::AREA,
+            ResizeAlgo::Lanczos => scaling::Flags::LANCZOS,
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct DecoderConfig {
     threads: usize,
@@ -145,6 +171,7 @@ pub struct DecoderConfig {
     resize_longer_side: Option<f64>,
     target_width: Option<u32>,
     target_height: Option<u32>,
+    resize_algo: ResizeAlgo,
     hw_accel: Option<HardwareAccelerationDeviceType>,
     ff_filter: Option<String>,
 }
@@ -156,6 +183,7 @@ impl DecoderConfig {
         resize_longer_side: Option<f64>,
         target_width: Option<u32>,
         target_height: Option<u32>,
+        resize_algo: ResizeAlgo,
         hw_accel: Option<HardwareAccelerationDeviceType>,
         ff_filter: Option<String>,
     ) -> Self {
@@ -165,6 +193,7 @@ impl DecoderConfig {
             resize_longer_side,
             target_width,
             target_height,
+            resize_algo,
             hw_accel,
             ff_filter,
         }
@@ -186,6 +215,9 @@ impl DecoderConfig {
     }
     pub fn target_height(&self) -> Option<u32> {
         self.target_height
+    }
+    pub fn resize_algo(&self) -> ResizeAlgo {
+        self.resize_algo
     }
     pub fn ff_filter_ref(&self) -> Option<&str> {
         self.ff_filter.as_deref()
