@@ -205,8 +205,14 @@ impl VideoReader {
             );
             (h, w, w, h)
         } else {
-            // No resize specified (filter may handle it)
-            (orig_h, orig_w, orig_w, orig_h)
+            // No resize specified - use display dimensions (considering rotation)
+            // For 90/270 rotation, display dimensions are swapped from storage dimensions
+            let is_90_270 = video_params.rotation.abs() == 90 || video_params.rotation.abs() == 270;
+            if is_90_270 {
+                (orig_w, orig_h, orig_h, orig_w) // Swap for rotated display
+            } else {
+                (orig_h, orig_w, orig_w, orig_h)
+            }
         };
 
         let is_hwaccel = hwaccel_context.is_some();
@@ -216,8 +222,9 @@ impl VideoReader {
         let filter_width = if use_direct_resize { orig_w } else { width };
         let filter_height = if use_direct_resize { orig_h } else { height };
         
-        // Get resize algorithm before config is consumed by ff_filter
+        // Get resize algorithm and check for user filter before config is consumed by ff_filter
         let resize_algo = config.resize_algo();
+        let has_user_filter = config.ff_filter_ref().is_some();
         
         let (filter_spec, hw_format, out_width, out_height, rotation_applied) = create_filter_spec(
             filter_width,
@@ -286,7 +293,9 @@ impl VideoReader {
         // Swap dimensions for 90/270 rotation, but NOT when:
         // - using direct resize (target dimensions are final)
         // - filter has scale (scale is applied after transpose, so scale dimensions are final)
-        let skip_rotation_swap = use_direct_resize || filter_has_scale;
+        // - no user filter (default filter includes scale which handles rotation)
+        let default_filter_with_scale = !has_user_filter && !use_direct_resize;
+        let skip_rotation_swap = use_direct_resize || filter_has_scale || default_filter_with_scale;
         if !skip_rotation_swap && rotation_applied && (video_params.rotation.abs() == 90 || video_params.rotation.abs() == 270) {
             std::mem::swap(&mut height, &mut width);
         }

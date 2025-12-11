@@ -212,6 +212,8 @@ pub fn create_filter_spec(
                 // Order: format -> transpose -> scale
                 // This ensures rotation happens before resize, so scale dimensions 
                 // are applied to the rotated frame (not the original orientation)
+                // Note: width/height passed here are already display dimensions (swapped if needed)
+                
                 format!(
                     "format={}{},scale=w={}:h={}:flags=fast_bilinear",
                     pix_fmt_name,
