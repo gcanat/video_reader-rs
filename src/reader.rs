@@ -277,9 +277,11 @@ impl VideoReader {
             None
         };
 
-        // Swap dimensions for 90/270 rotation, but NOT when using direct resize 
-        // (target dimensions are already the final output dimensions)
-        if !use_direct_resize && rotation_applied && (video_params.rotation.abs() == 90 || video_params.rotation.abs() == 270) {
+        // Swap dimensions for 90/270 rotation, but NOT when:
+        // - using direct resize (target dimensions are final)
+        // - filter has scale (scale is applied after transpose, so scale dimensions are final)
+        let skip_rotation_swap = use_direct_resize || filter_has_scale;
+        if !skip_rotation_swap && rotation_applied && (video_params.rotation.abs() == 90 || video_params.rotation.abs() == 270) {
             std::mem::swap(&mut height, &mut width);
         }
         Ok(VideoDecoder::new(

@@ -268,7 +268,31 @@ pub fn create_filter_spec(
             } else {
                 let transpose = transpose_filter(rotation);
                 rotation_applied = !transpose.is_empty();
-                format!("{}{}", spec, transpose)
+                if rotation_applied {
+                    // Insert transpose right after format= filter (before scale)
+                    // This ensures rotation happens before any resize operations
+                    if let Some(pos) = spec.find(",scale") {
+                        // Insert transpose before scale
+                        let (before, after) = spec.split_at(pos);
+                        format!("{}{}{}", before, transpose, after)
+                    } else if let Some(pos) = spec.find("format=") {
+                        // No scale filter, just append transpose after format
+                        // Find the end of format filter (next comma or end)
+                        let start = pos + 7; // length of "format="
+                        if let Some(comma_pos) = spec[start..].find(',') {
+                            let insert_pos = start + comma_pos;
+                            let (before, after) = spec.split_at(insert_pos);
+                            format!("{}{}{}", before, transpose, after)
+                        } else {
+                            format!("{}{}", spec, transpose)
+                        }
+                    } else {
+                        // No format filter, prepend transpose
+                        format!("{}{}", transpose.trim_start_matches(','), &spec)
+                    }
+                } else {
+                    spec
+                }
             }
         }
     };
