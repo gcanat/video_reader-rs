@@ -254,7 +254,7 @@ There are **three ways** to resize video frames, and they are **mutually exclusi
 | Method | Use Case | Aspect Ratio |
 |--------|----------|--------------|
 | `resize_shorter_side` / `resize_longer_side` | Simple resize with aspect ratio preserved | Preserved |
-| `target_width` + `target_height` | Fixed output dimensions, direct sws_scale | User-controlled |
+| `target_width` + `target_height` | Fixed output dimensions | User-controlled |
 | `filter="...scale=..."` | Custom FFmpeg filter with full control | User-controlled |
 
 ⚠️ **You can only use ONE resize method at a time.** Combining them will raise an error:
@@ -270,9 +270,9 @@ vr = PyVideoReader(path, target_width=224, target_height=224, filter="scale=256:
 vr = PyVideoReader(path, target_width=224, target_height=224)
 ```
 
-### Direct Resize with `target_width` / `target_height`
+### Resize with `target_width` / `target_height`
 
-For ML use cases where you need fixed output dimensions, `target_width` and `target_height` provide a simpler and slightly faster alternative to custom filters:
+For ML use cases where you need fixed output dimensions, `target_width` and `target_height` provide a simple alternative to custom filters:
 
 ```python
 # Resize to fixed 224x224

@@ -105,10 +105,8 @@ impl PyVideoReader {
     /// resize_longer_side is set to None, will try to preserve original aspect ratio.
     /// * `resize_longer_side - Optional, resize longer side of the video to this value. If
     /// resize_shorter_side is set to None, will try to preserve aspect ratio.
-    /// * `target_width` - Optional, resize to exact width. Use with target_height for direct
-    /// sws_scale resize (faster than filter-based resize).
-    /// * `target_height` - Optional, resize to exact height. Use with target_width for direct
-    /// sws_scale resize (faster than filter-based resize).
+    /// * `target_width` - Optional, resize to exact width. Must be used with target_height.
+    /// * `target_height` - Optional, resize to exact height. Must be used with target_width.
     /// * `device` - type of hardware acceleration, eg: 'cuda', 'vdpau', 'drm', etc.
     /// * `filter` - custome ffmpeg filter to use, eg "format=rgb24,scale=w=256:h=256:flags=fast_bilinear"
     /// If set to None (default) or 'cpu' then cpu is used.
@@ -171,7 +169,7 @@ impl PyVideoReader {
                     .map_err(|_| PyRuntimeError::new_err(format!("Invalid device: {other}")))?,
             ),
         };
-        
+
         // Parse resize algorithm
         let resize_algorithm = match resize_algo {
             None | Some("fast_bilinear") => ResizeAlgo::FastBilinear,
@@ -186,7 +184,7 @@ impl PyVideoReader {
                 )))
             }
         };
-        
+
         let decoder_config = DecoderConfig::new(
             threads.unwrap_or(0),
             resize_shorter_side,
