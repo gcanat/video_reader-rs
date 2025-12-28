@@ -188,11 +188,11 @@ fn swap_scale_dimensions(filter_spec: &str) -> String {
         if let Some(scale_pos) = filter_spec.find("scale=") {
             let before = &filter_spec[..scale_pos];
             let after_scale = &filter_spec[scale_pos + 6..];
-            
+
             // Find end of scale params (next comma or end)
             let scale_end = after_scale.find(',').unwrap_or(after_scale.len());
             let rest = &after_scale[scale_end..];
-            
+
             // Check format and rebuild with swapped dimensions
             if after_scale.starts_with("w=") {
                 // "scale=w=XXX:h=YYY:flags=..." format - preserve extra params like flags
@@ -226,7 +226,6 @@ pub fn create_filter_spec(
     hwaccel_context: Option<HardwareAccelerationContext>,
     hwaccel_fmt: AvPixel,
     rotation: isize,
-    skip_scale: bool,
 ) -> Result<(String, Option<AvPixel>, u32, u32, bool), ffmpeg_next::Error> {
     let pix_fmt = AvPixel::YUV420P;
     let mut hw_format: Option<AvPixel> = None;
@@ -239,40 +238,24 @@ pub fn create_filter_spec(
             let pix_fmt_name = pix_fmt.descriptor().map(|d| d.name()).unwrap_or("yuv420p");
             let transpose = transpose_filter(rotation);
             rotation_applied = !transpose.is_empty();
-            // If skip_scale is true, we still need a scale filter to handle format changes
-            // (e.g., videos that change pixel format mid-stream like yuv420p -> yuv444p)
-            // The scale filter with original dimensions acts as a format normalizer
-            let mut filter_spec = if skip_scale {
-                // When skip_scale, we need to:
-                // 1. Scale uses ORIGINAL dimensions (width, height) - before rotation
-                // 2. Transpose happens after scale, which swaps the output dimensions
-                // 3. Return out_width/out_height as the POST-transpose dimensions
-                
-                // First, update out_width/out_height to reflect post-transpose output
+
+            // For 90/270 rotation, scale happens before transpose
+            // The user's width/height are already in display orientation (post-transpose)
+            // So we swap dimensions for scale, but keep out_width/out_height as user specified
+            let (scale_w, scale_h) =
                 if rotation_applied && (rotation.abs() == 90 || rotation.abs() == 270) {
-                    std::mem::swap(&mut out_width, &mut out_height);
-                }
-                // Use original width/height for scale (before transpose)
-                // This handles videos that change pixel format mid-stream
-                // Order: format -> scale(original) -> transpose
-                format!(
-                    "format={},scale=w={}:h={}:flags=fast_bilinear{}",
-                    pix_fmt_name,
-                    width,   // Original width, not swapped
-                    height,  // Original height, not swapped
-                    transpose,
-                )
-            } else {
-                // Order: format -> scale -> transpose (old order, precise)
-                // Scale first, then rotate - this matches the old behavior for accuracy
-                format!(
-                    "format={},scale=w={}:h={}:flags=fast_bilinear{}",
-                    pix_fmt_name,
-                    width,
-                    height,
-                    transpose,
-                )
-            };
+                    // Scale uses swapped dimensions because transpose will swap them back
+                    // out_width/out_height stay as user specified (already in display orientation)
+                    (height, width)
+                } else {
+                    (width, height)
+                };
+
+            // Order: format -> scale -> transpose
+            let mut filter_spec = format!(
+                "format={},scale=w={}:h={}:flags=fast_bilinear{}",
+                pix_fmt_name, scale_w, scale_h, transpose,
+            );
 
             if let Some(hw_ctx) = hwaccel_context {
                 hw_format = Some(hw_ctx.format());
@@ -285,10 +268,7 @@ pub fn create_filter_spec(
                 let hwaccel_fmt_name = hwaccel_fmt.descriptor().map(|d| d.name()).unwrap_or("nv12");
                 filter_spec = format!(
                     "scale_cuda=w={}:h={}:passthrough=0,hwdownload,format={}{}",
-                    width,
-                    height,
-                    hwaccel_fmt_name,
-                    transpose,
+                    scale_w, scale_h, hwaccel_fmt_name, transpose,
                 );
                 if let Some(hwfmt) = hw_format {
                     codec_context_get_hw_frames_ctx(video, hwfmt, hwaccel_fmt)?;
@@ -323,11 +303,12 @@ pub fn create_filter_spec(
                 rotation_applied = !transpose.is_empty();
                 // If rotation is 90/270, user expects filter dimensions relative to rotated display
                 // But scale happens before transpose, so we need to swap w/h in the filter
-                let adjusted_spec = if rotation_applied && (rotation.abs() == 90 || rotation.abs() == 270) {
-                    swap_scale_dimensions(&spec)
-                } else {
-                    spec
-                };
+                let adjusted_spec =
+                    if rotation_applied && (rotation.abs() == 90 || rotation.abs() == 270) {
+                        swap_scale_dimensions(&spec)
+                    } else {
+                        spec
+                    };
                 // out_width/out_height remain as user specified (the final output after transpose)
                 // No need to swap them since they represent what user expects
                 // Append transpose at the end
@@ -335,5 +316,11 @@ pub fn create_filter_spec(
             }
         }
     };
-    Ok((filter_spec, hw_format, out_width, out_height, rotation_applied))
+    Ok((
+        filter_spec,
+        hw_format,
+        out_width,
+        out_height,
+        rotation_applied,
+    ))
 }

@@ -2,7 +2,6 @@ use ffmpeg::codec::threading;
 use ffmpeg::ffi::*;
 use ffmpeg::format::input;
 use ffmpeg::media::Type;
-use ffmpeg::software::scaling;
 use ffmpeg::util::frame::video::Video;
 use ffmpeg::util::rational::Rational;
 use ffmpeg_next as ffmpeg;
@@ -12,7 +11,7 @@ use std::path::Path;
 use std::time::Instant;
 
 use crate::convert::{convert_nv12_to_ndarray_rgb24, convert_yuv_to_ndarray_rgb24};
-use crate::decoder::{DecoderConfig, OutOfBoundsMode, SendableScaler, VideoDecoder, VideoReducer};
+use crate::decoder::{DecoderConfig, OutOfBoundsMode, VideoDecoder, VideoReducer};
 use crate::filter::{create_filter_spec, create_filters, FilterConfig};
 use crate::hwaccel::{HardwareAccelerationContext, HardwareAccelerationDeviceType};
 use crate::info::{
@@ -167,8 +166,10 @@ impl VideoReader {
         // Determine resize method with mutual exclusion
         // Priority: target_width/height > resize_shorter_side/longer_side > filter scale
         let has_target_dims = config.target_width().is_some() && config.target_height().is_some();
-        let has_resize_side = config.resize_shorter_side().is_some() || config.resize_longer_side().is_some();
-        let filter_has_scale = config.ff_filter_ref()
+        let has_resize_side =
+            config.resize_shorter_side().is_some() || config.resize_longer_side().is_some();
+        let filter_has_scale = config
+            .ff_filter_ref()
             .map(|f| f.to_lowercase().contains("scale"))
             .unwrap_or(false);
 
@@ -177,7 +178,7 @@ impl VideoReader {
             .iter()
             .filter(|&&x| x)
             .count();
-        
+
         if resize_methods_count > 1 {
             log::error!(
                 "Multiple resize methods specified. Use only ONE of: \
@@ -186,71 +187,50 @@ impl VideoReader {
             return Err(ffmpeg::Error::InvalidData);
         }
 
-        // Determine use_direct_resize and final dimensions
-        let use_direct_resize = has_target_dims;
-        
-        // Calculate dimensions based on resize method
-        let (mut height, mut width, target_w, target_h) = if has_target_dims {
-            // Use target dimensions directly (safe: checked has_target_dims)
-            let tw = config.target_width().ok_or(ffmpeg::Error::InvalidData)?;
-            let th = config.target_height().ok_or(ffmpeg::Error::InvalidData)?;
-            (th, tw, tw, th)
-        } else if has_resize_side {
-            // Use resize_shorter/longer_side
-            let (h, w) = get_resized_dim(
+        // Calculate dimensions using unified get_resized_dim function
+        // It handles both target_width/target_height and resize_shorter/longer_side
+        let (mut height, mut width) = if has_target_dims || has_resize_side {
+            get_resized_dim(
                 orig_h as f64,
                 orig_w as f64,
                 config.resize_shorter_side(),
                 config.resize_longer_side(),
-            );
-            (h, w, w, h)
+                config.target_width(),
+                config.target_height(),
+            )
         } else {
-            // No resize specified - use display dimensions (considering rotation)
-            // For 90/270 rotation, display dimensions are swapped from storage dimensions
+            // No resize specified - use storage dimensions, but swap for 90/270 rotation
+            // to get display dimensions (what user actually sees)
             let is_90_270 = video_params.rotation.abs() == 90 || video_params.rotation.abs() == 270;
             if is_90_270 {
-                (orig_w, orig_h, orig_h, orig_w) // Swap for rotated display
+                (orig_w, orig_h) // Swap: storage WxH -> display HxW
             } else {
-                (orig_h, orig_w, orig_w, orig_h)
+                (orig_h, orig_w)
             }
         };
 
         let is_hwaccel = hwaccel_context.is_some();
-        
-        // If using direct resize, skip scale in filter (only format conversion)
-        // Otherwise, pass dimensions as-is for filter to handle
-        let filter_width = if use_direct_resize { orig_w } else { width };
-        let filter_height = if use_direct_resize { orig_h } else { height };
-        
+
         // Get resize algorithm and check for user filter before config is consumed by ff_filter
-        let resize_algo = config.resize_algo();
         let has_user_filter = config.ff_filter_ref().is_some();
-        
+
         let (filter_spec, hw_format, out_width, out_height, rotation_applied) = create_filter_spec(
-            filter_width,
-            filter_height,
+            width,
+            height,
             &mut video,
             config.ff_filter(),
             hwaccel_context,
             HWACCEL_PIXEL_FORMAT,
             video_params.rotation,
-            use_direct_resize, // skip_scale when using direct resize
         )?;
 
-        // Update dimensions based on method used
-        if use_direct_resize {
-            // For direct resize, target dimensions are final
-            width = target_w;
-            height = target_h;
-        } else {
-            // For filter-based resize, use filter output dimensions
-            width = out_width;
-            height = out_height;
-        }
+        // Use filter output dimensions (may differ due to rotation)
+        width = out_width;
+        height = out_height;
 
         debug!(
-            "Filter spec: {}, output size: {}x{}, direct_resize: {}",
-            filter_spec, width, height, use_direct_resize
+            "Filter spec: {}, output size: {}x{}",
+            filter_spec, width, height
         );
         let time_base_rational = video_info
             .get("time_base_rational")
@@ -267,40 +247,17 @@ impl VideoReader {
 
         let graph = create_filters(&mut video, hw_format, filter_cfg)?;
 
-        // Create direct scaler if target dimensions are specified
-        let scaler = if use_direct_resize {
-            // Get the format after the filter (should be YUV420P)
-            let src_format = ffmpeg::format::Pixel::YUV420P;
-            let dst_format = ffmpeg::format::Pixel::YUV420P;
-            
-            // Source dimensions are the filter output (original for direct resize)
-            let src_w = out_width;
-            let src_h = out_height;
-            
-            // Use the configured resize algorithm
-            let scaling_flags = resize_algo.to_scaling_flags();
-            
-            let ctx = scaling::Context::get(
-                src_format, src_w, src_h,
-                dst_format, target_w, target_h,
-                scaling_flags,
-            )?;
-            Some(SendableScaler(ctx))
-        } else {
-            None
-        };
-
-        // Swap dimensions for 90/270 rotation, but NOT when:
-        // - using direct resize (target dimensions are final)
-        // - filter has scale (scale is applied after transpose, so scale dimensions are final)
-        // - no user filter (default filter includes scale which handles rotation)
-        let default_filter_with_scale = !has_user_filter && !use_direct_resize;
-        let skip_rotation_swap = use_direct_resize || filter_has_scale || default_filter_with_scale;
-        if !skip_rotation_swap && rotation_applied && (video_params.rotation.abs() == 90 || video_params.rotation.abs() == 270) {
+        // Swap dimensions for 90/270 rotation when user provided a filter without scale
+        // (in that case, filter doesn't handle the dimension swap)
+        let skip_rotation_swap = filter_has_scale || !has_user_filter;
+        if !skip_rotation_swap
+            && rotation_applied
+            && (video_params.rotation.abs() == 90 || video_params.rotation.abs() == 270)
+        {
             std::mem::swap(&mut height, &mut width);
         }
         Ok(VideoDecoder::new(
-            video, height, width, fps, video_info, is_hwaccel, graph, scaler,
+            video, height, width, fps, video_info, is_hwaccel, graph,
         ))
     }
 
@@ -546,7 +503,7 @@ impl VideoReader {
     /// Safely get the batch of frames from the video by iterating over all frames and decoding
     /// only the ones we need. This can be more accurate when the video's metadata is not reliable,
     /// or when the video has B-frames.
-    /// 
+    ///
     /// Behavior depends on `oob_mode`:
     /// - `Error`: Return error if any requested frame is not found (default)
     /// - `Skip`: Skip missing frames - returned array may have fewer frames than requested
@@ -599,21 +556,12 @@ impl VideoReader {
                         .frame(&mut rgb_frame)
                         .is_ok()
                     {
-                        // Apply scaler if configured (for direct resize mode)
-                        let frame_to_convert = if let Some(ref mut scaler) = self.decoder.scaler {
-                            let mut scaled_frame = Video::empty();
-                            scaler.run(&rgb_frame, &mut scaled_frame)?;
-                            scaled_frame
-                        } else {
-                            rgb_frame
-                        };
-
                         let cspace = self.decoder.color_space;
                         let crange = self.decoder.color_range;
                         let frame = if self.decoder.is_hwaccel {
-                            convert_nv12_to_ndarray_rgb24(frame_to_convert, cspace, crange)?
+                            convert_nv12_to_ndarray_rgb24(rgb_frame, cspace, crange)?
                         } else {
-                            convert_yuv_to_ndarray_rgb24(frame_to_convert, cspace, crange)?
+                            convert_yuv_to_ndarray_rgb24(rgb_frame, cspace, crange)?
                         };
                         frame_map.insert(curr_idx, frame);
                         collected += 1;
@@ -645,21 +593,12 @@ impl VideoReader {
                     .frame(&mut rgb_frame)
                     .is_ok()
                 {
-                    // Apply scaler if configured (for direct resize mode)
-                    let frame_to_convert = if let Some(ref mut scaler) = self.decoder.scaler {
-                        let mut scaled_frame = Video::empty();
-                        scaler.run(&rgb_frame, &mut scaled_frame)?;
-                        scaled_frame
-                    } else {
-                        rgb_frame
-                    };
-
                     let cspace = self.decoder.color_space;
                     let crange = self.decoder.color_range;
                     let frame = if self.decoder.is_hwaccel {
-                        convert_nv12_to_ndarray_rgb24(frame_to_convert, cspace, crange)?
+                        convert_nv12_to_ndarray_rgb24(rgb_frame, cspace, crange)?
                     } else {
-                        convert_yuv_to_ndarray_rgb24(frame_to_convert, cspace, crange)?
+                        convert_yuv_to_ndarray_rgb24(rgb_frame, cspace, crange)?
                     };
                     frame_map.insert(curr_idx, frame);
                     collected += 1;
@@ -686,7 +625,7 @@ impl VideoReader {
                         debug!("Skipping frame {} (oob_mode=skip)", idx);
                     }
                 }
-                
+
                 if frames.is_empty() {
                     Array4::zeros((0, height, width, 3))
                 } else {
@@ -741,7 +680,7 @@ impl VideoReader {
     /// from decord library: https://github.com/dmlc/decord
     ///
     /// Sorts indices internally to minimize backward seeks.
-    /// 
+    ///
     /// Behavior depends on `oob_mode`:
     /// - `Error`: Return error on any failed frame fetch (default)
     /// - `Skip`: Skip failed frames - returned array may have fewer frames than requested
@@ -779,7 +718,7 @@ impl VideoReader {
 
         // For Skip mode, we need to collect successful frames and track their positions
         let mut successful_frames: Vec<(usize, ndarray::Array3<u8>)> = Vec::new();
-        
+
         // For Black/Error mode, allocate output buffer once (pre-filled with zeros)
         let mut video_frames: Option<VideoArray> = if self.oob_mode != OutOfBoundsMode::Skip {
             Some(Array::zeros((indices.len(), height, width, 3)))
@@ -794,19 +733,10 @@ impl VideoReader {
 
             match self.seek_accurate_raw(frame_index) {
                 Ok(Some(yuv_frame)) => {
-                    // Apply scaler if configured (for direct resize mode)
-                    let frame_to_convert = if let Some(ref mut scaler) = self.decoder.scaler {
-                        let mut scaled_frame = Video::empty();
-                        scaler.run(&yuv_frame, &mut scaled_frame)?;
-                        scaled_frame
-                    } else {
-                        yuv_frame
-                    };
-
                     let rgb_frame = if is_hwaccel {
-                        convert_nv12_to_ndarray_rgb24(frame_to_convert, cspace, crange)
+                        convert_nv12_to_ndarray_rgb24(yuv_frame, cspace, crange)
                     } else {
-                        convert_yuv_to_ndarray_rgb24(frame_to_convert, cspace, crange)
+                        convert_yuv_to_ndarray_rgb24(yuv_frame, cspace, crange)
                     }?;
 
                     if let Some(positions) = positions_map.get(&frame_index) {
@@ -851,10 +781,16 @@ impl VideoReader {
                             self.failed_indices.push(frame_index);
                         }
                         OutOfBoundsMode::Skip => {
-                            debug!("Skipping frame {} due to error (oob_mode=skip)", frame_index);
+                            debug!(
+                                "Skipping frame {} due to error (oob_mode=skip)",
+                                frame_index
+                            );
                         }
                         OutOfBoundsMode::Black => {
-                            debug!("Using black frame for {} due to error (oob_mode=black)", frame_index);
+                            debug!(
+                                "Using black frame for {} due to error (oob_mode=black)",
+                                frame_index
+                            );
                         }
                     }
                 }
@@ -873,13 +809,13 @@ impl VideoReader {
         if self.oob_mode == OutOfBoundsMode::Skip {
             // Sort by original position to maintain requested order
             successful_frames.sort_by_key(|(pos, _)| *pos);
-            
+
             let n_successful = successful_frames.len();
             if n_successful == 0 {
                 // Return empty array
                 return Ok(Array::zeros((0, height, width, 3)));
             }
-            
+
             let mut output = Array::zeros((n_successful, height, width, 3));
             for (i, (_, frame)) in successful_frames.into_iter().enumerate() {
                 output.slice_mut(s![i, .., .., ..]).assign(&frame);
@@ -1023,7 +959,7 @@ impl VideoReader {
             if let Some(mut out_ctx) = self.decoder.graph.get("out") {
                 if out_ctx.sink().frame(&mut yuv_frame).is_ok() {
                     let out_pts = yuv_frame.pts();
-                    
+
                     // PRIORITY 1: Use PTS to resync curr_pres_idx IMMEDIATELY
                     // This ensures we track position accurately even after seeks,
                     // which is critical for videos with non-monotonic packet-order PTS (B-frames)
@@ -1035,10 +971,10 @@ impl VideoReader {
                             self.curr_pres_idx = mapped;
                         }
                     }
-                    
+
                     // Check for match - first by PTS (most reliable), then by count
                     let mut matched = false;
-                    
+
                     // PTS-based match (primary method - most reliable after seeks)
                     // expected_pts returns (raw_pts, normalized_pts)
                     // out_pts is raw from decoder, so compare with exp_raw OR normalize and compare with exp_norm
@@ -1049,12 +985,12 @@ impl VideoReader {
                             matched = true;
                         }
                     }
-                    
+
                     // Count-based match (fallback when PTS doesn't match directly)
                     if !matched && self.curr_pres_idx == target_pres_idx {
                         matched = true;
                     }
-                    
+
                     if matched {
                         let out_pts_dbg = out_pts.unwrap_or(-1);
                         debug!(
@@ -1162,7 +1098,10 @@ impl VideoReader {
         // which automatically seeks to an earlier keyframe when needed
         let (has_open_gop, open_gop_count) = self.stream_info.has_open_gop();
         if has_open_gop {
-            debug!("Video has Open GOP structure ({} keyframes affected)", open_gop_count);
+            debug!(
+                "Video has Open GOP structure ({} keyframes affected)",
+                open_gop_count
+            );
         }
 
         // Missing timing info for keyframes: cannot trust seek -> force sequential
@@ -1251,7 +1190,7 @@ impl VideoReader {
             force_full_verify,
             quick_elapsed
         );
-        
+
         // TODO: (cy) removed this temporary fix; TO BE WATCHED! changed to the following:
         // let seek_works = self.verify_seek_works(force_full_verify);
         let seek_works = true; // Temporarily force seek path to always succeed
@@ -1271,163 +1210,6 @@ impl VideoReader {
         );
         // Normal videos that pass verification - seek should work fine
         false
-    }
-
-    /// Verify if seek works correctly by testing seeks to several keyframes.
-    /// Two-phase sampling: a small set first, then remaining points if all pass.
-    /// `force_full_verify` skips the two-phase shortcut and verifies all points.
-    /// Returns true only if all sampled keyframes can be reached reliably.
-    fn verify_seek_works(&mut self, force_full_verify: bool) -> bool {
-        let verify_start = Instant::now();
-        let key_frames = self.stream_info.key_frames().clone();
-        // Need at least 2 keyframes to verify; otherwise assume ok
-        if key_frames.len() < 2 {
-            return true;
-        }
-
-        // Build full candidate set to avoid missing locally broken GOPs
-        let mut full_candidates: Vec<usize> = Vec::new();
-        if key_frames.len() > 1 {
-            full_candidates.push(1);
-        }
-        if key_frames.len() > 2 {
-            full_candidates.push(2);
-        }
-        if key_frames.len() > 4 {
-            full_candidates.push(4);
-        }
-        full_candidates.push(key_frames.len() / 2);
-        if key_frames.len() > 2 {
-            full_candidates.push(key_frames.len().saturating_sub(2));
-        }
-        full_candidates.sort();
-        full_candidates.dedup();
-
-        // Phase 1: small sample set
-        let mut phase1: Vec<usize> = Vec::new();
-        if key_frames.len() > 1 {
-            phase1.push(1);
-        }
-        phase1.push(key_frames.len() / 2);
-        if key_frames.len() > 2 {
-            phase1.push(key_frames.len().saturating_sub(2));
-        }
-        phase1.sort();
-        phase1.dedup();
-
-        // Helper to verify a list of keyframe indices
-        let mut verify_candidates = |candidates: &[usize]| -> bool {
-            for &key_idx in candidates {
-                let key_start = Instant::now();
-                let decode_idx = key_frames[key_idx];
-                let expected_pts = match self.stream_info.frame_times().get(&decode_idx) {
-                    Some(ft) => *ft.pts() - self.stream_info.min_pts_offset(),
-                    None => continue, // skip if missing pts
-                };
-
-                debug!(
-                    "verify_seek_works: testing keyframe_idx={} decode_idx={} expected_pts={}",
-                    key_idx, decode_idx, expected_pts
-                );
-
-                if self.seek_to_start().is_err() {
-                    return false;
-                }
-
-                if self.avseekframe(&decode_idx, expected_pts, 1).is_err() {
-                    debug!("verify_seek_works: seek failed at keyframe_idx={}", key_idx);
-                    return false;
-                }
-
-                let mut decoded_pts_values: Vec<i64> = Vec::new();
-                let mut packets_sent = 0;
-                let max_packets = 40;
-                for (stream, packet) in self.ictx.packets() {
-                    if stream.index() != self.stream_index {
-                        continue;
-                    }
-                    if self.decoder.video.send_packet(&packet).is_err() {
-                        continue;
-                    }
-                    packets_sent += 1;
-
-                    let mut decoded = Video::empty();
-                    while self.decoder.video.receive_frame(&mut decoded).is_ok() {
-                        if let Some(pts) = decoded.pts() {
-                            decoded_pts_values.push(pts);
-                        }
-                    }
-                    if packets_sent >= max_packets || decoded_pts_values.len() >= 8 {
-                        break;
-                    }
-                }
-
-                debug!(
-                    "verify_seek_works: keyframe_idx={} packets_sent={} decoded_frames={:?}",
-                    key_idx, packets_sent, decoded_pts_values
-                );
-
-                // Reset state for future operations
-                let _ = self.seek_to_start();
-
-                let found = decoded_pts_values.iter().any(|&pts| pts == expected_pts);
-                if !found {
-                    debug!(
-                        "verify_seek_works: FAILED keyframe_idx={} expected_pts={} got {:?} (cost {:?})",
-                        key_idx, expected_pts, decoded_pts_values, key_start.elapsed()
-                    );
-                    return false;
-                } else {
-                    debug!(
-                        "verify_seek_works: PASSED keyframe_idx={} expected_pts={} (cost {:?})",
-                        key_idx,
-                        expected_pts,
-                        key_start.elapsed()
-                    );
-                }
-            }
-            true
-        };
-
-        // Decide phases
-        if force_full_verify {
-            let ok = verify_candidates(&full_candidates);
-            debug!(
-                "verify_seek_works: full verification {} (cost {:?})",
-                if ok { "passed" } else { "failed" },
-                verify_start.elapsed()
-            );
-            return ok;
-        }
-
-        if !verify_candidates(&phase1) {
-            return false;
-        }
-
-        // Remaining candidates after phase1
-        let phase1_set: HashSet<usize> = phase1.iter().copied().collect();
-        let mut remaining: Vec<usize> = full_candidates
-            .into_iter()
-            .filter(|idx| !phase1_set.contains(idx))
-            .collect();
-        remaining.sort();
-        remaining.dedup();
-
-        if remaining.is_empty() {
-            debug!(
-                "verify_seek_works: phase1 passed; no remaining candidates (cost {:?})",
-                verify_start.elapsed()
-            );
-            return true;
-        }
-
-        let ok = verify_candidates(&remaining);
-        debug!(
-            "verify_seek_works: all sampled keyframes {} (cost {:?})",
-            if ok { "passed" } else { "failed" },
-            verify_start.elapsed()
-        );
-        ok
     }
 
     /// Detailed cost estimation for seek-based vs sequential methods
@@ -1539,7 +1321,7 @@ impl VideoReader {
         // Each seek has overhead (I/O + decoder reset) roughly equivalent to decoding a few frames
         const SEEK_OVERHEAD_FRAMES: usize = 10;
         let seek_total_cost = seek_frames + seek_count * SEEK_OVERHEAD_FRAMES;
-        
+
         debug!(
             "Cost estimation: seek_frames={}, seek_count={}, seek_overhead={}, seek_total={}, sequential={}",
             seek_frames, seek_count, seek_count * SEEK_OVERHEAD_FRAMES, seek_total_cost, sequential_frames
@@ -1596,9 +1378,7 @@ impl VideoReader {
                         Ok(()) => {
                             sent = true;
                         }
-                        Err(ffmpeg::Error::Other { errno })
-                            if errno == ffmpeg::error::EAGAIN =>
-                        {
+                        Err(ffmpeg::Error::Other { errno }) if errno == ffmpeg::error::EAGAIN => {
                             while self.decoder.video.receive_frame(&mut decoded).is_ok() {
                                 count += 1;
                             }
