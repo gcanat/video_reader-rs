@@ -9,6 +9,7 @@ use ffmpeg::util::rational::Rational;
 use ffmpeg_next as ffmpeg;
 use log::debug;
 use std::ffi::c_void;
+use yuv::{YuvRange, YuvStandardMatrix};
 
 pub struct FilterConfig<'a> {
     height: u32,
@@ -18,6 +19,8 @@ pub struct FilterConfig<'a> {
     spec: &'a str,
     is_hwaccel: bool,
     pixel_aspect: Rational,
+    color_space: YuvStandardMatrix,
+    color_range: YuvRange,
 }
 impl<'a> FilterConfig<'a> {
     pub fn new(
@@ -28,6 +31,8 @@ impl<'a> FilterConfig<'a> {
         spec: &'a str,
         is_hwaccel: bool,
         pixel_aspect: Rational,
+        color_space: YuvStandardMatrix,
+        color_range: YuvRange,
     ) -> Self {
         FilterConfig {
             height,
@@ -37,6 +42,8 @@ impl<'a> FilterConfig<'a> {
             spec,
             is_hwaccel,
             pixel_aspect,
+            color_space,
+            color_range,
         }
     }
 }
@@ -55,14 +62,33 @@ pub fn create_filters(
         .map(|d| d.name())
         .unwrap_or("yuv420p");
 
+    // Map YuvStandard Matrix to FFmpeg colorspace name
+    let colorspace_str = match filter_cfg.color_space {
+        YuvStandardMatrix::Bt709 => "bt709",
+        YuvStandardMatrix::Bt601 => "smpte170m", // BT601 = SMPTE170M
+        YuvStandardMatrix::Bt2020 => "bt2020nc",
+        YuvStandardMatrix::Smpte240 => "smpte240m",
+        YuvStandardMatrix::Bt470_6 => "bt470bg",
+        YuvStandardMatrix::Fcc => "fcc",
+        YuvStandardMatrix::Custom(_, _) => "bt709", // Fallback for custom
+    };
+
+    // Map YuvRange to FFmpeg range name
+    let range_str = match filter_cfg.color_range {
+        YuvRange::Limited => "tv", // MPEG range
+        YuvRange::Full => "pc",    // JPEG range
+    };
+
     let args = format!(
-        "video_size={}x{}:pix_fmt={}:time_base={}:pixel_aspect={}/{}",
+        "video_size={}x{}:pix_fmt={}:time_base={}:pixel_aspect={}{}:colorspace={}:range={}",
         filter_cfg.width,
         filter_cfg.height,
         pix_fmt_name,
         filter_cfg.time_base,
         filter_cfg.pixel_aspect.numerator(),
         filter_cfg.pixel_aspect.denominator(),
+        colorspace_str,
+        range_str,
     );
     debug!("Buffer args: {}", args);
 

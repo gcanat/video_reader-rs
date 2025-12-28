@@ -225,7 +225,21 @@ impl PyVideoReader {
                 let frame_count = *vr.stream_info().frame_count();
                 let index = key.to_indices(frame_count)?;
                 let index_clone = index.clone();
-                let res_array = vr.get_batch(index).map_err(|e| {
+
+                // Use the SAME method selection logic as get_batch
+                // This ensures consistent color space handling
+                let force_sequential = vr.needs_sequential_mode();
+                let use_sequential = if force_sequential {
+                    true
+                } else {
+                    vr.should_use_sequential(&index)
+                };
+
+                let res_array = if use_sequential {
+                    vr.get_batch_safe(index.clone())
+                } else {
+                    vr.get_batch(index.clone())
+                }.map_err(|e| {
                     // Convert Bug error to a more meaningful message
                     let failed = vr.failed_indices();
                     let msg = match e {
@@ -246,12 +260,15 @@ impl PyVideoReader {
                     };
                     PyRuntimeError::new_err(format!("Error: {msg}"))
                 })?;
-                let res_array = res_array.into_dyn();
+
                 // remove first dim if key was a single int
                 if matches!(key, IntOrSlice::Int { .. }) {
-                    Ok(res_array.squeeze().into_pyarray(py))
+                    // Extract the first frame and convert to owned array
+                    use ndarray::Axis;
+                    let single_frame = res_array.index_axis(Axis(0), 0).to_owned();
+                    Ok(single_frame.into_dyn().into_pyarray(py))
                 } else {
-                    Ok(res_array.into_pyarray(py))
+                    Ok(res_array.into_dyn().into_pyarray(py))
                 }
             }
             Err(e) => Err(PyRuntimeError::new_err(format!("Lock error: {e}"))),

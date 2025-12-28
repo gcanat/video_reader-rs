@@ -10,7 +10,9 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::Instant;
 
-use crate::convert::{convert_nv12_to_ndarray_rgb24, convert_yuv_to_ndarray_rgb24};
+use crate::convert::{
+    convert_nv12_to_ndarray_rgb24, convert_yuv_to_ndarray_rgb24, get_colorrange, get_colorspace,
+};
 use crate::decoder::{DecoderConfig, OutOfBoundsMode, VideoDecoder, VideoReducer};
 use crate::filter::{create_filter_spec, create_filters, FilterConfig};
 use crate::hwaccel::{HardwareAccelerationContext, HardwareAccelerationDeviceType};
@@ -235,6 +237,19 @@ impl VideoReader {
         let time_base_rational = video_info
             .get("time_base_rational")
             .ok_or(ffmpeg::Error::InvalidData)?;
+
+        // Get color space and range for filter graph (same as VideoDecoder)
+        let cspace_string = video_info
+            .get("color_space")
+            .map(|s| s.as_str())
+            .unwrap_or("BT709");
+        let crange_string = video_info
+            .get("color_range")
+            .map(|s| s.as_str())
+            .unwrap_or("");
+        let color_space = get_colorspace(orig_h as i32, cspace_string);
+        let color_range = get_colorrange(crange_string);
+
         let filter_cfg = FilterConfig::new(
             orig_h,
             orig_w,
@@ -243,6 +258,8 @@ impl VideoReader {
             filter_spec.as_str(),
             is_hwaccel,
             pixel_aspect,
+            color_space,
+            color_range,
         );
 
         let graph = create_filters(&mut video, hw_format, filter_cfg)?;
