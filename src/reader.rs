@@ -935,64 +935,91 @@ impl VideoReader {
         Err(ffmpeg::Error::Eof)
     }
 
-    /// Get raw YUV frame (after filter graph) at target presentation index
-    /// Counts decoded frames and returns when reaching the target
+    /// Get raw YUV frame (after filter graph) at target presentation index.
+    /// Counts decoded frames and returns when reaching the target.
+    ///
+    /// # Performance Optimization: Check-Before-Filter
+    ///
+    /// This function implements a "check-before-filter" strategy where we first check
+    /// if the decoded frame matches the target, and ONLY THEN push it through the filter
+    /// graph. This avoids wasting expensive filter operations (e.g., scale) on frames
+    /// we don't need.
+    ///
+    /// Example: To get frame 105 when the nearest keyframe is at 100, we must decode
+    /// frames 100-105. With the naive approach, we'd apply the scale filter 6 times.
+    /// With this optimization, we only apply it once (to frame 105).
+    ///
+    /// # Filter Compatibility Note (TODO: (wizyoung) future work)
+    ///
+    /// This optimization is SAFE for **spatial filters** that process each frame
+    /// independently (e.g., `scale`, `format`, `transpose`, `crop`).
+    ///
+    /// It may NOT work correctly for **temporal filters** that require consecutive
+    /// frame input (e.g., `fps`, `minterpolate`, `tinterlace`, `deflicker`).
+    /// If temporal filter support is needed, consider detecting such filters and
+    /// falling back to the "filter-all-frames" approach.
     pub fn get_frame_raw_by_count(&mut self, target_pres_idx: usize) -> (Option<Video>, i32) {
         let mut decoded = Video::empty();
         let mut counter = 0;
         let expected_pts = self.stream_info.get_pts_for_presentation(target_pres_idx);
 
         while self.decoder.video.receive_frame(&mut decoded).is_ok() {
-            // Push through filter graph and get YUV frame
-            if let Some(mut in_ctx) = self.decoder.graph.get("in") {
-                if let Err(e) = in_ctx.source().add(&decoded) {
-                    debug!("Failed to push frame into filter graph: {e}");
-                    return (None, counter);
+            // Get PTS from decoded frame BEFORE filter processing.
+            // This is key to the check-before-filter optimization.
+            let decoded_pts = decoded.pts();
+
+            // PRIORITY 1: Use PTS to resync curr_pres_idx IMMEDIATELY
+            // This ensures we track position accurately even after seeks,
+            // which is critical for videos with non-monotonic packet-order PTS (B-frames)
+            // NOTE: presentation_for_pts_norm expects NORMALIZED PTS (raw - min_offset)
+            if let Some(p) = decoded_pts {
+                let pts_offset = self.stream_info.min_pts_offset();
+                let norm_p = p - pts_offset;
+                if let Some(mapped) = self.stream_info.presentation_for_pts_norm(norm_p) {
+                    self.curr_pres_idx = mapped;
                 }
-            } else {
-                debug!("Filter graph missing 'in' pad");
-                return (None, counter);
             }
 
-            let mut yuv_frame = Video::empty();
-            // For simple scale filters, output is immediate (no delay)
-            if let Some(mut out_ctx) = self.decoder.graph.get("out") {
-                if out_ctx.sink().frame(&mut yuv_frame).is_ok() {
-                    let out_pts = yuv_frame.pts();
+            // Check for match BEFORE filter processing to avoid wasted computation.
+            // For spatial filters like scale/format/transpose, skipping non-target
+            // frames saves significant CPU time.
+            let mut matched = false;
 
-                    // PRIORITY 1: Use PTS to resync curr_pres_idx IMMEDIATELY
-                    // This ensures we track position accurately even after seeks,
-                    // which is critical for videos with non-monotonic packet-order PTS (B-frames)
-                    // NOTE: presentation_for_pts_norm expects NORMALIZED PTS (raw - min_offset)
-                    if let Some(p) = out_pts {
-                        let pts_offset = self.stream_info.min_pts_offset();
-                        let norm_p = p - pts_offset;
-                        if let Some(mapped) = self.stream_info.presentation_for_pts_norm(norm_p) {
-                            self.curr_pres_idx = mapped;
-                        }
+            // PTS-based match (primary method - most reliable after seeks)
+            // expected_pts returns (raw_pts, normalized_pts)
+            // decoded_pts is raw from decoder, so compare with exp_raw OR normalize and compare with exp_norm
+            if let (Some((exp_raw, exp_norm)), Some(p)) = (expected_pts, decoded_pts) {
+                let pts_offset = self.stream_info.min_pts_offset();
+                let norm_p = p - pts_offset;
+                if p == exp_raw || norm_p == exp_norm {
+                    matched = true;
+                }
+            }
+
+            // Count-based match (fallback when PTS doesn't match directly)
+            if !matched && self.curr_pres_idx == target_pres_idx {
+                matched = true;
+            }
+
+            // OPTIMIZATION: Only apply filter to the target frame.
+            // This is the core of the check-before-filter optimization.
+            if matched {
+                // Push through filter graph and get YUV frame
+                if let Some(mut in_ctx) = self.decoder.graph.get("in") {
+                    if let Err(e) = in_ctx.source().add(&decoded) {
+                        debug!("Failed to push frame into filter graph: {e}");
+                        return (None, counter);
                     }
+                } else {
+                    debug!("Filter graph missing 'in' pad");
+                    return (None, counter);
+                }
 
-                    // Check for match - first by PTS (most reliable), then by count
-                    let mut matched = false;
-
-                    // PTS-based match (primary method - most reliable after seeks)
-                    // expected_pts returns (raw_pts, normalized_pts)
-                    // out_pts is raw from decoder, so compare with exp_raw OR normalize and compare with exp_norm
-                    if let (Some((exp_raw, exp_norm)), Some(p)) = (expected_pts, out_pts) {
-                        let pts_offset = self.stream_info.min_pts_offset();
-                        let norm_p = p - pts_offset;
-                        if p == exp_raw || norm_p == exp_norm {
-                            matched = true;
-                        }
-                    }
-
-                    // Count-based match (fallback when PTS doesn't match directly)
-                    if !matched && self.curr_pres_idx == target_pres_idx {
-                        matched = true;
-                    }
-
-                    if matched {
-                        let out_pts_dbg = out_pts.unwrap_or(-1);
+                let mut yuv_frame = Video::empty();
+                // For simple scale filters, output is immediate (no delay)
+                if let Some(mut out_ctx) = self.decoder.graph.get("out") {
+                    if out_ctx.sink().frame(&mut yuv_frame).is_ok() {
+                        let out_pts_dbg = decoded_pts.unwrap_or(-1);
                         debug!(
                             "Found target frame at pres_idx={}, pts={}",
                             target_pres_idx, out_pts_dbg
@@ -1000,10 +1027,10 @@ impl VideoReader {
                         self.curr_pres_idx += 1;
                         return (Some(yuv_frame), counter + 1);
                     }
+                } else {
+                    debug!("Filter graph missing 'out' pad");
+                    return (None, counter);
                 }
-            } else {
-                debug!("Filter graph missing 'out' pad");
-                return (None, counter);
             }
 
             // Advance presentation index for next iteration
