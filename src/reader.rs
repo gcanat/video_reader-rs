@@ -1450,9 +1450,44 @@ impl VideoReader {
             return true; // Not saving enough, use sequential
         }
 
-        // Rule 3: If many GOP transitions (>5) AND seek_frames >= 65% of sequential, use sequential
-        if seek_count > 5 && seek_frames as f64 >= sequential_frames as f64 * 0.65 {
-            return true; // Many seeks and not saving much, use sequential
+        // Rule 3: If many GOP transitions (>5), use dynamic threshold based on seek efficiency
+        // avg_frames_per_seek indicates how efficient each seek is
+        // Also check absolute net savings as escape hatch for long videos
+        if seek_count > 5 {
+            let avg_frames_per_seek = seek_frames / seek_count;
+
+            // Dynamic threshold: efficient seeks get more lenient rules
+            let rule3_threshold = if avg_frames_per_seek < 50 {
+                0.80 // Very efficient seeks - each seek lands close to target
+            } else if avg_frames_per_seek < 150 {
+                0.70 // Moderate efficiency - standard threshold
+            } else {
+                0.55 // Inefficient seeks - stricter threshold
+            };
+
+            if seek_frames as f64 >= sequential_frames as f64 * rule3_threshold {
+                // Check absolute net savings as escape hatch for long videos
+                // Even if ratio is high, if absolute savings is significant, use SEEK
+                let net_savings = sequential_frames
+                    .saturating_sub(seek_frames)
+                    .saturating_sub(seek_count * seek_overhead);
+                let min_savings_threshold = (sequential_frames as f64 * 0.15) as usize;
+
+                if net_savings < min_savings_threshold {
+                    debug!(
+                        "Rule 3: seek_count={}, avg_per_seek={}, ratio={:.2}%, net_savings={} < min={}, using SEQ",
+                        seek_count, avg_frames_per_seek,
+                        seek_frames as f64 / sequential_frames as f64 * 100.0,
+                        net_savings, min_savings_threshold
+                    );
+                    return true; // Not enough savings, use sequential
+                }
+                // Otherwise, allow SEEK despite high seek_count (long video optimization)
+                debug!(
+                    "Rule 3 escaped: net_savings={} >= min={}, allowing SEEK for long video",
+                    net_savings, min_savings_threshold
+                );
+            }
         }
 
         // Rule 4: For complex codecs (AV1/HEVC), require more savings to justify seek
