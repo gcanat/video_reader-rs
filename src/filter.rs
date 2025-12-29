@@ -1,3 +1,4 @@
+use crate::decoder::ResizeAlgo;
 use crate::ffi_hwaccel::codec_context_get_hw_frames_ctx;
 use crate::hwaccel::HardwareAccelerationContext;
 use ffmpeg::ffi::{
@@ -252,6 +253,7 @@ pub fn create_filter_spec(
     hwaccel_context: Option<HardwareAccelerationContext>,
     hwaccel_fmt: AvPixel,
     rotation: isize,
+    resize_algo: ResizeAlgo,
 ) -> Result<(String, Option<AvPixel>, u32, u32, bool), ffmpeg_next::Error> {
     let pix_fmt = AvPixel::YUV420P;
     let mut hw_format: Option<AvPixel> = None;
@@ -279,8 +281,12 @@ pub fn create_filter_spec(
 
             // Order: format -> scale -> transpose
             let mut filter_spec = format!(
-                "format={},scale=w={}:h={}:flags=fast_bilinear{}",
-                pix_fmt_name, scale_w, scale_h, transpose,
+                "format={},scale=w={}:h={}:flags={}{}",
+                pix_fmt_name,
+                scale_w,
+                scale_h,
+                resize_algo.to_ffmpeg_flag(),
+                transpose,
             );
 
             if let Some(hw_ctx) = hwaccel_context {

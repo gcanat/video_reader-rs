@@ -215,6 +215,7 @@ impl VideoReader {
 
         // Get resize algorithm and check for user filter before config is consumed by ff_filter
         let has_user_filter = config.ff_filter_ref().is_some();
+        let resize_algo = config.resize_algo();
 
         let (filter_spec, hw_format, out_width, out_height, rotation_applied) = create_filter_spec(
             width,
@@ -224,6 +225,7 @@ impl VideoReader {
             hwaccel_context,
             HWACCEL_PIXEL_FORMAT,
             video_params.rotation,
+            resize_algo,
         )?;
 
         // Use filter output dimensions (may differ due to rotation)

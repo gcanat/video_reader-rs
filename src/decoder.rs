@@ -120,7 +120,6 @@ impl VideoReducer {
 ///   "format=rgb24,scale=w=256:h=256:flags=fast_bilinear"
 
 /// Scaling algorithm for resize operations
-/// NOTE: Currently not used since we only support filter-based resize with fast_bilinear
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub enum ResizeAlgo {
     #[default]
@@ -130,6 +129,20 @@ pub enum ResizeAlgo {
     Nearest,
     Area,
     Lanczos,
+}
+
+impl ResizeAlgo {
+    /// Convert ResizeAlgo to FFmpeg scale filter flag name
+    pub fn to_ffmpeg_flag(&self) -> &'static str {
+        match self {
+            ResizeAlgo::FastBilinear => "fast_bilinear",
+            ResizeAlgo::Bilinear => "bilinear",
+            ResizeAlgo::Bicubic => "bicubic",
+            ResizeAlgo::Nearest => "neighbor",
+            ResizeAlgo::Area => "area",
+            ResizeAlgo::Lanczos => "lanczos",
+        }
+    }
 }
 
 #[derive(Default)]
