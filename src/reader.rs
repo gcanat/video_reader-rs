@@ -1340,6 +1340,13 @@ impl VideoReader {
 
     /// Recommend whether to use seek-based (false) or sequential (true) method
     /// Returns true if sequential is estimated to be faster
+    ///
+    /// # Cost Model
+    /// The decision is based on several factors:
+    /// 1. **Codec complexity**: AV1/HEVC have higher seek overhead than H.264
+    /// 2. **Resolution**: Higher resolution = higher per-frame decode cost
+    /// 3. **GOP density**: Videos with many keyframes (small GOPs) have higher seek overhead
+    /// 4. **Edge cases**: When costs are close, prefer sequential (more predictable)
     pub fn should_use_sequential(&self, indices: &[usize]) -> bool {
         // Note: negative PTS/DTS check is now done at a higher level via needs_sequential_mode()
         // which actually verifies if seek works, rather than just checking metadata
@@ -1351,39 +1358,109 @@ impl VideoReader {
             return true;
         }
 
+        // Get codec and resolution info for dynamic overhead calculation
+        let codec_id = self
+            .decoder
+            .video_info
+            .get("codec_id")
+            .map(|s| s.to_uppercase())
+            .unwrap_or_default();
+        let height = self.decoder.height;
+
+        // Dynamic seek overhead based on codec complexity
+        // AV1 and HEVC have more complex reference structures and higher decode cost per frame
+        // Higher resolution also increases the relative cost of decoder reset
+        let base_seek_overhead: usize = if codec_id.contains("AV1") {
+            25 // AV1: Most complex, high decode cost
+        } else if codec_id.contains("HEVC") || codec_id.contains("H265") {
+            20 // HEVC: Complex reference structures
+        } else if codec_id.contains("H264") || codec_id.contains("AVC") {
+            if height > 1080 {
+                15 // 4K H.264: Higher per-frame cost
+            } else {
+                10 // Standard H.264
+            }
+        } else {
+            10 // Default for other codecs
+        };
+
+        // GOP density factor: videos with many keyframes have higher seek overhead
+        // because each seek requires decoder reset even when keyframes are close together
+        let key_frames = self.stream_info.key_frames();
+        let frame_count = *self.stream_info.frame_count();
+        let avg_gop_size = if !key_frames.is_empty() && frame_count > 0 {
+            frame_count / key_frames.len()
+        } else {
+            30 // Default GOP size assumption
+        };
+
+        // Apply penalty for dense I-frame videos (avg_gop < 10)
+        // In such videos, seek overhead dominates because decoder resets are frequent
+        let gop_penalty_factor: f64 = if avg_gop_size < 5 {
+            2.0 // Very dense keyframes: double the overhead
+        } else if avg_gop_size < 10 {
+            1.5 // Dense keyframes: 50% more overhead
+        } else {
+            1.0 // Normal GOP structure
+        };
+
+        let seek_overhead = (base_seek_overhead as f64 * gop_penalty_factor).round() as usize;
+
         // Cost model after benchmarking:
         // - When seek_frames ≈ sequential_frames, sequential wins (simpler, cache-friendly)
         // - Seek only wins when it can skip significant portions of the video
         // - Many GOP transitions (seek_count) add overhead even with skip-forward
 
         debug!(
-            "Cost estimation: seek_frames={}, seek_count={}, sequential={}",
-            seek_frames, seek_count, sequential_frames
+            "Cost estimation: seek_frames={}, seek_count={}, sequential={}, codec={}, avg_gop={}, overhead={}",
+            seek_frames, seek_count, sequential_frames, codec_id, avg_gop_size, seek_overhead
         );
 
-        // Decision rules with seek overhead consideration:
-        // Each seek has overhead (I/O + decoder reset) roughly equivalent to decoding a few frames
-        const SEEK_OVERHEAD_FRAMES: usize = 10;
-        let seek_total_cost = seek_frames + seek_count * SEEK_OVERHEAD_FRAMES;
+        let seek_total_cost = seek_frames + seek_count * seek_overhead;
 
         debug!(
             "Cost estimation: seek_frames={}, seek_count={}, seek_overhead={}, seek_total={}, sequential={}",
-            seek_frames, seek_count, seek_count * SEEK_OVERHEAD_FRAMES, seek_total_cost, sequential_frames
+            seek_frames, seek_count, seek_count * seek_overhead, seek_total_cost, sequential_frames
         );
 
-        // 1. If total seek cost (including overhead) >= sequential, use sequential
+        // Rule 0: Edge case handling - when costs are close, prefer sequential
+        // Sequential is more predictable and avoids worst-case seek penalties
+        // This catches cases where benchmark variability could cause wrong predictions
+        let cost_diff = if seek_total_cost > sequential_frames {
+            seek_total_cost - sequential_frames
+        } else {
+            sequential_frames - seek_total_cost
+        };
+        let margin_threshold = (sequential_frames as f64 * 0.15).max(5.0) as usize;
+        if cost_diff < margin_threshold {
+            debug!(
+                "Edge case: cost_diff={} < margin={}, using sequential for stability",
+                cost_diff, margin_threshold
+            );
+            return true; // Prefer sequential when costs are close
+        }
+
+        // Rule 1: If total seek cost (including overhead) >= sequential, use sequential
         if seek_total_cost >= sequential_frames {
             return true; // Seek not worth it with overhead
         }
 
-        // 2. If seek_frames alone >= 90% of sequential, use sequential (not saving enough)
-        if seek_frames as f64 >= sequential_frames as f64 * 0.9 {
+        // Rule 2: If seek_frames alone >= 85% of sequential, use sequential (not saving enough)
+        if seek_frames as f64 >= sequential_frames as f64 * 0.85 {
             return true; // Not saving enough, use sequential
         }
 
-        // 3. If many GOP transitions (>5) AND seek_frames >= 70% of sequential, use sequential
-        if seek_count > 5 && seek_frames as f64 >= sequential_frames as f64 * 0.7 {
+        // Rule 3: If many GOP transitions (>5) AND seek_frames >= 65% of sequential, use sequential
+        if seek_count > 5 && seek_frames as f64 >= sequential_frames as f64 * 0.65 {
             return true; // Many seeks and not saving much, use sequential
+        }
+
+        // Rule 4: For complex codecs (AV1/HEVC), require more savings to justify seek
+        // These codecs have higher worst-case seek penalties
+        if (codec_id.contains("AV1") || codec_id.contains("HEVC") || codec_id.contains("H265"))
+            && seek_frames as f64 >= sequential_frames as f64 * 0.6
+        {
+            return true; // Complex codec: need more savings to justify seek
         }
 
         false // Use seek - significant savings
