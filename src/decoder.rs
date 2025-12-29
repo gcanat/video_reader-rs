@@ -259,6 +259,7 @@ impl VideoDecoder {
     pub fn fps(&self) -> f64 {
         self.fps
     }
+    #[allow(dead_code)]
     pub fn video(&self) -> &ffmpeg::decoder::Video {
         &self.video
     }

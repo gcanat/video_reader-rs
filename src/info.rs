@@ -75,6 +75,7 @@ pub struct StreamInfo {
     has_missing_pts: bool,
     has_missing_dts: bool,
     /// Whether packet-order PTS/DTS are non-monotonic
+    #[allow(dead_code)]
     has_non_monotonic_pts: bool,
     has_non_monotonic_dts: bool,
     /// Whether any packets share the same PTS/DTS values
@@ -223,6 +224,7 @@ impl StreamInfo {
         &self.frame_times
     }
     /// Get the decode index (packet order) for a presentation index
+    #[allow(dead_code)]
     pub fn get_decode_idx_for_presentation(&self, presentation_idx: usize) -> Option<usize> {
         self.presentation_to_decode_idx
             .get(presentation_idx)
@@ -230,6 +232,7 @@ impl StreamInfo {
     }
     /// Get the presentation index for a decode index (packet order)
     /// Used to find which presentation frame a keyframe corresponds to
+    #[allow(dead_code)]
     pub fn get_presentation_idx_for_decode(&self, decode_idx: usize) -> Option<usize> {
         self.decode_to_presentation_idx.get(decode_idx).copied()
     }
@@ -253,6 +256,7 @@ impl StreamInfo {
         self.has_negative_pts
     }
     /// Check if video has negative DTS values (but positive PTS)
+    #[allow(dead_code)]
     pub fn has_negative_dts(&self) -> bool {
         self.has_negative_dts
     }
@@ -262,6 +266,7 @@ impl StreamInfo {
     pub fn has_missing_dts(&self) -> bool {
         self.has_missing_dts
     }
+    #[allow(dead_code)]
     pub fn has_non_monotonic_pts(&self) -> bool {
         self.has_non_monotonic_pts
     }
@@ -325,6 +330,7 @@ impl StreamInfo {
     /// This is detected when a keyframe's presentation index is greater than
     /// some frames that come AFTER it in decode order (i.e., those frames display before the keyframe).
     /// Returns (has_open_gop, number of open GOP keyframes).
+    #[allow(dead_code)]
     pub fn has_open_gop(&self) -> (bool, usize) {
         let mut open_gop_count = 0usize;
 
@@ -448,6 +454,7 @@ impl StreamInfo {
             kf_array_idx -= 1;
         }
     }
+    #[allow(dead_code)]
     pub fn keyframe_pts_monotonic_norm(&self) -> (bool, usize) {
         let offset = self.min_pts_offset();
         let key_frames = self.key_frames();
@@ -467,6 +474,7 @@ impl StreamInfo {
         }
         (violation == 0, violation)
     }
+    #[allow(dead_code)]
     pub fn keyframe_dts_monotonic(&self) -> (bool, usize) {
         let key_frames = self.key_frames();
         let frame_times = self.frame_times();

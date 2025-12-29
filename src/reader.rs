@@ -23,6 +23,10 @@ use crate::utils::{insert_frame, FrameArray, VideoArray, HWACCEL_PIXEL_FORMAT};
 use ndarray::{s, Array, Array4};
 use tokio::task;
 
+/// Custom errno used to signal backwards jump detection (non-monotonic output).
+/// This allows us to distinguish it from real InvalidData errors.
+const BACKWARDS_JUMP_ERRNO: i32 = 61; // ENODATA on most systems
+
 pub fn get_init_context(
     filename: &String,
 ) -> Result<(ffmpeg::format::context::Input, usize), ffmpeg::Error> {
@@ -73,7 +77,6 @@ pub struct VideoReader {
     stream_index: usize,
     stream_info: StreamInfo,
     curr_frame: usize,
-    curr_dec_idx: usize,
     /// Current presentation index (display order count)
     curr_pres_idx: usize,
     n_fails: usize,
@@ -121,7 +124,6 @@ impl VideoReader {
             stream_index,
             stream_info,
             curr_frame: 0,
-            curr_dec_idx: 0,
             curr_pres_idx: 0,
             n_fails: 0,
             decoder,
@@ -519,23 +521,17 @@ impl VideoReader {
 
         Ok(outputs)
     }
-    /// Safely get the batch of frames from the video by iterating over all frames and decoding
-    /// only the ones we need. This can be more accurate when the video's metadata is not reliable,
-    /// or when the video has B-frames.
+    /// Sequential decoding fallback: iterate from start and collect requested frames.
+    /// Used when seek-based batch fails (e.g., pathological videos) or caller needs guaranteed accuracy.
     ///
     /// Behavior depends on `oob_mode`:
     /// - `Error`: Return error if any requested frame is not found (default)
     /// - `Skip`: Skip missing frames - returned array may have fewer frames than requested
     /// - `Black`: Return black (all-zero) frames for missing frames
     pub fn get_batch_safe(&mut self, indices: Vec<usize>) -> Result<VideoArray, ffmpeg::Error> {
-        // Clear any stale failure state from previous calls
         self.failed_indices.clear();
 
-        // Simple and robust implementation: iterate once from the start and grab the requested
-        // frames in presentation order. This avoids any reliance on seeking or timestamp quirks
-        // (B-frames, non-monotonic DTS/PTS, etc.).
-        //
-        // Complexity is O(total_frames) but only used when caller asks for the safe path.
+        // O(max_index) complexity: decode all frames up to max requested index
 
         // make sure we are at the beginning of the stream
         self.seek_to_start()?;
@@ -794,6 +790,19 @@ impl VideoReader {
                     }
                 }
                 Err(e) => {
+                    // Backwards jump detected: non-monotonic decoder output
+                    // Use custom errno to distinguish from real InvalidData errors
+                    if let ffmpeg::Error::Other { errno } = e {
+                        if errno == BACKWARDS_JUMP_ERRNO {
+                            debug!(
+                                "Backwards jump detected (errno={}). Switching to sequential mode.",
+                                errno
+                            );
+                            self.seek_verified = Some(false);
+                            return self.get_batch_safe(indices);
+                        }
+                    }
+
                     debug!("seek_accurate_raw failed at {}: {:?}", frame_index, e);
                     match self.oob_mode {
                         OutOfBoundsMode::Error => {
@@ -889,7 +898,29 @@ impl VideoReader {
             // Pass target presentation index directly - uses PTS matching internally
             match self.find_frame_by_pres_idx(presentation_idx) {
                 Ok(frame) => Ok(frame),
-                Err(_) => self.get_frame_raw_after_eof_by_count(presentation_idx),
+                Err(ffmpeg::Error::Eof) => {
+                    // Skip-forward failed (packet iterator exhausted).
+                    // This can happen when packet order != frame output order (B-frames).
+                    // Force a re-seek to the keyframe and try again.
+                    debug!(
+                        "Skip-forward failed, re-seeking to keyframe at decode idx: {}",
+                        key_decode_idx
+                    );
+                    self.seek_to_start()?;
+                    self.seek_frame_by_decode_idx(&key_decode_idx)?;
+                    self.curr_frame = key_decode_idx;
+                    self.curr_pres_idx = min_pres_in_gop.min(key_pres_idx);
+                    self.eof_sent = false;
+
+                    match self.find_frame_by_pres_idx(presentation_idx) {
+                        Ok(frame) => Ok(frame),
+                        Err(ffmpeg::Error::Eof) => {
+                            self.get_frame_raw_after_eof_by_count(presentation_idx)
+                        }
+                        Err(e) => Err(e),
+                    }
+                }
+                Err(e) => Err(e),
             }
         } else {
             debug!("Seeking to keyframe at decode idx: {}", key_decode_idx);
@@ -897,7 +928,6 @@ impl VideoReader {
             self.seek_to_start()?;
             self.seek_frame_by_decode_idx(&key_decode_idx)?;
             self.curr_frame = key_decode_idx;
-            self.curr_dec_idx = key_decode_idx;
             // For Open GOP, the first decoded output may have pres_idx > or < key_pres_idx
             // We use min_pres_in_gop as a better estimate for where we'll start decoding from
             self.curr_pres_idx = min_pres_in_gop.min(key_pres_idx);
@@ -905,7 +935,8 @@ impl VideoReader {
             // Pass target presentation index directly - uses PTS matching internally
             match self.find_frame_by_pres_idx(presentation_idx) {
                 Ok(frame) => Ok(frame),
-                Err(_) => self.get_frame_raw_after_eof_by_count(presentation_idx),
+                Err(ffmpeg::Error::Eof) => self.get_frame_raw_after_eof_by_count(presentation_idx),
+                Err(e) => Err(e),
             }
         }
     }
@@ -922,9 +953,11 @@ impl VideoReader {
             target_pres_idx, self.curr_pres_idx
         );
         let mut failsafe = (self.stream_info.frame_count() * 2) as i32;
+        let mut prev_map_idx: Option<usize> = None;
 
         // First, try to get frame from decoder's existing buffer (from previous packets)
-        let (yuv_frame, counter) = self.get_frame_raw_by_count(target_pres_idx);
+        let (yuv_frame, counter) =
+            self.get_frame_raw_by_count(target_pres_idx, &mut prev_map_idx)?;
         if yuv_frame.is_some() {
             return Ok(yuv_frame);
         }
@@ -936,8 +969,8 @@ impl VideoReader {
                 Some((stream, packet)) => {
                     if stream.index() == self.stream_index {
                         self.decoder.video.send_packet(&packet)?;
-                        self.curr_dec_idx += 1;
-                        let (yuv_frame, counter) = self.get_frame_raw_by_count(target_pres_idx);
+                        let (yuv_frame, counter) =
+                            self.get_frame_raw_by_count(target_pres_idx, &mut prev_map_idx)?;
                         if yuv_frame.is_some() {
                             return Ok(yuv_frame);
                         }
@@ -977,7 +1010,11 @@ impl VideoReader {
     /// frame input (e.g., `fps`, `minterpolate`, `tinterlace`, `deflicker`).
     /// If temporal filter support is needed, consider detecting such filters and
     /// falling back to the "filter-all-frames" approach.
-    pub fn get_frame_raw_by_count(&mut self, target_pres_idx: usize) -> (Option<Video>, i32) {
+    pub(crate) fn get_frame_raw_by_count(
+        &mut self,
+        target_pres_idx: usize,
+        prev_map_idx: &mut Option<usize>,
+    ) -> Result<(Option<Video>, i32), ffmpeg::Error> {
         let mut decoded = Video::empty();
         let mut counter = 0;
         let expected_pts = self.stream_info.get_pts_for_presentation(target_pres_idx);
@@ -987,14 +1024,31 @@ impl VideoReader {
             // This is key to the check-before-filter optimization.
             let decoded_pts = decoded.pts();
 
-            // PRIORITY 1: Use PTS to resync curr_pres_idx IMMEDIATELY
-            // This ensures we track position accurately even after seeks,
-            // which is critical for videos with non-monotonic packet-order PTS (B-frames)
-            // NOTE: presentation_for_pts_norm expects NORMALIZED PTS (raw - min_offset)
+            // Check for PTS Backwards Jump (Non-Monotonic Output)
+            // This detects videos where the output order is NOT reordered (Raw Decode Order),
+            // which breaks our Sorted Map assumption.
             if let Some(p) = decoded_pts {
                 let pts_offset = self.stream_info.min_pts_offset();
                 let norm_p = p - pts_offset;
                 if let Some(mapped) = self.stream_info.presentation_for_pts_norm(norm_p) {
+                    // Runtime backwards jump detection: if decoder outputs frames with
+                    // non-monotonic presentation indices, our PTS->pres_idx map is invalid.
+                    // This catches pathological videos where packet PTS looks normal
+                    // but decoder output order doesn't match expected order.
+                    if let Some(prev) = *prev_map_idx {
+                        if mapped < prev {
+                            debug!(
+                                "Non-monotonic output detected: prev_map={} curr_map={} pts={}",
+                                prev, mapped, p
+                            );
+                            return Err(ffmpeg::Error::Other {
+                                errno: BACKWARDS_JUMP_ERRNO,
+                            });
+                        }
+                    }
+                    *prev_map_idx = Some(mapped);
+
+                    // Standard Resync logic
                     self.curr_pres_idx = mapped;
                 }
             }
@@ -1015,10 +1069,10 @@ impl VideoReader {
                 }
             }
 
-            // Count-based match (fallback when PTS doesn't match directly)
-            if !matched && self.curr_pres_idx == target_pres_idx {
-                matched = true;
-            }
+            // NOTE: We intentionally do NOT use curr_pres_idx as a fallback match.
+            // For some videos, packet order != frame output order, causing curr_pres_idx
+            // (derived from presentation_for_pts_norm) to be out of sync with the actual
+            // decoded frame. PTS-based matching is the only reliable method.
 
             // OPTIMIZATION: Only apply filter to the target frame.
             // This is the core of the check-before-filter optimization.
@@ -1027,11 +1081,11 @@ impl VideoReader {
                 if let Some(mut in_ctx) = self.decoder.graph.get("in") {
                     if let Err(e) = in_ctx.source().add(&decoded) {
                         debug!("Failed to push frame into filter graph: {e}");
-                        return (None, counter);
+                        return Ok((None, counter));
                     }
                 } else {
                     debug!("Filter graph missing 'in' pad");
-                    return (None, counter);
+                    return Ok((None, counter));
                 }
 
                 let mut yuv_frame = Video::empty();
@@ -1044,11 +1098,11 @@ impl VideoReader {
                             target_pres_idx, out_pts_dbg
                         );
                         self.curr_pres_idx += 1;
-                        return (Some(yuv_frame), counter + 1);
+                        return Ok((Some(yuv_frame), counter + 1));
                     }
                 } else {
                     debug!("Filter graph missing 'out' pad");
-                    return (None, counter);
+                    return Ok((None, counter));
                 }
             }
 
@@ -1057,7 +1111,7 @@ impl VideoReader {
             counter += 1;
         }
 
-        (None, counter)
+        Ok((None, counter))
     }
 
     /// Get raw frame when there are no more packets to iterate
@@ -1073,7 +1127,9 @@ impl VideoReader {
         self.decoder.video.send_eof()?;
         self.eof_sent = true; // Mark that we've sent EOF - need to re-seek before processing more frames
                               // Use the original target, not self.curr_pres_idx!
-        let (yuv_frame, _counter) = self.get_frame_raw_by_count(target_pres_idx);
+        let mut prev_map_idx: Option<usize> = None;
+        let (yuv_frame, _counter) =
+            self.get_frame_raw_by_count(target_pres_idx, &mut prev_map_idx)?;
         Ok(yuv_frame)
     }
 
@@ -1098,10 +1154,9 @@ impl VideoReader {
         }
     }
     /// Quick static checks before runtime seek verification.
-    /// Returns (force_sequential, force_full_verify, summary)
-    fn quick_seek_static_check(&self) -> (bool, bool, String) {
+    /// Returns (force_sequential, summary)
+    fn quick_seek_static_check(&self) -> (bool, String) {
         let mut force_sequential = false;
-        let mut force_full_verify = false;
         let mut reasons: Vec<String> = Vec::new();
 
         let key_frames = self.stream_info.key_frames();
@@ -1140,15 +1195,6 @@ impl VideoReader {
             force_sequential = true;
             reasons.push("non-monotonic dts".to_string());
         }
-        // NOTE: Open GOP is now handled in seek_accurate_raw by using find_safe_keyframe_for_pres_idx
-        // which automatically seeks to an earlier keyframe when needed
-        let (has_open_gop, open_gop_count) = self.stream_info.has_open_gop();
-        if has_open_gop {
-            debug!(
-                "Video has Open GOP structure ({} keyframes affected)",
-                open_gop_count
-            );
-        }
 
         // Missing timing info for keyframes: cannot trust seek -> force sequential
         if key_frames.iter().any(|kf| !frame_times.contains_key(kf)) {
@@ -1156,105 +1202,38 @@ impl VideoReader {
             reasons.push("missing frame_times for some keyframes".to_string());
         }
 
-        // PTS monotonicity on keyframes (normalized) - if violated, do full verify
-        let (pts_mono, pts_violation) = self.stream_info.keyframe_pts_monotonic_norm();
-        if !pts_mono {
-            force_full_verify = true;
-            reasons.push(format!(
-                "keyframe pts non-monotonic ({} windows)",
-                pts_violation
-            ));
-        }
-
-        // DTS monotonicity on keyframes (decode order) - if violated, do full verify
-        let (dts_mono, dts_violation) = self.stream_info.keyframe_dts_monotonic();
-        if !dts_mono {
-            force_full_verify = true;
-            reasons.push(format!(
-                "keyframe dts non-monotonic ({} windows)",
-                dts_violation
-            ));
-        }
-
-        // // Keyframe gap outlier check: very long gap relative to median -> full verify
-        // if key_frames.len() > 4 {
-        //     let mut gaps: Vec<usize> = key_frames.windows(2).map(|w| w[1] - w[0]).collect();
-        //     gaps.sort();
-        //     let median = gaps[gaps.len() / 2].max(1);
-        //     let max_gap = *gaps.last().unwrap_or(&median);
-        //     if max_gap > median * 4 && max_gap > 200 {
-        //         force_full_verify = true;
-        //         reasons.push(format!(
-        //             "keyframe gap outlier: max={} median={}",
-        //             max_gap, median
-        //         ));
-        //     }
-        // }
-
         let summary = if reasons.is_empty() {
             "ok".to_string()
         } else {
             reasons.join("; ")
         };
-        (force_sequential, force_full_verify, summary)
+        (force_sequential, summary)
     }
 
-    /// Check if this video needs sequential mode
-    /// Returns true if seek is known to be unreliable for this video
-    /// Result is cached after first call to avoid repeated verification overhead
+    /// Check if this video needs sequential mode, with cache design
     pub fn needs_sequential_mode(&mut self) -> bool {
-        let t0 = Instant::now();
-        // Check cached verification result
         if let Some(seek_works) = self.seek_verified {
-            if !seek_works {
-                debug!(
-                    "needs_sequential_mode: Cached result - seek failed (cost {:?})",
-                    t0.elapsed()
-                );
-            }
             return !seek_works;
         }
 
-        // For normal videos, do a runtime seek verification (only once)
-        // Some videos have seek issues even with positive PTS/DTS
+        // do a runtime seek verification (only once)
         let quick_start = Instant::now();
-        let (force_seq, force_full_verify, quick_summary) = self.quick_seek_static_check();
+        let (force_seq, quick_summary) = self.quick_seek_static_check();
         let quick_elapsed = quick_start.elapsed();
         if force_seq {
+            self.seek_verified = Some(false);
             debug!(
-                "needs_sequential_mode: quick static check -> sequential (reason: {}) (quick {:?}, total {:?})",
-                quick_summary,
-                quick_elapsed,
-                t0.elapsed()
+                "needs_sequential_mode: quick static check -> sequential (reason: {}) ({:?})",
+                quick_summary, quick_elapsed
             );
             return true;
         }
 
+        self.seek_verified = Some(true);
         debug!(
-            "needs_sequential_mode: quick static check ok (reason: {}) force_full_verify={} (quick {:?})",
-            quick_summary,
-            force_full_verify,
-            quick_elapsed
+            "needs_sequential_mode: quick static check ok (reason: {}) ({:?})",
+            quick_summary, quick_elapsed
         );
-
-        // TODO: (cy) removed this temporary fix; TO BE WATCHED! changed to the following:
-        // let seek_works = self.verify_seek_works(force_full_verify);
-        let seek_works = true; // Temporarily force seek path to always succeed
-        self.seek_verified = Some(seek_works); // Cache the result
-
-        if !seek_works {
-            debug!(
-                "needs_sequential_mode: Runtime verification failed - sequential (cost {:?})",
-                t0.elapsed()
-            );
-            return true;
-        }
-
-        debug!(
-            "needs_sequential_mode: seek verified ok (cost {:?})",
-            t0.elapsed()
-        );
-        // Normal videos that pass verification - seek should work fine
         false
     }
 
@@ -1507,7 +1486,6 @@ impl VideoReader {
     fn seek_to_start(&mut self) -> Result<(), ffmpeg::Error> {
         self.ictx.seek(0, ..100)?;
         self.avflushbuf()?;
-        self.curr_dec_idx = 0;
         self.curr_frame = 0;
         self.curr_pres_idx = 0;
         self.eof_sent = false; // Reset EOF state after seeking
@@ -1640,7 +1618,6 @@ impl VideoReader {
         };
         self.avflushbuf()?;
         if res >= 0 {
-            self.curr_dec_idx = *pos;
             self.curr_frame = *pos;
             Ok(())
         } else {
