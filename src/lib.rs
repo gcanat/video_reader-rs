@@ -226,19 +226,35 @@ impl PyVideoReader {
                 let index = key.to_indices(frame_count)?;
                 let index_clone = index.clone();
 
-                // Use the SAME method selection logic as get_batch
-                // This ensures consistent color space handling
+                // For single frame access (reader[i]), always use seek-based method
+                // This enables skip-forward optimization for sequential access patterns
+                // like: for i in range(n): reader[i]
+                let is_single_frame = matches!(key, IntOrSlice::Int { .. });
+
+                // For slices/lists, use the cost estimation logic
                 let force_sequential = vr.needs_sequential_mode();
-                let use_sequential = if force_sequential {
+                let use_sequential = if is_single_frame {
+                    // Single frame: use seek-based unless seek is completely broken
+                    force_sequential
+                } else if force_sequential {
                     true
                 } else {
                     vr.should_use_sequential(&index)
                 };
 
+                // Try the selected method, with automatic fallback for seek-based -> sequential
                 let res_array = if use_sequential {
                     vr.get_batch_safe(index.clone())
                 } else {
-                    vr.get_batch(index.clone())
+                    // Try seek-based first
+                    match vr.get_batch(index.clone()) {
+                        Ok(arr) => Ok(arr),
+                        Err(_) => {
+                            // Fallback to sequential mode if seek-based fails
+                            debug!("__getitem__: get_batch failed, falling back to get_batch_safe");
+                            vr.get_batch_safe(index.clone())
+                        }
+                    }
                 }.map_err(|e| {
                     // Convert Bug error to a more meaningful message
                     let failed = vr.failed_indices();

@@ -86,6 +86,8 @@ pub struct VideoReader {
     seek_verified: Option<bool>,
     /// True if we've sent EOF and need to re-seek before processing more frames
     eof_sent: bool,
+    /// True if we've started sequential iteration (packets iterator has been used)
+    sequential_started: bool,
     /// How to handle out-of-bounds or failed frame fetches
     oob_mode: OutOfBoundsMode,
     /// Frame indices that failed (for error reporting)
@@ -130,6 +132,7 @@ impl VideoReader {
             draining: false,
             seek_verified: None, // Will be tested on first get_batch
             eof_sent: false,
+            sequential_started: false,
             oob_mode,
             failed_indices: Vec::new(),
         })
@@ -524,6 +527,9 @@ impl VideoReader {
     /// Sequential decoding fallback: iterate from start and collect requested frames.
     /// Used when seek-based batch fails (e.g., pathological videos) or caller needs guaranteed accuracy.
     ///
+    /// Supports skip-forward optimization: if min(indices) >= curr_pres_idx and decoder
+    /// is not drained, we can continue from current position instead of seeking to start.
+    ///
     /// Behavior depends on `oob_mode`:
     /// - `Error`: Return error if any requested frame is not found (default)
     /// - `Skip`: Skip missing frames - returned array may have fewer frames than requested
@@ -531,19 +537,40 @@ impl VideoReader {
     pub fn get_batch_safe(&mut self, indices: Vec<usize>) -> Result<VideoArray, ffmpeg::Error> {
         self.failed_indices.clear();
 
-        // O(max_index) complexity: decode all frames up to max requested index
-
-        // make sure we are at the beginning of the stream
-        self.seek_to_start()?;
-
         // For fast membership checks
         let needed: HashSet<usize> = indices.iter().cloned().collect();
         let needed_total = needed.len();
+        let min_needed = indices.iter().min().copied().unwrap_or(0);
         let max_needed = indices.iter().max().copied().unwrap_or(0);
         let mut frame_map: HashMap<usize, FrameArray> = HashMap::with_capacity(needed.len());
 
+        // Skip-forward optimization: if requested frame(s) are ahead of or at current position,
+        // continue from current position instead of seeking to start
+        // This makes sequential access O(n) instead of O(n²)
+        // Requires: sequential_started (packets iterator has been used before)
+        let can_skip_forward =
+            self.sequential_started && !self.eof_sent && min_needed >= self.curr_pres_idx;
+
+        let start_idx = if can_skip_forward {
+            debug!(
+                "get_batch_safe: skip-forward from {} to min_needed {}",
+                self.curr_pres_idx, min_needed
+            );
+            self.curr_pres_idx
+        } else {
+            debug!(
+                "get_batch_safe: seek to start (started={}, eof_sent={}, min_needed={}, curr={})",
+                self.sequential_started, self.eof_sent, min_needed, self.curr_pres_idx
+            );
+            self.seek_to_start()?;
+            0
+        };
+
+        // Mark that we've started sequential iteration
+        self.sequential_started = true;
+
         let mut decoded = Video::empty();
-        let mut curr_idx: usize = 0;
+        let mut curr_idx: usize = start_idx;
         let mut collected: usize = 0;
 
         // iterate all packets
@@ -588,40 +615,49 @@ impl VideoReader {
                 }
             }
         }
-        // flush remaining frames
-        self.decoder.video.send_eof()?;
-        while self.decoder.video.receive_frame(&mut decoded).is_ok() {
-            if needed.contains(&curr_idx) {
-                self.decoder
-                    .graph
-                    .get("in")
-                    .ok_or(ffmpeg::Error::Bug)?
-                    .source()
-                    .add(&decoded)?;
-                let mut rgb_frame = Video::empty();
-                if self
-                    .decoder
-                    .graph
-                    .get("out")
-                    .ok_or(ffmpeg::Error::Bug)?
-                    .sink()
-                    .frame(&mut rgb_frame)
-                    .is_ok()
-                {
-                    let cspace = self.decoder.color_space;
-                    let crange = self.decoder.color_range;
-                    let frame = if self.decoder.is_hwaccel {
-                        convert_nv12_to_ndarray_rgb24(rgb_frame, cspace, crange)?
-                    } else {
-                        convert_yuv_to_ndarray_rgb24(rgb_frame, cspace, crange)?
-                    };
-                    frame_map.insert(curr_idx, frame);
-                    collected += 1;
+
+        // Track whether we exhausted the packet iterator or exited early
+        // If we exited early (all needed frames collected), decoder state is still valid
+        // If exhausted, we need to flush remaining frames from decoder buffer
+        let exhausted_packets = collected < needed_total;
+
+        if exhausted_packets {
+            // Flush remaining frames from decoder buffer
+            self.decoder.video.send_eof()?;
+            self.eof_sent = true; // Mark that we sent EOF, next call must seek
+            while self.decoder.video.receive_frame(&mut decoded).is_ok() {
+                if needed.contains(&curr_idx) {
+                    self.decoder
+                        .graph
+                        .get("in")
+                        .ok_or(ffmpeg::Error::Bug)?
+                        .source()
+                        .add(&decoded)?;
+                    let mut rgb_frame = Video::empty();
+                    if self
+                        .decoder
+                        .graph
+                        .get("out")
+                        .ok_or(ffmpeg::Error::Bug)?
+                        .sink()
+                        .frame(&mut rgb_frame)
+                        .is_ok()
+                    {
+                        let cspace = self.decoder.color_space;
+                        let crange = self.decoder.color_range;
+                        let frame = if self.decoder.is_hwaccel {
+                            convert_nv12_to_ndarray_rgb24(rgb_frame, cspace, crange)?
+                        } else {
+                            convert_yuv_to_ndarray_rgb24(rgb_frame, cspace, crange)?
+                        };
+                        frame_map.insert(curr_idx, frame);
+                        collected += 1;
+                    }
                 }
-            }
-            curr_idx += 1;
-            if collected >= needed_total || curr_idx > max_needed {
-                break;
+                curr_idx += 1;
+                if collected >= needed_total || curr_idx > max_needed {
+                    break;
+                }
             }
         }
 
@@ -684,9 +720,10 @@ impl VideoReader {
             }
         };
 
-        // reset decoder state for subsequent calls
-        self.decoder.video.flush();
-        self.seek_to_start()?;
+        // Update position for skip-forward on subsequent calls
+        // Don't flush decoder - keep reference frames for B-frame videos
+        // Don't seek to start - allow continuing from current position
+        self.curr_pres_idx = max_needed + 1;
         Ok(frame_batch)
     }
 
@@ -722,8 +759,9 @@ impl VideoReader {
         let mut unique_frames: Vec<usize> = positions_map.keys().copied().collect();
         unique_frames.sort_unstable();
 
-        // make sure we are at the beginning of the stream
-        self.seek_to_start()?;
+        // NOTE: We intentionally do NOT call seek_to_start() here.
+        // seek_accurate_raw() will handle seeking if needed - for sequential access
+        // (like [0,1,2,3...]) it will skip forward without seeking, which is much faster.
 
         let cspace = self.decoder.color_space;
         let crange = self.decoder.color_range;
