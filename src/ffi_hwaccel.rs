@@ -3,6 +3,7 @@ extern crate ffmpeg_next as ffmpeg;
 
 use crate::hwaccel::HardwareAccelerationDeviceType;
 use ffmpeg::ffi::*;
+use libc;
 
 pub struct HardwareDeviceContext {
     ptr: *mut ffmpeg::ffi::AVBufferRef,
@@ -47,7 +48,9 @@ pub fn hwdevice_list_available_device_types() -> Vec<HardwareAccelerationDeviceT
         ffmpeg::ffi::av_hwdevice_iterate_types(ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_NONE)
     };
     while hwdevice_type != ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_NONE {
-        hwdevice_types.push(HardwareAccelerationDeviceType::from(hwdevice_type).unwrap());
+        if let Some(hw) = HardwareAccelerationDeviceType::from(hwdevice_type) {
+            hwdevice_types.push(hw);
+        }
         hwdevice_type = unsafe { ffmpeg::ffi::av_hwdevice_iterate_types(hwdevice_type) };
     }
     hwdevice_types
@@ -102,7 +105,12 @@ pub fn codec_context_get_hw_frames_ctx(
     sw_pixfmt: ffmpeg::util::format::Pixel,
 ) -> Result<(), ffmpeg::error::Error> {
     unsafe {
-        let hw_frame_ref = av_hwframe_ctx_alloc((*codec_context.as_mut_ptr()).hw_device_ctx);
+        let mut hw_frame_ref = av_hwframe_ctx_alloc((*codec_context.as_mut_ptr()).hw_device_ctx);
+        if hw_frame_ref.is_null() {
+            return Err(ffmpeg::error::Error::from(ffmpeg::ffi::AVERROR(
+                libc::ENOMEM,
+            )));
+        }
         (*codec_context.as_mut_ptr()).pix_fmt = hw_pixfmt.into();
         let frame_ctx = (*hw_frame_ref).data as *mut AVHWFramesContext;
         (*frame_ctx).format = hw_pixfmt.into();
@@ -112,9 +120,12 @@ pub fn codec_context_get_hw_frames_ctx(
         (*frame_ctx).initial_pool_size = 4;
         let ret = av_hwframe_ctx_init(hw_frame_ref);
         if ret < 0 {
+            av_buffer_unref(&mut hw_frame_ref);
             return Err(ffmpeg::error::Error::from(ret));
         }
         (*codec_context.as_mut_ptr()).hw_frames_ctx = av_buffer_ref(hw_frame_ref);
+        // release local reference; codec context now owns its own ref
+        av_buffer_unref(&mut hw_frame_ref);
     }
     Ok(())
 }

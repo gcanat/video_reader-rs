@@ -15,7 +15,8 @@ impl HardwareAccelerationContext {
         decoder: &mut ffmpeg::codec::Context,
         device_type: HardwareAccelerationDeviceType,
     ) -> Result<Self, ffmpeg::Error> {
-        let codec = ffmpeg::codec::decoder::find(decoder.id()).unwrap();
+        let codec =
+            ffmpeg::codec::decoder::find(decoder.id()).ok_or(ffmpeg::Error::DecoderNotFound)?;
         let pixel_format =
             match ffi_hwaccel::codec_find_corresponding_hwaccel_pixfmt(&codec, device_type) {
                 Some(pix_fmt) => pix_fmt,

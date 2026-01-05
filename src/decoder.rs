@@ -9,6 +9,18 @@ use ndarray::{s, Array, Array4, ArrayViewMut3};
 use std::collections::HashMap;
 use yuv::{YuvRange, YuvStandardMatrix};
 
+/// How to handle out-of-bounds or failed frame fetches in get_batch
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum OutOfBoundsMode {
+    /// Raise an error when frame fetch fails (default, current behavior)
+    #[default]
+    Error,
+    /// Skip failed frames - returned array may have fewer frames
+    Skip,
+    /// Return black (all-zero) frames for failed fetches
+    Black,
+}
+
 /// Struct used when we want to decode the whole video with a compression_factor
 #[derive(Clone)]
 pub struct VideoReducer {
@@ -73,7 +85,14 @@ impl VideoReducer {
         let start = start_frame.unwrap_or(0);
         let end = end_frame.unwrap_or(frame_count).min(frame_count);
 
-        let n_frames = ((end - start) as f64 * compression_factor.unwrap_or(1.0)).round() as usize;
+        let mut comp = compression_factor.unwrap_or(1.0);
+        if !comp.is_finite() || comp <= 0.0 {
+            comp = 1.0;
+        }
+        // Avoid creating more frames than exist and prevent huge allocations.
+        comp = comp.min(1.0);
+
+        let n_frames = ((end - start) as f64 * comp).round().max(1.0) as usize;
 
         let indices = Array::linspace(start as f64, end as f64 - 1., n_frames)
             .iter()
@@ -99,11 +118,41 @@ impl VideoReducer {
 /// * hw_accel: hardware acceleration device type, eg cuda, qsv, etc
 /// * ff_filter: optional custom ffmpeg filter to use, eg:
 ///   "format=rgb24,scale=w=256:h=256:flags=fast_bilinear"
+
+/// Scaling algorithm for resize operations
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub enum ResizeAlgo {
+    #[default]
+    FastBilinear,
+    Bilinear,
+    Bicubic,
+    Nearest,
+    Area,
+    Lanczos,
+}
+
+impl ResizeAlgo {
+    /// Convert ResizeAlgo to FFmpeg scale filter flag name
+    pub fn to_ffmpeg_flag(&self) -> &'static str {
+        match self {
+            ResizeAlgo::FastBilinear => "fast_bilinear",
+            ResizeAlgo::Bilinear => "bilinear",
+            ResizeAlgo::Bicubic => "bicubic",
+            ResizeAlgo::Nearest => "neighbor",
+            ResizeAlgo::Area => "area",
+            ResizeAlgo::Lanczos => "lanczos",
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct DecoderConfig {
     threads: usize,
     resize_shorter_side: Option<f64>,
     resize_longer_side: Option<f64>,
+    target_width: Option<u32>,
+    target_height: Option<u32>,
+    resize_algo: ResizeAlgo,
     hw_accel: Option<HardwareAccelerationDeviceType>,
     ff_filter: Option<String>,
 }
@@ -113,6 +162,9 @@ impl DecoderConfig {
         threads: usize,
         resize_shorter_side: Option<f64>,
         resize_longer_side: Option<f64>,
+        target_width: Option<u32>,
+        target_height: Option<u32>,
+        resize_algo: ResizeAlgo,
         hw_accel: Option<HardwareAccelerationDeviceType>,
         ff_filter: Option<String>,
     ) -> Self {
@@ -120,6 +172,9 @@ impl DecoderConfig {
             threads,
             resize_shorter_side,
             resize_longer_side,
+            target_width,
+            target_height,
+            resize_algo,
             hw_accel,
             ff_filter,
         }
@@ -135,6 +190,18 @@ impl DecoderConfig {
     }
     pub fn resize_longer_side(&self) -> Option<f64> {
         self.resize_longer_side
+    }
+    pub fn target_width(&self) -> Option<u32> {
+        self.target_width
+    }
+    pub fn target_height(&self) -> Option<u32> {
+        self.target_height
+    }
+    pub fn resize_algo(&self) -> ResizeAlgo {
+        self.resize_algo
+    }
+    pub fn ff_filter_ref(&self) -> Option<&str> {
+        self.ff_filter.as_deref()
     }
     pub fn ff_filter(self) -> Option<String> {
         self.ff_filter
@@ -154,8 +221,6 @@ pub struct VideoDecoder {
     pub color_range: YuvRange,
 }
 
-unsafe impl Send for VideoDecoder {}
-
 impl VideoDecoder {
     pub fn new(
         video: ffmpeg::decoder::Video,
@@ -166,8 +231,14 @@ impl VideoDecoder {
         is_hwaccel: bool,
         graph: filter::Graph,
     ) -> Self {
-        let cspace_string = video_info.get("color_space").unwrap();
-        let crange_string = video_info.get("color_range").unwrap();
+        let cspace_string = video_info
+            .get("color_space")
+            .map(|s| s.as_str())
+            .unwrap_or("BT709");
+        let crange_string = video_info
+            .get("color_range")
+            .map(|s| s.as_str())
+            .unwrap_or("");
         let color_space = get_colorspace(height as i32, cspace_string);
         let color_range = get_colorrange(crange_string);
         VideoDecoder {
@@ -188,6 +259,7 @@ impl VideoDecoder {
     pub fn fps(&self) -> f64 {
         self.fps
     }
+    #[allow(dead_code)]
     pub fn video(&self) -> &ffmpeg::decoder::Video {
         &self.video
     }
@@ -195,34 +267,37 @@ impl VideoDecoder {
     pub fn decode_frames(&mut self) -> Result<Option<FrameArray>, ffmpeg::Error> {
         let mut decoded = Video::empty();
         if self.video.receive_frame(&mut decoded).is_ok() {
-            let rgb_frame = self.process_frame(&decoded);
+            let rgb_frame = self.process_frame(&decoded)?;
             return Ok(rgb_frame);
         }
         Ok(None)
     }
 
-    pub fn process_frame(&mut self, decoded: &Video) -> Option<FrameArray> {
-        self.graph.get("in").unwrap().source().add(decoded).unwrap();
+    pub fn process_frame(&mut self, decoded: &Video) -> Result<Option<FrameArray>, ffmpeg::Error> {
+        if let Some(mut in_ctx) = self.graph.get("in") {
+            if in_ctx.source().add(decoded).is_err() {
+                return Err(ffmpeg::Error::Bug);
+            }
+        } else {
+            return Err(ffmpeg::Error::Bug);
+        }
         let cspace = self.color_space;
         let crange = self.color_range;
 
         let mut yuv_frame = Video::empty();
-        if self
-            .graph
-            .get("out")
-            .unwrap()
-            .sink()
-            .frame(&mut yuv_frame)
-            .is_ok()
-        {
-            let rgb_frame: FrameArray = if self.is_hwaccel {
-                convert_nv12_to_ndarray_rgb24(yuv_frame, cspace, crange)
-            } else {
-                convert_yuv_to_ndarray_rgb24(yuv_frame, cspace, crange)
-            };
-            return Some(rgb_frame);
+        if let Some(mut out_ctx) = self.graph.get("out") {
+            if out_ctx.sink().frame(&mut yuv_frame).is_ok() {
+                let rgb_frame: FrameArray = if self.is_hwaccel {
+                    convert_nv12_to_ndarray_rgb24(yuv_frame, cspace, crange)?
+                } else {
+                    convert_yuv_to_ndarray_rgb24(yuv_frame, cspace, crange)?
+                };
+                return Ok(Some(rgb_frame));
+            }
+        } else {
+            return Err(ffmpeg::Error::Bug);
         }
-        None
+        Ok(None)
     }
 
     /// Decode all frames that match the frame indices
@@ -239,28 +314,10 @@ impl VideoDecoder {
             reducer.incr_frame_index(1);
             if let Some(match_idx) = match_index {
                 reducer.remove_idx(match_idx);
-                let rgb_frame = self.process_frame(&decoded);
+                let rgb_frame = self.process_frame(&decoded)?;
                 return Ok(rgb_frame);
             }
         }
         Ok(None)
-    }
-    /// Decode frames
-    pub fn skip_and_decode_frames(
-        &mut self,
-        reducer: &mut VideoReducer,
-        indices: &[usize],
-        frame_map: &mut HashMap<usize, FrameArray>,
-    ) -> Result<(), ffmpeg::Error> {
-        let mut decoded = Video::empty();
-        while self.video.receive_frame(&mut decoded).is_ok() {
-            if indices.iter().any(|x| x == &reducer.get_frame_index()) {
-                if let Some(rgb_frame) = self.process_frame(&decoded) {
-                    frame_map.insert(reducer.get_frame_index(), rgb_frame);
-                }
-            }
-            reducer.incr_frame_index(1);
-        }
-        Ok(())
     }
 }
