@@ -111,15 +111,16 @@ impl StreamInfo {
 
         for ft in frame_times.values() {
             if ft.has_pts() {
-                min_pts = min_pts.min(*ft.pts());
+                let pts = *ft.pts();
+                min_pts = min_pts.min(pts);
                 if let Some(pp) = prev_pts {
-                    if *ft.pts() < pp {
+                    if pts < pp {
                         has_non_monotonic_pts = true;
                     }
                 }
-                prev_pts = Some(*ft.pts());
+                prev_pts = Some(pts);
                 // Check for duplicate PTS
-                if !seen_pts.insert(*ft.pts()) {
+                if !seen_pts.insert(pts) {
                     has_duplicate_pts = true;
                 }
             } else {
@@ -127,15 +128,16 @@ impl StreamInfo {
             }
 
             if ft.has_dts() {
-                min_dts = min_dts.min(*ft.dts());
+                let dts = *ft.dts();
+                min_dts = min_dts.min(dts);
                 if let Some(pd) = prev_dts {
-                    if *ft.dts() < pd {
+                    if dts < pd {
                         has_non_monotonic_dts = true;
                     }
                 }
-                prev_dts = Some(*ft.dts());
+                prev_dts = Some(dts);
                 // Check for duplicate DTS
-                if !seen_dts.insert(*ft.dts()) {
+                if !seen_dts.insert(dts) {
                     has_duplicate_dts = true;
                 }
             } else {

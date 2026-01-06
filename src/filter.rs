@@ -8,9 +8,62 @@ use ffmpeg::filter;
 use ffmpeg::format::Pixel as AvPixel;
 use ffmpeg::util::rational::Rational;
 use ffmpeg_next as ffmpeg;
-use log::debug;
+use log::{debug, warn};
+use once_cell::sync::Lazy;
 use std::ffi::c_void;
 use yuv::{YuvRange, YuvStandardMatrix};
+
+/// Cached result of whether buffer filter supports colorspace and range options (FFmpeg >= 7.0)
+/// Tested once at first use with a single filter graph creation
+static BUFFER_COLORSPACE_SUPPORT: Lazy<(bool, bool)> = Lazy::new(|| {
+    let mut graph = filter::Graph::new();
+    let buffer = match filter::find("buffer") {
+        Some(b) => b,
+        None => {
+            warn!("FFmpeg buffer filter not found");
+            return (false, false);
+        }
+    };
+
+    // Test both options with a single filter graph
+    let test_args = "video_size=64x64:pix_fmt=yuv420p:time_base=1/25:pixel_aspect=1/1:colorspace=bt709:range=tv";
+
+    if graph.add(&buffer, "test_in", test_args).is_ok() {
+        // Both supported
+        return (true, true);
+    }
+
+    // Try colorspace only
+    let mut graph2 = filter::Graph::new();
+    let buffer2 = filter::find("buffer").unwrap();
+    let colorspace_supported = graph2
+        .add(
+            &buffer2,
+            "test_in",
+            "video_size=64x64:pix_fmt=yuv420p:time_base=1/25:pixel_aspect=1/1:colorspace=bt709",
+        )
+        .is_ok();
+
+    // Try range only
+    let mut graph3 = filter::Graph::new();
+    let buffer3 = filter::find("buffer").unwrap();
+    let range_supported = graph3
+        .add(
+            &buffer3,
+            "test_in",
+            "video_size=64x64:pix_fmt=yuv420p:time_base=1/25:pixel_aspect=1/1:range=tv",
+        )
+        .is_ok();
+
+    if !colorspace_supported || !range_supported {
+        warn!(
+            "FFmpeg buffer filter does not support colorspace/range options (FFmpeg < 7.0). \
+             Some videos may have slight color inconsistencies between seek and sequential access."
+        );
+    }
+
+    (colorspace_supported, range_supported)
+});
 
 pub struct FilterConfig<'a> {
     height: u32,
@@ -80,17 +133,27 @@ pub fn create_filters(
         YuvRange::Full => "pc",    // JPEG range
     };
 
-    let args = format!(
-        "video_size={}x{}:pix_fmt={}:time_base={}:pixel_aspect={}{}:colorspace={}:range={}",
+    let mut args = format!(
+        "video_size={}x{}:pix_fmt={}:time_base={}:pixel_aspect={}/{}",
         filter_cfg.width,
         filter_cfg.height,
         pix_fmt_name,
         filter_cfg.time_base,
         filter_cfg.pixel_aspect.numerator(),
         filter_cfg.pixel_aspect.denominator(),
-        colorspace_str,
-        range_str,
     );
+
+    // Conditionally add colorspace if supported (FFmpeg >= 7.0)
+    let (supports_colorspace, supports_range) = *BUFFER_COLORSPACE_SUPPORT;
+    if supports_colorspace {
+        args.push_str(&format!(":colorspace={}", colorspace_str));
+    }
+
+    // Conditionally add range if supported (FFmpeg >= 7.0)
+    if supports_range {
+        args.push_str(&format!(":range={}", range_str));
+    }
+
     debug!("Buffer args: {}", args);
 
     let buffer = filter::find("buffer").ok_or(ffmpeg::Error::Bug)?;
@@ -170,79 +233,102 @@ fn transpose_filter(rotation: isize) -> String {
     }
 }
 
-/// Parse scale dimensions from filter string (e.g., "scale=w=256:h=256" or "scale=256:256")
-/// Returns (width, height) if found, None otherwise
+/// Parse scale dimensions from filter string.
+/// Supports all FFmpeg scale formats:
+/// - Positional: "scale=256:256", "scale=256:-1"
+/// - Named w first: "scale=w=256:h=256:flags=bicubic"
+/// - Named h first: "scale=h=256:w=256"
+/// - Long names: "scale=width=256:height=256"
+/// Returns (width, height) if both are valid integers, None otherwise.
 fn parse_scale_from_filter(filter_spec: &str) -> Option<(u32, u32)> {
-    // Try to match "scale=w=XXX:h=YYY" format
-    if let Some(scale_pos) = filter_spec.find("scale=") {
-        let scale_str = &filter_spec[scale_pos + 6..];
+    let scale_pos = filter_spec.find("scale=")?;
+    let scale_str = &filter_spec[scale_pos + 6..];
+    let scale_end = scale_str.find(',').unwrap_or(scale_str.len());
+    parse_scale_params(&scale_str[..scale_end])
+}
 
-        // Try "w=XXX:h=YYY" format
-        if scale_str.starts_with("w=") {
-            let mut width = None;
-            let mut height = None;
+/// Parse width and height from scale parameter string (after "scale=")
+fn parse_scale_params(scale_params: &str) -> Option<(u32, u32)> {
+    let mut width: Option<u32> = None;
+    let mut height: Option<u32> = None;
 
-            for part in scale_str.split(':') {
-                if part.starts_with("w=") {
-                    width = part[2..].parse().ok();
-                } else if part.starts_with("h=") {
-                    height = part[2..].parse().ok();
-                }
-            }
-
-            if let (Some(w), Some(h)) = (width, height) {
-                return Some((w, h));
-            }
-        }
-
-        // Try "WIDTH:HEIGHT" format (e.g., "scale=256:256")
-        let parts: Vec<&str> = scale_str.split(':').collect();
-        if parts.len() >= 2 {
-            if let (Ok(w), Ok(h)) = (parts[0].parse::<u32>(), parts[1].parse::<u32>()) {
-                return Some((w, h));
+    for (i, part) in scale_params.split(':').enumerate() {
+        if let Some(val) = part
+            .strip_prefix("w=")
+            .or_else(|| part.strip_prefix("width="))
+        {
+            width = val.parse().ok();
+        } else if let Some(val) = part
+            .strip_prefix("h=")
+            .or_else(|| part.strip_prefix("height="))
+        {
+            height = val.parse().ok();
+        } else if !part.contains('=') {
+            if i == 0 {
+                width = part.parse().ok();
+            } else if i == 1 {
+                height = part.parse().ok();
             }
         }
     }
-    None
+
+    match (width, height) {
+        (Some(w), Some(h)) => Some((w, h)),
+        _ => None,
+    }
+}
+
+/// Detect if scale uses named parameters (w=, h=, width=, height=) vs positional
+fn scale_uses_named_params(scale_params: &str) -> bool {
+    scale_params.contains("w=")
+        || scale_params.contains("h=")
+        || scale_params.contains("width=")
+        || scale_params.contains("height=")
 }
 
 /// Swap w and h values in a filter string's scale parameter
-/// e.g., "scale=w=360:h=640" -> "scale=w=640:h=360"
 fn swap_scale_dimensions(filter_spec: &str) -> String {
-    // Parse scale dimensions first
-    if let Some((w, h)) = parse_scale_from_filter(filter_spec) {
-        // Find and replace the scale parameter
-        if let Some(scale_pos) = filter_spec.find("scale=") {
-            let before = &filter_spec[..scale_pos];
-            let after_scale = &filter_spec[scale_pos + 6..];
+    let Some((w, h)) = parse_scale_from_filter(filter_spec) else {
+        return filter_spec.to_string();
+    };
+    let Some(scale_pos) = filter_spec.find("scale=") else {
+        return filter_spec.to_string();
+    };
 
-            // Find end of scale params (next comma or end)
-            let scale_end = after_scale.find(',').unwrap_or(after_scale.len());
-            let rest = &after_scale[scale_end..];
+    let before = &filter_spec[..scale_pos];
+    let after_scale = &filter_spec[scale_pos + 6..];
+    let scale_end = after_scale.find(',').unwrap_or(after_scale.len());
+    let scale_params = &after_scale[..scale_end];
+    let rest = &after_scale[scale_end..];
 
-            // Check format and rebuild with swapped dimensions
-            if after_scale.starts_with("w=") {
-                // "scale=w=XXX:h=YYY:flags=..." format - preserve extra params like flags
-                let scale_parts: Vec<&str> = after_scale[..scale_end].split(':').collect();
-                let mut new_parts = Vec::new();
-                for part in &scale_parts {
-                    if part.starts_with("w=") {
-                        new_parts.push(format!("w={}", h));
-                    } else if part.starts_with("h=") {
-                        new_parts.push(format!("h={}", w));
-                    } else {
-                        new_parts.push(part.to_string());
-                    }
+    if scale_uses_named_params(scale_params) {
+        let new_parts: Vec<String> = scale_params
+            .split(':')
+            .map(|part| {
+                if part.starts_with("w=") {
+                    format!("w={}", h)
+                } else if part.starts_with("h=") {
+                    format!("h={}", w)
+                } else if part.starts_with("width=") {
+                    format!("width={}", h)
+                } else if part.starts_with("height=") {
+                    format!("height={}", w)
+                } else {
+                    part.to_string()
                 }
-                return format!("{}scale={}{}", before, new_parts.join(":"), rest);
-            } else {
-                // "scale=XXX:YYY" format
-                return format!("{}scale={}:{}{}", before, h, w, rest);
-            }
+            })
+            .collect();
+        format!("{}scale={}{}", before, new_parts.join(":"), rest)
+    } else {
+        let parts: Vec<&str> = scale_params.split(':').collect();
+        if parts.len() >= 2 {
+            let mut new_parts = vec![h.to_string(), w.to_string()];
+            new_parts.extend(parts[2..].iter().map(|s| s.to_string()));
+            format!("{}scale={}{}", before, new_parts.join(":"), rest)
+        } else {
+            filter_spec.to_string()
         }
     }
-    // No scale found or parse failed, return as-is
-    filter_spec.to_string()
 }
 
 pub fn create_filter_spec(
@@ -355,4 +441,167 @@ pub fn create_filter_spec(
         out_height,
         rotation_applied,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ==================== parse_scale_from_filter tests ====================
+
+    #[test]
+    fn test_parse_positional_format() {
+        // scale=WIDTH:HEIGHT
+        assert_eq!(parse_scale_from_filter("scale=256:256"), Some((256, 256)));
+        assert_eq!(
+            parse_scale_from_filter("scale=1920:1080"),
+            Some((1920, 1080))
+        );
+        assert_eq!(parse_scale_from_filter("scale=640:480"), Some((640, 480)));
+    }
+
+    #[test]
+    fn test_parse_named_w_first() {
+        // scale=w=XXX:h=YYY
+        assert_eq!(
+            parse_scale_from_filter("scale=w=256:h=256"),
+            Some((256, 256))
+        );
+        assert_eq!(
+            parse_scale_from_filter("scale=w=1920:h=1080"),
+            Some((1920, 1080))
+        );
+    }
+
+    #[test]
+    fn test_parse_named_h_first() {
+        // scale=h=XXX:w=YYY (the case that was missing!)
+        assert_eq!(
+            parse_scale_from_filter("scale=h=256:w=256"),
+            Some((256, 256))
+        );
+        assert_eq!(
+            parse_scale_from_filter("scale=h=1080:w=1920"),
+            Some((1920, 1080))
+        );
+    }
+
+    #[test]
+    fn test_parse_long_names() {
+        // scale=width=XXX:height=YYY
+        assert_eq!(
+            parse_scale_from_filter("scale=width=256:height=256"),
+            Some((256, 256))
+        );
+        assert_eq!(
+            parse_scale_from_filter("scale=height=1080:width=1920"),
+            Some((1920, 1080))
+        );
+    }
+
+    #[test]
+    fn test_parse_with_flags() {
+        // scale with extra parameters
+        assert_eq!(
+            parse_scale_from_filter("scale=w=256:h=256:flags=bicubic"),
+            Some((256, 256))
+        );
+        assert_eq!(
+            parse_scale_from_filter("scale=256:256:flags=lanczos"),
+            Some((256, 256))
+        );
+        assert_eq!(
+            parse_scale_from_filter("scale=h=480:w=640:flags=bilinear"),
+            Some((640, 480))
+        );
+    }
+
+    #[test]
+    fn test_parse_in_filter_chain() {
+        // scale in a larger filter spec
+        assert_eq!(
+            parse_scale_from_filter("format=rgb24,scale=256:256"),
+            Some((256, 256))
+        );
+        assert_eq!(
+            parse_scale_from_filter("scale=w=640:h=480,transpose=1"),
+            Some((640, 480))
+        );
+        assert_eq!(
+            parse_scale_from_filter("format=yuv420p,scale=h=720:w=1280,format=rgb24"),
+            Some((1280, 720))
+        );
+    }
+
+    #[test]
+    fn test_parse_invalid_cases() {
+        // Should return None for invalid/unsupported cases
+        assert_eq!(parse_scale_from_filter("scale=-1:256"), None); // negative not u32
+        assert_eq!(parse_scale_from_filter("scale=iw/2:ih/2"), None); // expressions
+        assert_eq!(parse_scale_from_filter("no_scale_here"), None); // no scale
+        assert_eq!(parse_scale_from_filter("scale=256"), None); // only width
+    }
+
+    // ==================== swap_scale_dimensions tests ====================
+
+    #[test]
+    fn test_swap_positional() {
+        assert_eq!(swap_scale_dimensions("scale=360:640"), "scale=640:360");
+        assert_eq!(swap_scale_dimensions("scale=1080:1920"), "scale=1920:1080");
+    }
+
+    #[test]
+    fn test_swap_named_w_first() {
+        assert_eq!(
+            swap_scale_dimensions("scale=w=360:h=640"),
+            "scale=w=640:h=360"
+        );
+    }
+
+    #[test]
+    fn test_swap_named_h_first() {
+        // Preserve h= first order
+        assert_eq!(
+            swap_scale_dimensions("scale=h=640:w=360"),
+            "scale=h=360:w=640"
+        );
+    }
+
+    #[test]
+    fn test_swap_with_flags() {
+        assert_eq!(
+            swap_scale_dimensions("scale=w=360:h=640:flags=bicubic"),
+            "scale=w=640:h=360:flags=bicubic"
+        );
+        assert_eq!(
+            swap_scale_dimensions("scale=360:640:flags=lanczos"),
+            "scale=640:360:flags=lanczos"
+        );
+    }
+
+    #[test]
+    fn test_swap_in_filter_chain() {
+        assert_eq!(
+            swap_scale_dimensions("format=rgb24,scale=360:640,transpose=1"),
+            "format=rgb24,scale=640:360,transpose=1"
+        );
+        assert_eq!(
+            swap_scale_dimensions("scale=h=480:w=640,format=rgb24"),
+            "scale=h=640:w=480,format=rgb24"
+        );
+    }
+
+    #[test]
+    fn test_swap_no_scale() {
+        // No change if no scale found
+        assert_eq!(swap_scale_dimensions("format=rgb24"), "format=rgb24");
+    }
+
+    #[test]
+    fn test_swap_long_names() {
+        assert_eq!(
+            swap_scale_dimensions("scale=width=360:height=640"),
+            "scale=width=640:height=360"
+        );
+    }
 }

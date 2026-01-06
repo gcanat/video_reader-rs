@@ -31,7 +31,7 @@ use once_cell::sync::Lazy;
 use tokio::runtime::{self, Runtime};
 
 static RUNTIME: Lazy<Runtime> = Lazy::new(|| {
-    runtime::Builder::new_current_thread()
+    runtime::Builder::new_multi_thread()
         .enable_io()
         .build()
         .unwrap_or_else(|e| panic!("Failed to build tokio runtime: {e}"))
