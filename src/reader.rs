@@ -1286,7 +1286,7 @@ impl VideoReader {
         }
 
         // Deduplicate and sort for seek-based estimation
-        let mut unique_sorted: Vec<usize> = indices.iter().cloned().collect();
+        let mut unique_sorted: Vec<usize> = indices.to_vec();
         unique_sorted.sort();
         unique_sorted.dedup();
         let unique_count = unique_sorted.len();
@@ -1445,11 +1445,7 @@ impl VideoReader {
         // Rule 0: Edge case handling - when costs are close, prefer sequential
         // Sequential is more predictable and avoids worst-case seek penalties
         // This catches cases where benchmark variability could cause wrong predictions
-        let cost_diff = if seek_total_cost > sequential_frames {
-            seek_total_cost - sequential_frames
-        } else {
-            sequential_frames - seek_total_cost
-        };
+        let cost_diff = seek_total_cost.abs_diff(sequential_frames);
         let margin_threshold = (sequential_frames as f64 * 0.15).max(5.0) as usize;
         if cost_diff < margin_threshold {
             debug!(

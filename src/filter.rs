@@ -55,7 +55,7 @@ fn buffer_filter_has_opt(opt_name: &str) -> bool {
             opt_name_c.as_ptr(),
             std::ptr::null(),
             0,
-            AV_OPT_SEARCH_FAKE_OBJ as i32,
+            AV_OPT_SEARCH_FAKE_OBJ,
         );
 
         !av_option.is_null()
@@ -252,6 +252,7 @@ fn transpose_filter(rotation: isize) -> String {
 /// - Named w first: "scale=w=256:h=256:flags=bicubic"
 /// - Named h first: "scale=h=256:w=256"
 /// - Long names: "scale=width=256:height=256"
+///
 /// Returns (width, height) if both are valid integers, None otherwise.
 fn parse_scale_from_filter(filter_spec: &str) -> Option<(u32, u32)> {
     let scale_pos = filter_spec.find("scale=")?;
@@ -384,7 +385,7 @@ pub fn create_filter_spec(
                 pix_fmt_name,
                 scale_w,
                 scale_h,
-                resize_algo.to_ffmpeg_flag(),
+                resize_algo.as_ffmpeg_flag(),
                 transpose,
             );
 

@@ -3,7 +3,6 @@ extern crate ffmpeg_next as ffmpeg;
 
 use crate::hwaccel::HardwareAccelerationDeviceType;
 use ffmpeg::ffi::*;
-use libc;
 
 pub struct HardwareDeviceContext {
     ptr: *mut ffmpeg::ffi::AVBufferRef,

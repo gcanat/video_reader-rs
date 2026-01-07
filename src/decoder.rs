@@ -109,15 +109,6 @@ impl VideoReducer {
     }
 }
 
-/// Config to instantiate a Decoder
-/// * threads: number of threads to use
-/// * resize_shorter_side: resize shorter side of the video to this value
-///   (preserves aspect ratio if resize_longer_side is None)
-/// * resize_longer_side: resize longer side of the video to this value
-///   (preserves aspect ratio if resize_shorter_side is None)
-/// * hw_accel: hardware acceleration device type, eg cuda, qsv, etc
-/// * ff_filter: optional custom ffmpeg filter to use, eg:
-///   "format=rgb24,scale=w=256:h=256:flags=fast_bilinear"
 
 /// Scaling algorithm for resize operations
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -133,7 +124,7 @@ pub enum ResizeAlgo {
 
 impl ResizeAlgo {
     /// Convert ResizeAlgo to FFmpeg scale filter flag name
-    pub fn to_ffmpeg_flag(&self) -> &'static str {
+    pub fn as_ffmpeg_flag(&self) -> &'static str {
         match self {
             ResizeAlgo::FastBilinear => "fast_bilinear",
             ResizeAlgo::Bilinear => "bilinear",
@@ -145,6 +136,18 @@ impl ResizeAlgo {
     }
 }
 
+/// Config to instantiate a Decoder
+/// * threads: number of threads to use
+/// * resize_shorter_side: resize shorter side of the video to this value
+///   (preserves aspect ratio if resize_longer_side is None)
+/// * resize_longer_side: resize longer side of the video to this value
+///   (preserves aspect ratio if resize_shorter_side is None)
+/// * target_width: optional target width
+/// * target_height: optional target height
+/// * resize_algo: algorithm to use when resizing
+/// * hw_accel: hardware acceleration device type, eg cuda, qsv, etc
+/// * ff_filter: optional custom ffmpeg filter to use, eg:
+///   "format=rgb24,scale=w=256:h=256:flags=fast_bilinear"
 #[derive(Default)]
 pub struct DecoderConfig {
     threads: usize,
