@@ -13,56 +13,69 @@ use once_cell::sync::Lazy;
 use std::ffi::c_void;
 use yuv::{YuvRange, YuvStandardMatrix};
 
-/// Cached result of whether buffer filter supports colorspace and range options (FFmpeg >= 7.0)
-/// Tested once at first use with a single filter graph creation
-static BUFFER_COLORSPACE_SUPPORT: Lazy<(bool, bool)> = Lazy::new(|| {
-    let mut graph = filter::Graph::new();
-    let buffer = match filter::find("buffer") {
-        Some(b) => b,
-        None => {
-            warn!("FFmpeg buffer filter not found");
-            return (false, false);
+/// Check if the buffer filter supports a given option (e.g., "colorspace", "range")
+/// by getting the filter's AVClass and searching its options via FFmpeg's introspection API
+fn buffer_filter_has_opt(opt_name: &str) -> bool {
+    use ffmpeg::ffi::{av_opt_find, avfilter_get_by_name, AV_OPT_SEARCH_FAKE_OBJ};
+    use std::ffi::CString;
+
+    unsafe {
+        // Get the AVFilter for "buffer" using FFmpeg's C API
+        let buffer_name = match CString::new("buffer") {
+            Ok(s) => s,
+            Err(_) => return false,
+        };
+        let av_filter_ptr = avfilter_get_by_name(buffer_name.as_ptr());
+
+        if av_filter_ptr.is_null() {
+            warn!("Buffer filter not found via avfilter_get_by_name");
+            return false;
         }
-    };
 
-    // Test both options with a single filter graph
-    let test_args = "video_size=64x64:pix_fmt=yuv420p:time_base=1/25:pixel_aspect=1/1:colorspace=bt709:range=tv";
+        // The AVFilter struct has priv_class member which is the AVClass for filter options
+        let priv_class = (*av_filter_ptr).priv_class;
+        if priv_class.is_null() {
+            // Some filters don't have private options
+            return false;
+        }
 
-    if graph.add(&buffer, "test_in", test_args).is_ok() {
-        // Both supported
-        return (true, true);
+        // Create a mutable pointer variable to hold the priv_class pointer
+        // av_opt_find with AV_OPT_SEARCH_FAKE_OBJ expects a pointer-to-pointer (AVClass**)
+        let mut priv_class_ptr = priv_class;
+
+        // Now search for the option in the filter's AVClass
+        let opt_name_c = match CString::new(opt_name) {
+            Ok(s) => s,
+            Err(_) => return false,
+        };
+
+        // Pass the address of priv_class_ptr (which gives us AVClass**)
+        let av_option = av_opt_find(
+            &mut priv_class_ptr as *mut _ as *mut c_void,
+            opt_name_c.as_ptr(),
+            std::ptr::null(),
+            0,
+            AV_OPT_SEARCH_FAKE_OBJ as i32,
+        );
+
+        !av_option.is_null()
     }
+}
 
-    // Try colorspace only
-    let mut graph2 = filter::Graph::new();
-    let buffer2 = filter::find("buffer").unwrap();
-    let colorspace_supported = graph2
-        .add(
-            &buffer2,
-            "test_in",
-            "video_size=64x64:pix_fmt=yuv420p:time_base=1/25:pixel_aspect=1/1:colorspace=bt709",
-        )
-        .is_ok();
+/// Cached result of whether buffer filter supports colorspace and range options (FFmpeg >= 7.0)
+/// Tested once at first use via FFmpeg option introspection
+static BUFFER_COLORSPACE_SUPPORT: Lazy<(bool, bool)> = Lazy::new(|| {
+    let supports_colorspace = buffer_filter_has_opt("colorspace");
+    let supports_range = buffer_filter_has_opt("range");
 
-    // Try range only
-    let mut graph3 = filter::Graph::new();
-    let buffer3 = filter::find("buffer").unwrap();
-    let range_supported = graph3
-        .add(
-            &buffer3,
-            "test_in",
-            "video_size=64x64:pix_fmt=yuv420p:time_base=1/25:pixel_aspect=1/1:range=tv",
-        )
-        .is_ok();
-
-    if !colorspace_supported || !range_supported {
-        warn!(
-            "FFmpeg buffer filter does not support colorspace/range options (FFmpeg < 7.0). \
-             Some videos may have slight color inconsistencies between seek and sequential access."
+    if !supports_colorspace || !supports_range {
+        debug!(
+            "Buffer filter option support: colorspace={}, range={} (FFmpeg < 7.0 may lack these)",
+            supports_colorspace, supports_range
         );
     }
 
-    (colorspace_supported, range_supported)
+    (supports_colorspace, supports_range)
 });
 
 pub struct FilterConfig<'a> {
