@@ -2,7 +2,8 @@ use crate::decoder::ResizeAlgo;
 use crate::ffi_hwaccel::codec_context_get_hw_frames_ctx;
 use crate::hwaccel::HardwareAccelerationContext;
 use ffmpeg::ffi::{
-    av_buffersrc_parameters_alloc, av_buffersrc_parameters_set, av_free, AVPixelFormat,
+    av_buffersink_get_h, av_buffersink_get_w, av_buffersrc_parameters_alloc,
+    av_buffersrc_parameters_set, av_free, AVPixelFormat,
 };
 use ffmpeg::filter;
 use ffmpeg::format::Pixel as AvPixel;
@@ -191,6 +192,19 @@ pub fn create_filters(
         .parse(filter_cfg.spec)?;
     graph.validate()?;
     Ok(graph)
+}
+
+pub fn graph_output_size(graph: &mut filter::Graph) -> Option<(u32, u32)> {
+    let sink_ctx = graph.get("out")?;
+    unsafe {
+        let width = av_buffersink_get_w(sink_ctx.as_ptr());
+        let height = av_buffersink_get_h(sink_ctx.as_ptr());
+        if width > 0 && height > 0 {
+            Some((width as u32, height as u32))
+        } else {
+            None
+        }
+    }
 }
 
 pub fn create_hwbuffer_src(
@@ -462,6 +476,42 @@ pub fn create_filter_spec(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Once;
+
+    fn init_ffmpeg() {
+        static INIT: Once = Once::new();
+        INIT.call_once(|| {
+            ffmpeg::init().expect("ffmpeg init failed");
+        });
+    }
+
+    fn build_graph_for_test(width: u32, height: u32, spec: &str) -> filter::Graph {
+        init_ffmpeg();
+
+        let mut graph = filter::Graph::new();
+        let buffer = filter::find("buffer").expect("buffer filter not found");
+        let buffersink = filter::find("buffersink").expect("buffersink filter not found");
+
+        let pix_fmt_name = AvPixel::YUV420P
+            .descriptor()
+            .map(|d| d.name())
+            .unwrap_or("yuv420p");
+        let args = format!(
+            "video_size={}x{}:pix_fmt={}:time_base=1/30:pixel_aspect=1/1",
+            width, height, pix_fmt_name
+        );
+        graph.add(&buffer, "in", &args).expect("add buffer");
+        graph.add(&buffersink, "out", "").expect("add buffersink");
+        graph
+            .output("in", 0)
+            .expect("graph output")
+            .input("out", 0)
+            .expect("graph input")
+            .parse(spec)
+            .expect("graph parse");
+        graph.validate().expect("graph validate");
+        graph
+    }
 
     // ==================== parse_scale_from_filter tests ====================
 
@@ -619,5 +669,48 @@ mod tests {
             swap_scale_dimensions("scale=width=360:height=640"),
             "scale=width=640:height=360"
         );
+    }
+
+    // ==================== graph_output_size tests ====================
+
+    #[test]
+    fn test_graph_output_size_with_expression() {
+        let mut graph = build_graph_for_test(1024, 768, "format=yuv420p,scale=iw/2:ih/2");
+        let size = graph_output_size(&mut graph).expect("output size");
+        assert_eq!(size, (512, 384));
+    }
+
+    #[test]
+    fn test_graph_output_size_with_min_and_force_ar() {
+        let mut graph = build_graph_for_test(
+            1024,
+            768,
+            "format=yuv420p,scale='min(720\\,iw)':'min(720\\,ih)':force_original_aspect_ratio=decrease",
+        );
+        let size = graph_output_size(&mut graph).expect("output size");
+        assert_eq!(size, (720, 540));
+    }
+
+    #[test]
+    fn test_graph_output_size_with_raw_string() {
+        let mut graph = build_graph_for_test(
+            1024,
+            768,
+            r#"format=yuv420p,scale='min(720\,iw)':'min(720\,ih)':force_original_aspect_ratio=decrease"#,
+        );
+        let size = graph_output_size(&mut graph).expect("output size");
+        assert_eq!(size, (720, 540));
+    }
+
+    #[test]
+    fn test_graph_output_size_with_pad() {
+        let mut graph = build_graph_for_test(
+            1024,
+            768,
+            "format=yuv420p,scale='min(720\\,iw)':'min(720\\,ih)':force_original_aspect_ratio=decrease,\
+pad=w=max(iw\\,ih):h=max(iw\\,ih):x=(ow-iw)/2:y=(oh-ih)/2",
+        );
+        let size = graph_output_size(&mut graph).expect("output size");
+        assert_eq!(size, (720, 720));
     }
 }
