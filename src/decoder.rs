@@ -161,6 +161,7 @@ pub struct DecoderConfig {
 }
 
 impl DecoderConfig {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         threads: usize,
         resize_shorter_side: Option<f64>,

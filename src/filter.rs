@@ -90,6 +90,7 @@ pub struct FilterConfig<'a> {
     color_range: YuvRange,
 }
 impl<'a> FilterConfig<'a> {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         height: u32,
         width: u32,
@@ -345,6 +346,7 @@ fn swap_scale_dimensions(filter_spec: &str) -> String {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn create_filter_spec(
     width: u32,
     height: u32,
