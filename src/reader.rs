@@ -5,7 +5,7 @@ use ffmpeg::media::Type;
 use ffmpeg::util::frame::video::Video;
 use ffmpeg::util::rational::Rational;
 use ffmpeg_next as ffmpeg;
-use log::debug;
+use log::{debug, warn};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::Instant;
@@ -14,7 +14,7 @@ use crate::convert::{
     convert_nv12_to_ndarray_rgb24, convert_yuv_to_ndarray_rgb24, get_colorrange, get_colorspace,
 };
 use crate::decoder::{DecoderConfig, OutOfBoundsMode, VideoDecoder, VideoReducer};
-use crate::filter::{create_filter_spec, create_filters, FilterConfig};
+use crate::filter::{create_filter_spec, create_filters, graph_output_size, FilterConfig};
 use crate::hwaccel::{HardwareAccelerationContext, HardwareAccelerationDeviceType};
 use crate::info::{
     collect_video_metadata, extract_video_params, get_frame_count, get_resized_dim, StreamInfo,
@@ -238,7 +238,7 @@ impl VideoReader {
         height = out_height;
 
         debug!(
-            "Filter spec: {}, output size: {}x{}",
+            "Filter spec (pre-graph): {}, target size: {}x{}",
             filter_spec, width, height
         );
         let time_base_rational = video_info
@@ -269,17 +269,38 @@ impl VideoReader {
             color_range,
         );
 
-        let graph = create_filters(&mut video, hw_format, filter_cfg)?;
+        let mut graph = create_filters(&mut video, hw_format, filter_cfg)?;
 
-        // Swap dimensions for 90/270 rotation when user provided a filter without scale
-        // (in that case, filter doesn't handle the dimension swap)
-        let skip_rotation_swap = filter_has_scale || !has_user_filter;
-        if !skip_rotation_swap
-            && rotation_applied
-            && (video_params.rotation.abs() == 90 || video_params.rotation.abs() == 270)
-        {
-            std::mem::swap(&mut height, &mut width);
+        if let Some((out_w, out_h)) = graph_output_size(&mut graph) {
+            width = out_w;
+            height = out_h;
+            debug!("Filter graph output size: {}x{}", width, height);
+        } else {
+            warn!("Failed to get output size from filter graph, using fallback logic");
+            // Swap dimensions for 90/270 rotation when user provided a filter without scale
+            // (in that case, filter doesn't handle the dimension swap)
+            let skip_rotation_swap = filter_has_scale || !has_user_filter;
+            if !skip_rotation_swap
+                && rotation_applied
+                && (video_params.rotation.abs() == 90 || video_params.rotation.abs() == 270)
+            {
+                std::mem::swap(&mut height, &mut width);
+            }
         }
+
+        // Check for odd dimensions with formats that require even dimensions (like yuv420p)
+        if (width % 2 != 0 || height % 2 != 0) && has_user_filter {
+            log::error!(
+                "Filter output has odd dimensions ({}x{}). YUV420P format requires even dimensions. \
+                 Solutions: \
+                 1) Use scale='trunc(iw/4)*2':'trunc(ih/4)*2' to ensure even output, \
+                 2) Add ':force_divisible_by=2' when using force_original_aspect_ratio, \
+                 3) Use scale=iw/2:-2 (where -2 means auto-align to even).",
+                width, height
+            );
+            return Err(ffmpeg::Error::InvalidData);
+        }
+
         Ok(VideoDecoder::new(
             video, height, width, fps, video_info, is_hwaccel, graph,
         ))
