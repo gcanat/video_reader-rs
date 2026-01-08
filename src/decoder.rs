@@ -109,7 +109,6 @@ impl VideoReducer {
     }
 }
 
-
 /// Scaling algorithm for resize operations
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub enum ResizeAlgo {
