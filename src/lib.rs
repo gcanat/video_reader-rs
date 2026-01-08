@@ -115,6 +115,7 @@ impl PyVideoReader {
     ///   - "skip": skip failed frames - returned array may have fewer frames
     ///   - "black": return black (all-zero) frames for failed fetches
     /// * returns a PyVideoReader instance.
+    #[allow(clippy::too_many_arguments)]
     fn new(
         filename: &str,
         threads: Option<usize>,
