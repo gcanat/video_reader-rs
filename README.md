@@ -93,6 +93,29 @@ frames = vr.get_batch(indices)
 * **indices**: list of indices of the frames to get
 * **with_fallback**: False by default, if True will fallback to iterating over all packets of the video and only decoding the frames that match in `indices`. It is safer to use when the video contains B-frames and you really need to get the frames exactly corresponding to the given indices. It can also be faster in some use cases if you have many cpu cores available.
 
+### Handling Out-of-Bounds Indices
+
+When `num_frames` from metadata is inaccurate (e.g., larger than actual frame count), requesting frames near the end may fail. Use the `oob_mode` parameter to control this behavior:
+
+```python
+# Default: raise error on out-of-bounds
+vr = PyVideoReader(filename)
+
+# Skip mode: skip invalid frames, returned array may be smaller
+vr = PyVideoReader(filename, oob_mode="skip")
+frames = vr.get_batch([0, 1, 999999])  # Returns 2 frames if 999999 is invalid
+
+# Black mode: return black (all-zero) frames for invalid indices
+vr = PyVideoReader(filename, oob_mode="black")
+frames = vr.get_batch([0, 1, 999999])  # Returns 3 frames, last one is all zeros
+```
+
+| Mode | Behavior |
+|------|----------|
+| `"error"` (default) | Raise error on invalid frame |
+| `"skip"` | Skip invalid frames, array may be smaller than requested |
+| `"black"` | Return black frame for invalid indices |
+
 It is also possible to directly use slicing or indexing:
 ```python
 last_frame = vr[-1]
@@ -137,6 +160,176 @@ for i in range(0, video_length, chunk_size):
         end_frame=end,
     )
     # do something with this chunk of 800 `frames`
+```
+
+## 🎨 Custom Filter Support
+
+You can use FFmpeg's powerful filter system to customize video processing. This is useful when you need:
+- Fixed output dimensions (not preserving aspect ratio)
+- Specific scaling algorithms
+- Additional filters like crop, pad, etc.
+
+### Basic Usage
+
+```python
+from video_reader import PyVideoReader
+
+# Scale to fixed 256x256 (no aspect ratio preservation)
+vr = PyVideoReader(
+    filename,
+    filter="format=yuv420p,scale=w=256:h=256:flags=fast_bilinear"
+)
+
+# Use higher quality scaling
+vr = PyVideoReader(
+    filename,
+    filter="format=yuv420p,scale=w=224:h=224:flags=lanczos"
+)
+```
+
+### ⚠️ Important: Always Start with `format=yuv420p`
+
+The internal YUV→RGB conversion **requires YUV420P format**. Without it, videos with different pixel formats (like `yuvj420p`, `yuv422p`) will cause errors.
+
+```python
+# ❌ Wrong - may crash on some videos
+filter="scale=w=256:h=256"
+
+# ✅ Correct - works with all videos
+filter="format=yuv420p,scale=w=256:h=256"
+```
+
+### Scale Filter Parameters
+
+**Syntax**: `scale=w=WIDTH:h=HEIGHT:flags=FLAGS`
+
+| Parameter | Description | Example |
+|-----------|-------------|---------|
+| `w` | Output width in pixels | `w=256` |
+| `h` | Output height in pixels | `h=256` |
+| `flags` | Scaling algorithm | `flags=lanczos` |
+
+**Alternative syntax** (shorter):
+```python
+filter="format=yuv420p,scale=256:256"  # width:height
+```
+
+### Scaling Algorithms (`flags`)
+
+| Flag | Quality | Speed | Best For |
+|------|---------|-------|----------|
+| `fast_bilinear` | ⭐⭐ | ⭐⭐⭐⭐⭐ | Real-time, ML training |
+| `bilinear` | ⭐⭐⭐ | ⭐⭐⭐⭐ | General use |
+| `bicubic` | ⭐⭐⭐⭐ | ⭐⭐⭐ | Good quality |
+| `lanczos` | ⭐⭐⭐⭐⭐ | ⭐⭐ | Highest quality, downscaling |
+| `neighbor` | ⭐ | ⭐⭐⭐⭐⭐ | Pixel art, nearest neighbor |
+| `area` | ⭐⭐⭐⭐ | ⭐⭐⭐ | Downscaling |
+| `gauss` | ⭐⭐⭐ | ⭐⭐⭐ | Smooth results |
+
+**Recommendation**:
+- ML training: `fast_bilinear` (fast, good enough)
+- High quality: `lanczos` (best for downscaling)
+- Pixel-perfect: `neighbor` (no interpolation)
+
+### Advanced Examples
+
+```python
+# Crop center 480x480 then scale to 256x256
+filter="format=yuv420p,crop=w=480:h=480,scale=w=256:h=256:flags=lanczos"
+
+# Scale width to 256, height auto (preserve aspect ratio)
+filter="format=yuv420p,scale=w=256:h=-1:flags=bilinear"
+
+# Scale height to 256, width auto (preserve aspect ratio)  
+filter="format=yuv420p,scale=w=-1:h=256:flags=bilinear"
+
+# Pad to square before scaling (letterbox)
+filter="format=yuv420p,pad=w=max(iw\,ih):h=max(iw\,ih):x=(ow-iw)/2:y=(oh-ih)/2,scale=w=256:h=256"
+```
+
+### Filter vs Built-in Resize Options
+
+There are **three ways** to resize video frames, and they are **mutually exclusive**:
+
+| Method | Use Case | Aspect Ratio |
+|--------|----------|--------------|
+| `resize_shorter_side` / `resize_longer_side` | Simple resize with aspect ratio preserved | Preserved |
+| `target_width` + `target_height` | Fixed output dimensions | User-controlled |
+| `filter="...scale=..."` | Custom FFmpeg filter with full control | User-controlled |
+
+⚠️ **You can only use ONE resize method at a time.** Combining them will raise an error:
+
+```python
+# ❌ Error: Multiple resize methods
+vr = PyVideoReader(path, target_width=224, target_height=224, resize_shorter_side=256)
+
+# ❌ Error: Multiple resize methods  
+vr = PyVideoReader(path, target_width=224, target_height=224, filter="scale=256:256")
+
+# ✅ Correct: Use only one method
+vr = PyVideoReader(path, target_width=224, target_height=224)
+```
+
+### Resize with `target_width` / `target_height`
+
+For ML use cases where you need fixed output dimensions, `target_width` and `target_height` provide a simple alternative to custom filters:
+
+```python
+# Resize to fixed 224x224
+vr = PyVideoReader(path, target_width=224, target_height=224)
+
+# With custom scaling algorithm
+vr = PyVideoReader(path, target_width=224, target_height=224, resize_algo="lanczos")
+```
+
+**Parameters:**
+- `target_width`: Output width in pixels (required with target_height)
+- `target_height`: Output height in pixels (required with target_width)  
+- `resize_algo`: Scaling algorithm (optional, default: `fast_bilinear`)
+
+**Scaling Algorithms (`resize_algo`):**
+
+| Value | Quality | Speed | Description |
+|-------|---------|-------|-------------|
+| `fast_bilinear` | ⭐⭐ | ⭐⭐⭐⭐⭐ | Default, fastest |
+| `bilinear` | ⭐⭐⭐ | ⭐⭐⭐⭐ | Bilinear interpolation |
+| `bicubic` | ⭐⭐⭐⭐ | ⭐⭐⭐ | Bicubic interpolation |
+| `nearest` | ⭐ | ⭐⭐⭐⭐⭐ | Nearest neighbor, no interpolation |
+| `area` | ⭐⭐⭐⭐ | ⭐⭐⭐ | Area averaging, good for downscaling |
+| `lanczos` | ⭐⭐⭐⭐⭐ | ⭐⭐ | Highest quality, best for downscaling |
+
+**Note:** You can use `target_width/height` together with non-scale filters like rotation:
+
+```python
+# ✅ This works: non-scale filter + target dimensions
+vr = PyVideoReader(path, filter="format=yuv420p", target_width=224, target_height=224)
+```
+
+### Comparison
+
+```python
+# These produce similar results for 16:9 video:
+vr = PyVideoReader(path, resize_shorter_side=256)  # → 455x256
+vr = PyVideoReader(path, filter="format=yuv420p,scale=w=455:h=256:flags=fast_bilinear")
+
+# Fixed square output - two equivalent methods:
+vr = PyVideoReader(path, target_width=256, target_height=256)  # Simpler, recommended
+vr = PyVideoReader(path, filter="format=yuv420p,scale=w=256:h=256:flags=fast_bilinear")
+```
+
+### Combining with get_batch
+
+Custom filters work seamlessly with all methods:
+
+```python
+vr = PyVideoReader(path, filter="format=yuv420p,scale=w=224:h=224:flags=lanczos")
+
+# All these work correctly:
+frames = vr.decode()                           # Decode all
+batch = vr.get_batch([0, 10, 20])             # Random access
+batch = vr.get_batch([0, 10, 20], with_fallback=False)  # Seek-based
+for frame in vr:                               # Iteration
+    pass
 ```
 
 ## 🧪 Experimental support for Hardware Acceleration

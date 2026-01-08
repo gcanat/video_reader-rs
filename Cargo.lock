@@ -791,6 +791,7 @@ version = "0.3.0"
 dependencies = [
  "env_logger",
  "ffmpeg-next",
+ "libc",
  "log",
  "ndarray",
  "numpy",

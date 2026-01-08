@@ -1,6 +1,7 @@
 use ffmpeg::ffi::{av_image_copy_to_buffer, AVPixelFormat};
 use ffmpeg::util::frame::video::Video;
 use ffmpeg_next as ffmpeg;
+use log::debug;
 use ndarray::parallel::prelude::*;
 use ndarray::{stack, Array2, Array3, Array4, ArrayView3, Axis};
 use yuv::{
@@ -17,7 +18,7 @@ pub fn convert_yuv_to_ndarray_rgb24(
     frame: Video,
     color_space: YuvStandardMatrix,
     color_range: YuvRange,
-) -> Array3<u8> {
+) -> Result<Array3<u8>, ffmpeg::Error> {
     let (buf_vec, frame_width, frame_height, bytes_copied) =
         copy_image(frame, AVPixelFormat::AV_PIX_FMT_YUV420P);
 
@@ -44,10 +45,18 @@ pub fn convert_yuv_to_ndarray_rgb24(
             color_range,
             color_space,
         )
-        .unwrap();
-        Array3::from_shape_vec((frame_height as usize, frame_width as usize, 3_usize), rgb).unwrap()
+        .map_err(|e| {
+            debug!("yuv420_to_rgb failed: {e:?}");
+            ffmpeg::Error::Bug
+        })?;
+        Array3::from_shape_vec((frame_height as usize, frame_width as usize, 3_usize), rgb).map_err(
+            |e| {
+                debug!("from_shape_vec failed: {e:?}");
+                ffmpeg::Error::Bug
+            },
+        )
     } else {
-        Array3::zeros((frame_height as usize, frame_width as usize, 3_usize))
+        Err(ffmpeg::Error::InvalidData)
     }
 }
 
@@ -60,7 +69,7 @@ pub fn convert_nv12_to_ndarray_rgb24(
     frame: Video,
     color_space: YuvStandardMatrix,
     color_range: YuvRange,
-) -> Array3<u8> {
+) -> Result<Array3<u8>, ffmpeg::Error> {
     let (buf_vec, frame_width, frame_height, bytes_copied) =
         copy_image(frame, AVPixelFormat::AV_PIX_FMT_NV12);
 
@@ -85,10 +94,18 @@ pub fn convert_nv12_to_ndarray_rgb24(
             color_space,
             YuvConversionMode::Balanced,
         )
-        .unwrap();
-        Array3::from_shape_vec((frame_height as usize, frame_width as usize, 3_usize), rgb).unwrap()
+        .map_err(|e| {
+            debug!("yuv_nv12_to_rgb failed: {e:?}");
+            ffmpeg::Error::Bug
+        })?;
+        Array3::from_shape_vec((frame_height as usize, frame_width as usize, 3_usize), rgb).map_err(
+            |e| {
+                debug!("from_shape_vec failed: {e:?}");
+                ffmpeg::Error::Bug
+            },
+        )
     } else {
-        Array3::zeros((frame_height as usize, frame_width as usize, 3_usize))
+        Err(ffmpeg::Error::InvalidData)
     }
 }
 
@@ -119,9 +136,9 @@ fn copy_image(mut frame: Video, pix_fmt: AVPixelFormat) -> (Vec<u8>, i32, i32, i
 
 pub fn get_colorspace(height: i32, color_space: &str) -> YuvStandardMatrix {
     match color_space {
-        "BT709" => YuvStandardMatrix::Bt709,
-        "BT601" => YuvStandardMatrix::Bt601,
-        "BT2020" => YuvStandardMatrix::Bt2020,
+        "BT709" => YuvStandardMatrix::Bt709,   // HD, 720P/1080P
+        "BT601" => YuvStandardMatrix::Bt601,   // SD, 480P/576P
+        "BT2020" => YuvStandardMatrix::Bt2020, // UHD, 4K/8K
         "SMPTE240" => YuvStandardMatrix::Smpte240,
         "BT470_6" => YuvStandardMatrix::Bt470_6,
         _ => {
@@ -141,14 +158,14 @@ pub fn get_colorspace(height: i32, color_space: &str) -> YuvStandardMatrix {
 
 pub fn get_colorrange(color_range: &str) -> YuvRange {
     match color_range {
-        "FULL" | "PC" | "JPEG" => YuvRange::Full,
-        _ => YuvRange::Limited,
+        "FULL" | "PC" | "JPEG" => YuvRange::Full, // 0 - 255
+        _ => YuvRange::Limited,                   // 16 - 235
     }
 }
 
 /// Convert RGB video (N, H, W, C) to Grayscale video (N, H, W).
 /// Returns a 3D ndarray with shape (N, H, W).
-pub fn rgb2gray(frames: Array4<u8>) -> Array3<u8> {
+pub fn rgb2gray(frames: Array4<u8>) -> Result<Array3<u8>, ffmpeg::Error> {
     let mut gray = Vec::new();
     frames
         .axis_iter(Axis(0))
@@ -156,7 +173,10 @@ pub fn rgb2gray(frames: Array4<u8>) -> Array3<u8> {
         .map(rgb2gray_2d)
         .collect_into_vec(&mut gray);
     let views: Vec<_> = gray.iter().map(|x| x.view()).collect();
-    stack(Axis(0), &views[..]).unwrap()
+    stack(Axis(0), &views[..]).map_err(|e| {
+        debug!("stack failed: {e:?}");
+        ffmpeg::Error::Bug
+    })
 }
 
 /// Convert RGB Frame (H, W, C) to grayscale (H, W).
@@ -180,7 +200,7 @@ mod tests {
             [[[128, 128, 128], [0, 0, 0]], [[255, 0, 255], [0, 255, 255]]],
         );
         let expected = arr3(&[[[54, 182], [18, 255]], [[128, 0], [73, 201]]]);
-        let result = rgb2gray(input);
+        let result = rgb2gray(input).unwrap();
         assert_eq!(result, expected);
     }
 
