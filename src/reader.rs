@@ -6,7 +6,7 @@ use ffmpeg::util::frame::video::Video;
 use ffmpeg::util::rational::Rational;
 use ffmpeg_next as ffmpeg;
 use log::{debug, warn};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::Path;
 use std::time::Instant;
 
@@ -558,12 +558,14 @@ impl VideoReader {
     pub fn get_batch_safe(&mut self, indices: Vec<usize>) -> Result<VideoArray, ffmpeg::Error> {
         self.failed_indices.clear();
 
-        // For fast membership checks
-        let needed: HashSet<usize> = indices.iter().cloned().collect();
-        let needed_total = needed.len();
+        // Map requested frame index -> all output positions (preserves order and handles duplicates)
+        let mut positions_map: HashMap<usize, Vec<usize>> = HashMap::new();
+        for (pos, &idx) in indices.iter().enumerate() {
+            positions_map.entry(idx).or_default().push(pos);
+        }
+        let needed_total = positions_map.len();
         let min_needed = indices.iter().min().copied().unwrap_or(0);
         let max_needed = indices.iter().max().copied().unwrap_or(0);
-        let mut frame_map: HashMap<usize, FrameArray> = HashMap::with_capacity(needed.len());
 
         // Skip-forward optimization: if requested frame(s) are ahead of or at current position,
         // continue from current position instead of seeking to start
@@ -590,9 +592,33 @@ impl VideoReader {
         // Mark that we've started sequential iteration
         self.sequential_started = true;
 
+        let height = self.decoder.height as usize;
+        let width = self.decoder.width as usize;
+
         let mut decoded = Video::empty();
         let mut curr_idx: usize = start_idx;
         let mut collected: usize = 0;
+
+        // Output staging:
+        // - Skip: store frame ids per output position, frames are stored once
+        // - Black/Error: write directly into output buffer
+        let mut slot_to_frame: Option<Vec<Option<usize>>> = None;
+        let mut frames_store: Vec<FrameArray> = Vec::new();
+        let mut output_batch: Option<VideoArray> = None;
+        let mut found_positions: Option<Vec<bool>> = None;
+
+        match self.oob_mode {
+            OutOfBoundsMode::Skip => {
+                slot_to_frame = Some(vec![None; indices.len()]);
+            }
+            OutOfBoundsMode::Black => {
+                output_batch = Some(Array4::zeros((indices.len(), height, width, 3)));
+            }
+            OutOfBoundsMode::Error => {
+                output_batch = Some(Array4::zeros((indices.len(), height, width, 3)));
+                found_positions = Some(vec![false; indices.len()]);
+            }
+        }
 
         // iterate all packets
         'packets: for (stream, packet) in self.ictx.packets() {
@@ -601,7 +627,7 @@ impl VideoReader {
             }
             self.decoder.video.send_packet(&packet)?;
             while self.decoder.video.receive_frame(&mut decoded).is_ok() {
-                if needed.contains(&curr_idx) {
+                if let Some(positions) = positions_map.get(&curr_idx) {
                     // push frame through filter graph, offload color conversion to async task
                     self.decoder
                         .graph
@@ -626,7 +652,27 @@ impl VideoReader {
                         } else {
                             convert_yuv_to_ndarray_rgb24(rgb_frame, cspace, crange)?
                         };
-                        frame_map.insert(curr_idx, frame);
+                        match self.oob_mode {
+                            OutOfBoundsMode::Skip => {
+                                let frame_id = frames_store.len();
+                                frames_store.push(frame);
+                                if let Some(slots) = slot_to_frame.as_mut() {
+                                    for &pos in positions {
+                                        slots[pos] = Some(frame_id);
+                                    }
+                                }
+                            }
+                            OutOfBoundsMode::Black | OutOfBoundsMode::Error => {
+                                if let Some(batch) = output_batch.as_mut() {
+                                    for &pos in positions {
+                                        batch.slice_mut(s![pos, .., .., ..]).assign(&frame);
+                                        if let Some(found) = found_positions.as_mut() {
+                                            found[pos] = true;
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         collected += 1;
                     }
                 }
@@ -647,7 +693,7 @@ impl VideoReader {
             self.decoder.video.send_eof()?;
             self.eof_sent = true; // Mark that we sent EOF, next call must seek
             while self.decoder.video.receive_frame(&mut decoded).is_ok() {
-                if needed.contains(&curr_idx) {
+                if let Some(positions) = positions_map.get(&curr_idx) {
                     self.decoder
                         .graph
                         .get("in")
@@ -671,7 +717,27 @@ impl VideoReader {
                         } else {
                             convert_yuv_to_ndarray_rgb24(rgb_frame, cspace, crange)?
                         };
-                        frame_map.insert(curr_idx, frame);
+                        match self.oob_mode {
+                            OutOfBoundsMode::Skip => {
+                                let frame_id = frames_store.len();
+                                frames_store.push(frame);
+                                if let Some(slots) = slot_to_frame.as_mut() {
+                                    for &pos in positions {
+                                        slots[pos] = Some(frame_id);
+                                    }
+                                }
+                            }
+                            OutOfBoundsMode::Black | OutOfBoundsMode::Error => {
+                                if let Some(batch) = output_batch.as_mut() {
+                                    for &pos in positions {
+                                        batch.slice_mut(s![pos, .., .., ..]).assign(&frame);
+                                        if let Some(found) = found_positions.as_mut() {
+                                            found[pos] = true;
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         collected += 1;
                     }
                 }
@@ -682,51 +748,47 @@ impl VideoReader {
             }
         }
 
-        let height = self.decoder.height as usize;
-        let width = self.decoder.width as usize;
-
         // Build output based on oob_mode
         let frame_batch = match self.oob_mode {
             OutOfBoundsMode::Skip => {
-                // Collect only found frames, maintaining request order
-                let mut frames: Vec<FrameArray> = Vec::new();
-                for idx in &indices {
-                    if let Some(frame) = frame_map.get(idx) {
-                        frames.push(frame.clone());
-                    } else {
-                        debug!("Skipping frame {} (oob_mode=skip)", idx);
-                    }
-                }
+                let slots = slot_to_frame
+                    .take()
+                    .unwrap_or_else(|| vec![None; indices.len()]);
+                let found_count = slots.iter().filter(|s| s.is_some()).count();
 
-                if frames.is_empty() {
+                if found_count == 0 {
                     Array4::zeros((0, height, width, 3))
                 } else {
-                    let mut batch = Array4::zeros((frames.len(), height, width, 3));
-                    for (i, frame) in frames.iter().enumerate() {
-                        batch.slice_mut(s![i, .., .., ..]).assign(frame);
+                    let mut batch = Array4::zeros((found_count, height, width, 3));
+                    let mut out_i = 0;
+                    for (pos, slot) in slots.iter().enumerate() {
+                        if let Some(frame_id) = slot {
+                            batch
+                                .slice_mut(s![out_i, .., .., ..])
+                                .assign(&frames_store[*frame_id]);
+                            out_i += 1;
+                        } else {
+                            debug!("Skipping frame {} (oob_mode=skip)", indices[pos]);
+                        }
                     }
                     batch
                 }
             }
             OutOfBoundsMode::Black => {
-                // Return zeros for missing frames
-                let mut batch = Array4::zeros((indices.len(), height, width, 3));
-                for (out_i, idx) in indices.iter().enumerate() {
-                    if let Some(frame) = frame_map.get(idx) {
-                        batch.slice_mut(s![out_i, .., .., ..]).assign(frame);
-                    } else {
-                        debug!("Using black frame for {} (oob_mode=black)", idx);
-                    }
-                }
+                let batch = output_batch
+                    .take()
+                    .unwrap_or_else(|| Array4::zeros((indices.len(), height, width, 3)));
                 batch
             }
             OutOfBoundsMode::Error => {
-                // Collect all missing frames, then error
-                let mut batch = Array4::zeros((indices.len(), height, width, 3));
-                for (out_i, idx) in indices.iter().enumerate() {
-                    if let Some(frame) = frame_map.get(idx) {
-                        batch.slice_mut(s![out_i, .., .., ..]).assign(frame);
-                    } else {
+                let batch = output_batch
+                    .take()
+                    .unwrap_or_else(|| Array4::zeros((indices.len(), height, width, 3)));
+                let found = found_positions
+                    .take()
+                    .unwrap_or_else(|| vec![false; indices.len()]);
+                for (pos, idx) in indices.iter().enumerate() {
+                    if !found[pos] {
                         debug!("No frame found for {} (oob_mode=error)", idx);
                         self.failed_indices.push(*idx);
                     }
@@ -817,8 +879,16 @@ impl VideoReader {
                         match self.oob_mode {
                             OutOfBoundsMode::Skip => {
                                 // Store the frame for each position
-                                for pos in positions {
-                                    successful_frames.push((*pos, rgb_frame.clone()));
+                                // Optimization: avoid clone when only one position (common case)
+                                if positions.len() == 1 {
+                                    successful_frames.push((positions[0], rgb_frame));
+                                } else {
+                                    // Rare case: duplicate frame indices requested
+                                    for pos in &positions[..positions.len() - 1] {
+                                        successful_frames.push((*pos, rgb_frame.clone()));
+                                    }
+                                    successful_frames
+                                        .push((positions[positions.len() - 1], rgb_frame));
                                 }
                             }
                             OutOfBoundsMode::Black | OutOfBoundsMode::Error => {
