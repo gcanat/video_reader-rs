@@ -774,12 +774,9 @@ impl VideoReader {
                     batch
                 }
             }
-            OutOfBoundsMode::Black => {
-                let batch = output_batch
-                    .take()
-                    .unwrap_or_else(|| Array4::zeros((indices.len(), height, width, 3)));
-                batch
-            }
+            OutOfBoundsMode::Black => output_batch
+                .take()
+                .unwrap_or_else(|| Array4::zeros((indices.len(), height, width, 3))),
             OutOfBoundsMode::Error => {
                 let batch = output_batch
                     .take()
