@@ -31,6 +31,8 @@ jobs:
           #   target: ppc64le
     env:
       FFMPEG_DIR: ${{ github.workspace }}/ffmpeg
+      FFMPEG_VERS: 7.1.1-6
+      FFMPEG_BASE_URL: https://github.com/PyAV-Org/pyav-ffmpeg/releases/download
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
@@ -43,11 +45,7 @@ jobs:
         id: download_url
         run: |
           DOWNLOAD_URL=$(
-            if [[ "${{ matrix.platform.target }}" == "x86_64" ]]; then
-              echo "https://www.dropbox.com/scl/fi/x76nti8wr8qqoyyxvifa8/ffmpeg-4.4-linux-clang-default.tar.xz?rlkey=${{ secrets.DROPBOX_TOKEN }}&dl=1";
-            elif [[ "${{ matrix.platform.target }}" == "aarch64" ]]; then
-              echo "https://www.dropbox.com/scl/fi/au67c14cgtu10873wtgyq/ffmpeg-n4.4.6-linuxarm64-gpl-shared-4.4.tar.xz?rlkey=${{ secrets.DROPBOX_TOKEN_AARCH64 }}&dl=1"
-            fi
+            echo "${{ env.FFMPEG_BASE_URL }}/${{ env.FFMPEG_VERS }}/ffmpeg-manylinux_${{ matrix.platform.target }}.tar.gz";
           )
           echo "ffmpeg_url=$DOWNLOAD_URL" >> $GITHUB_OUTPUT
 
@@ -57,11 +55,11 @@ jobs:
           target: ${{ matrix.platform.target }}
           before-script-linux: |
             bash .github/workflows/pre_build_${{ matrix.platform.target }}.sh &&
-            curl -L "${{ steps.download_url.outputs.ffmpeg_url }}" -o ffmpeg.tar.xz && mkdir -p ${{ env.FFMPEG_DIR }} &&
-            tar -xf ffmpeg.tar.xz -C ${{ env.FFMPEG_DIR }} --strip-components=1 &&
-            export FFMPEG_DIR=${{ env.FFMPEG_DIR }}
-          args: --release --features ffmpeg_5 --out dist --interpreter '3.9 3.10 3.11 3.12 3.13 3.13t 3.14 3.14t pypy3.11'
+            curl -L "${{ steps.download_url.outputs.ffmpeg_url }}" -o ffmpeg.tar.gz && mkdir -p ${{ env.FFMPEG_DIR }} &&
+            tar -zxf ffmpeg.tar.gz -C ${{ env.FFMPEG_DIR }} && export FFMPEG_DIR=${{ env.FFMPEG_DIR }}
+          args: --release --out dist --interpreter '3.9 3.10 3.11 3.12 3.13 3.13t 3.14 3.14t pypy3.11'
           manylinux: 2_28
+          docker-options: -e CI
       - name: Upload wheels
         uses: actions/upload-artifact@v6.0.0
         with:
