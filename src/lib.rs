@@ -1,21 +1,20 @@
-use ffmpeg::log as ffmpeg_log;
-use ffmpeg_next as ffmpeg;
-use numpy::ndarray::{Dim, IxDyn};
 mod convert;
+mod decoder;
 mod ffi_hwaccel;
-use std::str::FromStr;
 mod filter;
 mod hwaccel;
 mod info;
-use hwaccel::HardwareAccelerationDeviceType;
-use numpy::{IntoPyArray, PyArray};
-mod decoder;
 mod reader;
 mod utils;
 use convert::rgb2gray;
 use decoder::{DecoderConfig, OutOfBoundsMode, ResizeAlgo};
+use ffmpeg::log as ffmpeg_log;
+use ffmpeg_next as ffmpeg;
+use hwaccel::HardwareAccelerationDeviceType;
 use log::debug;
 use ndarray::Array;
+use numpy::ndarray::{Dim, IxDyn};
+use numpy::{IntoPyArray, PyArray};
 use pyo3::{
     exceptions::PyRuntimeError,
     pyclass, pymethods, pymodule,
@@ -25,6 +24,7 @@ use pyo3::{
     Bound, FromPyObject, PyRef, PyRefMut, PyResult, Python,
 };
 use reader::VideoReader;
+use std::str::FromStr;
 use std::sync::Mutex;
 
 use once_cell::sync::Lazy;
@@ -221,74 +221,93 @@ impl PyVideoReader {
     }
 
     fn __getitem__<'a>(&self, py: Python<'a>, key: IntOrSlice) -> PyResult<Bound<'a, FrameOrVid>> {
-        match self.inner.lock() {
-            Ok(mut vr) => {
-                let frame_count = *vr.stream_info().frame_count();
-                let index = key.to_indices(frame_count)?;
-                let index_clone = index.clone();
+        let frame_count = match self.inner.lock() {
+            Ok(vr) => Ok(*vr.stream_info().frame_count()),
+            Err(e) => Err(e),
+        };
+        if let Ok(frame_cnt) = frame_count {
+            let index = key.to_indices(frame_cnt)?;
+            let index_clone = index.clone();
+            // For single frame access (reader[i]), always use seek-based method
+            // This enables skip-forward optimization for sequential access patterns
+            // like: for i in range(n): reader[i]
+            let is_single_frame = matches!(key, IntOrSlice::Int { .. });
 
-                // For single frame access (reader[i]), always use seek-based method
-                // This enables skip-forward optimization for sequential access patterns
-                // like: for i in range(n): reader[i]
-                let is_single_frame = matches!(key, IntOrSlice::Int { .. });
+            let result = py.detach(|| {
 
-                // For slices/lists, use the cost estimation logic
-                let force_sequential = vr.needs_sequential_mode();
-                let use_sequential = if is_single_frame {
-                    // Single frame: use seek-based unless seek is completely broken
-                    force_sequential
-                } else if force_sequential {
-                    true
-                } else {
-                    vr.should_use_sequential(&index)
-                };
+            match self.inner.lock() {
+                Ok(mut vr) => {
 
-                // Try the selected method, with automatic fallback for seek-based -> sequential
-                let res_array = if use_sequential {
-                    vr.get_batch_safe(index.clone())
-                } else {
-                    // Try seek-based first
-                    match vr.get_batch(index.clone()) {
-                        Ok(arr) => Ok(arr),
-                        Err(_) => {
-                            // Fallback to sequential mode if seek-based fails
-                            debug!("__getitem__: get_batch failed, falling back to get_batch_safe");
-                            vr.get_batch_safe(index.clone())
-                        }
-                    }
-                }.map_err(|e| {
-                    // Convert Bug error to a more meaningful message
-                    let failed = vr.failed_indices();
-                    let msg = match e {
-                        ffmpeg::Error::Bug => {
-                            if !failed.is_empty() {
-                                format!(
-                                    "Failed to decode frame(s) at index {:?} (requested {:?}, frame_count={})",
-                                    failed, index_clone, frame_count
-                                )
-                            } else {
-                                format!(
-                                    "Failed to decode frame(s) at index {:?} (frame_count={})",
-                                    index_clone, frame_count
-                                )
+
+                    // For slices/lists, use the cost estimation logic
+                    let force_sequential = vr.needs_sequential_mode();
+                    let use_sequential = if is_single_frame {
+                        // Single frame: use seek-based unless seek is completely broken
+                        force_sequential
+                    } else if force_sequential {
+                        true
+                    } else {
+                        vr.should_use_sequential(&index)
+                    };
+
+                    // Try the selected method, with automatic fallback for seek-based -> sequential
+
+                    let res_array = if use_sequential {
+                        vr.get_batch_safe(index.clone())
+                    } else {
+                        // Try seek-based first
+                        match vr.get_batch(index.clone()) {
+                            Ok(arr) => Ok(arr),
+                            Err(_) => {
+                                // Fallback to sequential mode if seek-based fails
+                                debug!("__getitem__: get_batch failed, falling back to get_batch_safe");
+                                vr.get_batch_safe(index.clone())
                             }
                         }
-                        _ => format!("{e}"),
-                    };
-                    PyRuntimeError::new_err(format!("Error: {msg}"))
-                })?;
+                    }.map_err(|e| {
+                        // Convert Bug error to a more meaningful message
+                        let failed = vr.failed_indices();
+                        let msg = match e {
+                            ffmpeg::Error::Bug => {
+                                if !failed.is_empty() {
+                                    format!(
+                                        "Failed to decode frame(s) at index {:?} (requested {:?}, frame_count={})",
+                                        failed, index_clone, frame_cnt
+                                    )
+                                } else {
+                                    format!(
+                                        "Failed to decode frame(s) at index {:?} (frame_count={})",
+                                        index_clone, frame_cnt
+                                    )
+                                }
+                            }
+                            _ => format!("{e}"),
+                        };
+                        PyRuntimeError::new_err(format!("Error: {msg}"))
+                    })?;
 
-                // remove first dim if key was a single int
-                if matches!(key, IntOrSlice::Int { .. }) {
-                    // Extract the first frame and convert to owned array
-                    use ndarray::Axis;
-                    let single_frame = res_array.index_axis(Axis(0), 0).to_owned();
-                    Ok(single_frame.into_dyn().into_pyarray(py))
-                } else {
-                    Ok(res_array.into_dyn().into_pyarray(py))
-                }
+                    // remove first dim if key was a single int
+                    if is_single_frame {
+                        // Extract the first frame and convert to owned array
+                        use ndarray::Axis;
+                        let single_frame = res_array.index_axis(Axis(0), 0).to_owned();
+                        Ok(single_frame.into_dyn())
+                    } else {
+                        Ok(res_array.into_dyn())
+                    }
+                },
+                Err(e) => Err(PyRuntimeError::new_err(format!("Lock error: {e}"))),
             }
-            Err(e) => Err(PyRuntimeError::new_err(format!("Lock error: {e}"))),
+            });
+
+            match result {
+                Ok(array) => Ok(array.into_pyarray(py)),
+                Err(e) => Err(e),
+            }
+        } else {
+            Err(PyRuntimeError::new_err(
+                "Could not find frame count".to_string(),
+            ))
         }
     }
 
@@ -385,13 +404,17 @@ impl PyVideoReader {
         end_frame: Option<usize>,
         compression_factor: Option<f64>,
     ) -> PyResult<Bound<'a, PyArray<u8, Dim<[usize; 4]>>>> {
-        match self.inner.lock() {
+        let result = py.detach(|| match self.inner.lock() {
             Ok(mut reader) => match reader.decode_video(start_frame, end_frame, compression_factor)
             {
-                Ok(video) => Ok(video.into_pyarray(py)),
+                Ok(video) => Ok(video),
                 Err(e) => Err(PyRuntimeError::new_err(format!("Error: {e}"))),
             },
             Err(e) => Err(PyRuntimeError::new_err(format!("Lock error: {e}"))),
+        });
+        match result {
+            Ok(vid) => Ok(vid.into_pyarray(py)),
+            Err(e) => Err(e),
         }
     }
 
@@ -410,7 +433,7 @@ impl PyVideoReader {
         end_frame: Option<usize>,
         compression_factor: Option<f64>,
     ) -> PyResult<Vec<Bound<'a, Frame>>> {
-        match self.inner.lock() {
+        let result = py.detach(|| match self.inner.lock() {
             Ok(mut reader) => {
                 let res_decode = RUNTIME
                     .block_on(async {
@@ -419,12 +442,16 @@ impl PyVideoReader {
                             .await
                     })
                     .map_err(|e| PyRuntimeError::new_err(format!("Error: {e}")))?;
-                Ok(res_decode
-                    .into_iter()
-                    .map(|x| x.into_pyarray(py))
-                    .collect::<Vec<_>>())
+                Ok(res_decode)
             }
             Err(e) => Err(PyRuntimeError::new_err(format!("Lock error: {e}"))),
+        });
+        match result {
+            Ok(vid) => Ok(vid
+                .into_iter()
+                .map(|x| x.into_pyarray(py))
+                .collect::<Vec<_>>()),
+            Err(e) => Err(e),
         }
     }
 
@@ -442,17 +469,21 @@ impl PyVideoReader {
         end_frame: Option<usize>,
         compression_factor: Option<f64>,
     ) -> PyResult<Bound<'a, PyArray<u8, Dim<[usize; 3]>>>> {
-        match self.inner.lock() {
+        let result = py.detach(|| match self.inner.lock() {
             Ok(mut reader) => match reader.decode_video(start_frame, end_frame, compression_factor)
             {
                 Ok(video) => {
                     let gray_video = rgb2gray(video)
                         .map_err(|e| PyRuntimeError::new_err(format!("Error: {e}")))?;
-                    Ok(gray_video.into_pyarray(py))
+                    Ok(gray_video)
                 }
                 Err(e) => Err(PyRuntimeError::new_err(format!("Error: {e}"))),
             },
             Err(e) => Err(PyRuntimeError::new_err(format!("Lock error: {e}"))),
+        });
+        match result {
+            Ok(vid) => Ok(vid.into_pyarray(py)),
+            Err(e) => Err(e),
         }
     }
 
@@ -469,7 +500,8 @@ impl PyVideoReader {
         indices: Vec<usize>,
         with_fallback: Option<bool>,
     ) -> PyResult<Bound<'a, PyArray<u8, Dim<[usize; 4]>>>> {
-        match self.inner.lock() {
+        let result = py.detach(|| {
+            match self.inner.lock() {
             Ok(mut vr) => {
                 // For videos with negative PTS/DTS, verify if seek actually works
                 // Some negative DTS videos work fine (e.g., time_base 1/15360)
@@ -500,49 +532,35 @@ impl PyVideoReader {
                     }
                 };
 
-                if use_sequential {
-                    debug!("Using sequential method (get_batch_safe)");
-                    match vr.get_batch_safe(indices.clone()) {
-                        Ok(batch) => Ok(batch.into_pyarray(py)),
-                        Err(e) => {
-                            // Convert Bug error to a more meaningful message
-                            let failed = vr.failed_indices();
-                            let msg = match e {
-                                ffmpeg::Error::Bug => {
-                                    if !failed.is_empty() {
-                                        format!("Out of bounds: frame indices {:?} exceed video length or could not be decoded", failed)
-                                    } else {
-                                        "Out of bounds: frame index exceeds video length or could not be decoded".to_string()
-                                    }
+                let batch_res = if use_sequential { vr.get_batch_safe(indices.clone()) } else { vr.get_batch(indices.clone())};
+                match batch_res {
+                    Ok(batch) => Ok(batch),
+                    Err(e) => {
+                        // Convert Bug error to a more meaningful message
+                        let failed = vr.failed_indices();
+                        let msg = match e {
+                            ffmpeg::Error::Bug => {
+                                if !failed.is_empty() {
+                                    format!("Out of bounds: frame indices {:?} exceed video length or could not be decoded", failed)
+                                } else {
+                                    "Out of bounds: frame index exceeds video length or could not be decoded".to_string()
                                 }
-                                _ => format!("{e}"),
-                            };
-                            Err(PyRuntimeError::new_err(format!("Error: {msg}")))
-                        }
-                    }
-                } else {
-                    debug!("Using seek-based method (get_batch)");
-                    match vr.get_batch(indices.clone()) {
-                        Ok(batch) => Ok(batch.into_pyarray(py)),
-                        Err(e) => {
-                            // Convert Bug error to a more meaningful message
-                            let failed = vr.failed_indices();
-                            let msg = match e {
-                                ffmpeg::Error::Bug => {
-                                    if !failed.is_empty() {
-                                        format!("Out of bounds: frame indices {:?} exceed video length or could not be decoded", failed)
-                                    } else {
-                                        "Out of bounds: frame index exceeds video length or could not be decoded".to_string()
-                                    }
-                                }
-                                _ => format!("{e}"),
-                            };
-                            Err(PyRuntimeError::new_err(format!("Error: {msg}")))
-                        }
+                            }
+                            _ => format!("{e}"),
+                        };
+                        Err(PyRuntimeError::new_err(format!("Error: {msg}")))
                     }
                 }
-            }
+            },
             Err(e) => Err(PyRuntimeError::new_err(format!("Lock error: {e}"))),
+            }
+
+
+            });
+
+        match result {
+            Ok(batch) => Ok(batch.into_pyarray(py)),
+            Err(e) => Err(e),
         }
     }
 
