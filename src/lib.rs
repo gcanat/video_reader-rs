@@ -251,7 +251,6 @@ impl PyVideoReader {
                     };
 
                     // Try the selected method, with automatic fallback for seek-based -> sequential
-
                     let res_array = if use_sequential {
                         vr.get_batch_safe(index.clone())
                     } else {
@@ -269,18 +268,11 @@ impl PyVideoReader {
                         let failed = vr.failed_indices();
                         let msg = match e {
                             ffmpeg::Error::Bug => {
-                                if !failed.is_empty() {
-                                    format!(
-                                        "Failed to decode frame(s) at index {:?} (requested {:?}, frame_count={})",
-                                        failed, index_clone, frame_cnt
-                                    )
-                                } else {
-                                    format!(
-                                        "Failed to decode frame(s) at index {:?} (frame_count={})",
-                                        index_clone, frame_cnt
-                                    )
-                                }
-                            }
+                                format!(
+                                    "Failed to decode frame(s) at index {:?} (requested {:?}, frame_count={})",
+                                    failed, index_clone, frame_cnt
+                                )
+                            },
                             _ => format!("{e}"),
                         };
                         PyRuntimeError::new_err(format!("Error: {msg}"))
@@ -510,26 +502,9 @@ impl PyVideoReader {
 
                 // Determine which method to use
                 let use_sequential = match with_fallback {
-                    Some(true) => true, // Explicitly use sequential
-                    Some(false) => {
-                        // User requested seek-based, but force sequential if seek is broken
-                        if force_sequential {
-                            debug!("Seek verification failed - forcing sequential mode");
-                            true
-                        } else {
-                            false
-                        }
-                    }
-                    None => {
-                        // Auto mode: if seek is broken, use sequential
-                        if force_sequential {
-                            debug!("Seek verification failed - using sequential mode");
-                            true
-                        } else {
-                            // estimate which is faster
-                            vr.should_use_sequential(&indices)
-                        }
-                    }
+                    Some(true) => true,
+                    Some(false) => force_sequential,
+                    None => force_sequential || vr.should_use_sequential(&indices),
                 };
 
                 let batch_res = if use_sequential { vr.get_batch_safe(indices.clone()) } else { vr.get_batch(indices.clone())};
@@ -540,12 +515,8 @@ impl PyVideoReader {
                         let failed = vr.failed_indices();
                         let msg = match e {
                             ffmpeg::Error::Bug => {
-                                if !failed.is_empty() {
-                                    format!("Out of bounds: frame indices {:?} exceed video length or could not be decoded", failed)
-                                } else {
-                                    "Out of bounds: frame index exceeds video length or could not be decoded".to_string()
-                                }
-                            }
+                                format!("Out of bounds: frame indices {:?} exceed video length or could not be decoded", failed)
+                            },
                             _ => format!("{e}"),
                         };
                         Err(PyRuntimeError::new_err(format!("Error: {msg}")))
