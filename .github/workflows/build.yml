@@ -50,7 +50,7 @@ jobs:
           echo "ffmpeg_url=$DOWNLOAD_URL" >> $GITHUB_OUTPUT
 
       - name: Build wheels
-        uses: PyO3/maturin-action@86b9d133d34bc1b40018696f782949dac11bd380  # v1.49.4
+        uses: PyO3/maturin-action@b1bd829e37fef14c63f19162034228a2f3dc1021  # v1.50.0
         with:
           target: ${{ matrix.platform.target }}
           before-script-linux: |
@@ -88,7 +88,7 @@ jobs:
   #       with:
   #         python-version: '3.11'
   #   - name: Build wheels
-  #     uses: PyO3/maturin-action@86b9d133d34bc1b40018696f782949dac11bd380 # v1.49.4
+  #     uses: PyO3/maturin-action@b1bd829e37fef14c63f19162034228a2f3dc1021 # v1.50.0
   #     with:
   #       target: ${{ matrix.platform.target }}
   #       before-script-linux: |
@@ -148,7 +148,7 @@ jobs:
         run: pip install delvewheel
 
       - name: Build wheel
-        uses: PyO3/maturin-action@86b9d133d34bc1b40018696f782949dac11bd380  # v1.49.4
+        uses: PyO3/maturin-action@b1bd829e37fef14c63f19162034228a2f3dc1021  # v1.50.0
         with:
           target: ${{ matrix.platform.target }}
           args: --release --out dist --find-interpreter
@@ -185,7 +185,7 @@ jobs:
           brew install ffmpeg &&
           pip install delocate
       - name: Build wheels
-        uses: PyO3/maturin-action@86b9d133d34bc1b40018696f782949dac11bd380  # v1.49.4
+        uses: PyO3/maturin-action@b1bd829e37fef14c63f19162034228a2f3dc1021  # v1.50.0
         with:
           target: ${{ matrix.platform.target }}
           args: --release --out dist --find-interpreter
@@ -208,7 +208,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Build sdist
-        uses: PyO3/maturin-action@86b9d133d34bc1b40018696f782949dac11bd380  # v1.49.4
+        uses: PyO3/maturin-action@b1bd829e37fef14c63f19162034228a2f3dc1021  # v1.50.0
         with:
           command: sdist
           args: --out dist
