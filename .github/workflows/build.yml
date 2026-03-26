@@ -19,10 +19,10 @@ jobs:
         platform:
           - runner: ubuntu-24.04
             target: x86_64
+          - runner: ubuntu-24.04-arm
+            target: aarch64
           # - runner: ubuntu-latest
           #   target: x86
-          # - runner: ubuntu-22.04
-          #   target: aarch64
           # - runner: ubuntu-latest
           #   target: armv7
           # - runner: ubuntu-latest
@@ -58,10 +58,9 @@ jobs:
             curl -L "${{ steps.download_url.outputs.ffmpeg_url }}" -o ffmpeg.tar.gz
             mkdir -p ${{ env.FFMPEG_DIR }}
             tar -zxf ffmpeg.tar.gz -C ${{ env.FFMPEG_DIR }}
-            export FFMPEG_DIR=${{ env.FFMPEG_DIR }}
           args: --release --out dist --interpreter '3.9 3.10 3.11 3.12 3.13 3.13t 3.14 3.14t pypy3.11'
           manylinux: 2_34
-          docker-options: -e CI
+          docker-options: -e CI -e FFMPEG_DIR=${{ env.FFMPEG_DIR }}
       - name: Upload wheels
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f  # v7.0.0
         with:
