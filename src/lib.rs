@@ -91,8 +91,7 @@ fn to_dlpack_capsule<'py>(
             if pyo3::ffi::PyCapsule_IsValid(capsule, c"used_dltensor_versioned".as_ptr()) == 1 {
                 return;
             }
-            let ptr =
-                pyo3::ffi::PyCapsule_GetPointer(capsule, c"dltensor_versioned".as_ptr());
+            let ptr = pyo3::ffi::PyCapsule_GetPointer(capsule, c"dltensor_versioned".as_ptr());
             if ptr.is_null() {
                 pyo3::ffi::PyErr_WriteUnraisable(capsule);
                 return;
@@ -102,11 +101,8 @@ fn to_dlpack_capsule<'py>(
     }
     unsafe {
         let raw = tensor.into_raw() as *mut std::ffi::c_void;
-        let capsule = pyo3::ffi::PyCapsule_New(
-            raw,
-            c"dltensor_versioned".as_ptr(),
-            Some(capsule_deleter),
-        );
+        let capsule =
+            pyo3::ffi::PyCapsule_New(raw, c"dltensor_versioned".as_ptr(), Some(capsule_deleter));
         Bound::from_owned_ptr_or_err(py, capsule)
     }
 }
@@ -117,9 +113,14 @@ fn into_py_tensor<'py>(
     tensor: SafeManagedTensorVersioned,
 ) -> PyResult<Bound<'py, pyo3::types::PyAny>> {
     let raw = unsafe { tensor.into_raw() } as usize;
-    Ok(pyo3::Py::new(py, PyDlPackTensor { ptr: AtomicUsize::new(raw) })?
-        .into_bound(py)
-        .into_any())
+    Ok(pyo3::Py::new(
+        py,
+        PyDlPackTensor {
+            ptr: AtomicUsize::new(raw),
+        },
+    )?
+    .into_bound(py)
+    .into_any())
 }
 
 #[derive(FromPyObject)]

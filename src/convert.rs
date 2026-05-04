@@ -48,7 +48,11 @@ pub fn convert_yuv_to_ndarray_rgb24(
             debug!("yuv420_to_rgb failed: {e:?}");
             ffmpeg::Error::Bug
         })?;
-        Ok(FrameArray::new(rgb, frame_height as usize, frame_width as usize))
+        Ok(FrameArray::new(
+            rgb,
+            frame_height as usize,
+            frame_width as usize,
+        ))
     } else {
         Err(ffmpeg::Error::InvalidData)
     }
@@ -90,7 +94,11 @@ pub fn convert_nv12_to_ndarray_rgb24(
             debug!("yuv_nv12_to_rgb failed: {e:?}");
             ffmpeg::Error::Bug
         })?;
-        Ok(FrameArray::new(rgb, frame_height as usize, frame_width as usize))
+        Ok(FrameArray::new(
+            rgb,
+            frame_height as usize,
+            frame_width as usize,
+        ))
     } else {
         Err(ffmpeg::Error::InvalidData)
     }

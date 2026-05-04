@@ -760,7 +760,9 @@ impl VideoReader {
                     let mut out_i = 0;
                     for (pos, slot) in slots.iter().enumerate() {
                         if let Some(frame_id) = slot {
-                            batch.get_frame_mut(out_i).copy_from_slice(&frames_store[*frame_id].data);
+                            batch
+                                .get_frame_mut(out_i)
+                                .copy_from_slice(&frames_store[*frame_id].data);
                             out_i += 1;
                         } else {
                             debug!("Skipping frame {} (oob_mode=skip)", indices[pos]);

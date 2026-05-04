@@ -13,7 +13,11 @@ pub struct FrameTensor {
 
 impl FrameTensor {
     pub fn new(data: Vec<u8>, height: usize, width: usize) -> Self {
-        Self { data, height, width }
+        Self {
+            data,
+            height,
+            width,
+        }
     }
 }
 
@@ -72,7 +76,12 @@ impl VideoArray {
         for frame in frames {
             data.extend_from_slice(&frame.data);
         }
-        Self { data, n, height, width }
+        Self {
+            data,
+            n,
+            height,
+            width,
+        }
     }
 
     pub fn frame_size(&self) -> usize {
@@ -89,7 +98,11 @@ impl VideoArray {
         let h = self.height;
         let w = self.width;
         self.data.truncate(h * w * 3);
-        FrameTensor { data: self.data, height: h, width: w }
+        FrameTensor {
+            data: self.data,
+            height: h,
+            width: w,
+        }
     }
 
     /// Convert to ndarray Array4 for internal processing (e.g. grayscale conversion).
