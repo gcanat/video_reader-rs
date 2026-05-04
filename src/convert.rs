@@ -1,3 +1,4 @@
+use crate::utils::FrameArray;
 use ffmpeg::ffi::{av_image_copy_to_buffer, AVPixelFormat};
 use ffmpeg::util::frame::video::Video;
 use ffmpeg_next as ffmpeg;
@@ -18,11 +19,9 @@ pub fn convert_yuv_to_ndarray_rgb24(
     frame: Video,
     color_space: YuvStandardMatrix,
     color_range: YuvRange,
-) -> Result<Array3<u8>, ffmpeg::Error> {
+) -> Result<FrameArray, ffmpeg::Error> {
     let (buf_vec, frame_width, frame_height, bytes_copied) =
         copy_image(frame, AVPixelFormat::AV_PIX_FMT_YUV420P);
-
-    // let colorspace = get_colorspace(frame_height, color_space.as_str());
 
     if bytes_copied == buf_vec.len() as i32 {
         let mut rgb = vec![0_u8; (frame_width * frame_height * 3) as usize];
@@ -49,12 +48,7 @@ pub fn convert_yuv_to_ndarray_rgb24(
             debug!("yuv420_to_rgb failed: {e:?}");
             ffmpeg::Error::Bug
         })?;
-        Array3::from_shape_vec((frame_height as usize, frame_width as usize, 3_usize), rgb).map_err(
-            |e| {
-                debug!("from_shape_vec failed: {e:?}");
-                ffmpeg::Error::Bug
-            },
-        )
+        Ok(FrameArray::new(rgb, frame_height as usize, frame_width as usize))
     } else {
         Err(ffmpeg::Error::InvalidData)
     }
@@ -69,11 +63,9 @@ pub fn convert_nv12_to_ndarray_rgb24(
     frame: Video,
     color_space: YuvStandardMatrix,
     color_range: YuvRange,
-) -> Result<Array3<u8>, ffmpeg::Error> {
+) -> Result<FrameArray, ffmpeg::Error> {
     let (buf_vec, frame_width, frame_height, bytes_copied) =
         copy_image(frame, AVPixelFormat::AV_PIX_FMT_NV12);
-
-    // let colorspace = get_colorspace(frame_width, color_space.as_str());
 
     if bytes_copied == buf_vec.len() as i32 {
         let mut rgb = vec![0_u8; (frame_width * frame_height * 3) as usize];
@@ -98,12 +90,7 @@ pub fn convert_nv12_to_ndarray_rgb24(
             debug!("yuv_nv12_to_rgb failed: {e:?}");
             ffmpeg::Error::Bug
         })?;
-        Array3::from_shape_vec((frame_height as usize, frame_width as usize, 3_usize), rgb).map_err(
-            |e| {
-                debug!("from_shape_vec failed: {e:?}");
-                ffmpeg::Error::Bug
-            },
-        )
+        Ok(FrameArray::new(rgb, frame_height as usize, frame_width as usize))
     } else {
         Err(ffmpeg::Error::InvalidData)
     }

@@ -21,6 +21,7 @@ license-files = [
 
 [tool.maturin]
 features = ["pyo3/extension-module", "pyo3/abi3-py39"]
+python-source = "python"
 
 [tool.ruff]
 line-length = 120

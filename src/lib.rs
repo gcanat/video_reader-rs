@@ -8,13 +8,13 @@ mod reader;
 mod utils;
 use convert::rgb2gray;
 use decoder::{DecoderConfig, OutOfBoundsMode, ResizeAlgo};
+use dlpark::prelude::*;
 use ffmpeg::log as ffmpeg_log;
 use ffmpeg_next as ffmpeg;
 use hwaccel::HardwareAccelerationDeviceType;
 use log::debug;
 use ndarray::Array;
-use numpy::ndarray::{Dim, IxDyn};
-use numpy::{IntoPyArray, PyArray};
+use once_cell::sync::Lazy;
 use pyo3::{
     exceptions::PyRuntimeError,
     pyclass, pymethods, pymodule,
@@ -25,10 +25,10 @@ use pyo3::{
 };
 use reader::VideoReader;
 use std::str::FromStr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
-
-use once_cell::sync::Lazy;
 use tokio::runtime::{self, Runtime};
+use utils::{DlPackTensor, VideoArray};
 
 static RUNTIME: Lazy<Runtime> = Lazy::new(|| {
     runtime::Builder::new_multi_thread()
@@ -37,8 +37,90 @@ static RUNTIME: Lazy<Runtime> = Lazy::new(|| {
         .unwrap_or_else(|e| panic!("Failed to build tokio runtime: {e}"))
 });
 
-type Frame = PyArray<u8, Dim<[usize; 3]>>;
-type FrameOrVid = PyArray<u8, IxDyn>;
+/// Python-facing DLPack tensor implementing the Array API protocol.
+///
+/// Exposes `__dlpack__()` and `__dlpack_device__()` so frameworks can consume it via
+/// `np.from_dlpack(t)`, `torch.from_dlpack(t)`, etc.
+///
+/// The raw pointer is stored as `usize` so the struct is `Send` (required by `#[pyclass]`).
+/// Ownership is transferred on the first `__dlpack__()` call; subsequent calls raise an error.
+#[pyclass(name = "DlPackTensor")]
+struct PyDlPackTensor {
+    ptr: AtomicUsize,
+}
+
+impl Drop for PyDlPackTensor {
+    fn drop(&mut self) {
+        let raw = self.ptr.swap(0, Ordering::SeqCst);
+        if raw != 0 {
+            unsafe { drop(SafeManagedTensorVersioned::from_raw(raw as *mut _)) };
+        }
+    }
+}
+
+#[pymethods]
+impl PyDlPackTensor {
+    #[pyo3(signature = (stream=None))]
+    fn __dlpack__<'py>(
+        &self,
+        py: Python<'py>,
+        stream: Option<pyo3::Py<pyo3::types::PyAny>>,
+    ) -> PyResult<Bound<'py, pyo3::types::PyAny>> {
+        let _ = stream;
+        let raw = self.ptr.swap(0, Ordering::SeqCst);
+        if raw == 0 {
+            return Err(PyRuntimeError::new_err("DLPack tensor already consumed"));
+        }
+        let tensor = unsafe { SafeManagedTensorVersioned::from_raw(raw as *mut _) };
+        to_dlpack_capsule(py, tensor)
+    }
+
+    fn __dlpack_device__(&self) -> (u32, u32) {
+        (1, 0) // kDLCPU = 1, device_id = 0
+    }
+}
+
+/// Build a PyCapsule named "dltensor_versioned" from an owned `SafeManagedTensorVersioned`.
+/// Used internally by `PyDlPackTensor.__dlpack__`.
+fn to_dlpack_capsule<'py>(
+    py: Python<'py>,
+    tensor: SafeManagedTensorVersioned,
+) -> PyResult<Bound<'py, pyo3::types::PyAny>> {
+    unsafe extern "C" fn capsule_deleter(capsule: *mut pyo3::ffi::PyObject) {
+        unsafe {
+            if pyo3::ffi::PyCapsule_IsValid(capsule, c"used_dltensor_versioned".as_ptr()) == 1 {
+                return;
+            }
+            let ptr =
+                pyo3::ffi::PyCapsule_GetPointer(capsule, c"dltensor_versioned".as_ptr());
+            if ptr.is_null() {
+                pyo3::ffi::PyErr_WriteUnraisable(capsule);
+                return;
+            }
+            drop(SafeManagedTensorVersioned::from_raw(ptr as *mut _));
+        }
+    }
+    unsafe {
+        let raw = tensor.into_raw() as *mut std::ffi::c_void;
+        let capsule = pyo3::ffi::PyCapsule_New(
+            raw,
+            c"dltensor_versioned".as_ptr(),
+            Some(capsule_deleter),
+        );
+        Bound::from_owned_ptr_or_err(py, capsule)
+    }
+}
+
+/// Wrap a `SafeManagedTensorVersioned` into a `PyDlPackTensor` Python object.
+fn into_py_tensor<'py>(
+    py: Python<'py>,
+    tensor: SafeManagedTensorVersioned,
+) -> PyResult<Bound<'py, pyo3::types::PyAny>> {
+    let raw = unsafe { tensor.into_raw() } as usize;
+    Ok(pyo3::Py::new(py, PyDlPackTensor { ptr: AtomicUsize::new(raw) })?
+        .into_bound(py)
+        .into_any())
+}
 
 #[derive(FromPyObject)]
 enum IntOrSlice<'py> {
@@ -207,20 +289,30 @@ impl PyVideoReader {
     fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
         slf
     }
-    fn __next__<'a>(
+    fn __next__<'py>(
         slf: PyRefMut<'_, Self>,
-        py: Python<'a>,
-    ) -> Option<Bound<'a, PyArray<u8, Dim<[usize; 3]>>>> {
+        py: Python<'py>,
+    ) -> PyResult<Option<Bound<'py, pyo3::types::PyAny>>> {
         match slf.inner.lock() {
-            Ok(mut vr) => vr.next().map(|rgb_frame| rgb_frame.into_pyarray(py)),
+            Ok(mut vr) => match vr.next() {
+                Some(frame) => {
+                    let t = SafeManagedTensorVersioned::new(frame).unwrap();
+                    Ok(Some(into_py_tensor(py, t)?))
+                }
+                None => Ok(None),
+            },
             Err(e) => {
                 debug!("Lock error in __next__: {e}");
-                None
+                Ok(None)
             }
         }
     }
 
-    fn __getitem__<'a>(&self, py: Python<'a>, key: IntOrSlice) -> PyResult<Bound<'a, FrameOrVid>> {
+    fn __getitem__<'py>(
+        &self,
+        py: Python<'py>,
+        key: IntOrSlice,
+    ) -> PyResult<Bound<'py, pyo3::types::PyAny>> {
         let frame_count = match self.inner.lock() {
             Ok(vr) => Ok(*vr.stream_info().frame_count()),
             Err(e) => Err(e),
@@ -228,74 +320,60 @@ impl PyVideoReader {
         if let Ok(frame_cnt) = frame_count {
             let index = key.to_indices(frame_cnt)?;
             let index_clone = index.clone();
-            // For single frame access (reader[i]), always use seek-based method
-            // This enables skip-forward optimization for sequential access patterns
-            // like: for i in range(n): reader[i]
+            // For single frame access (reader[i]), use seek-based method to enable
+            // skip-forward optimisation for sequential access like: for i in range(n): reader[i]
             let is_single_frame = matches!(key, IntOrSlice::Int { .. });
 
-            let result = py.detach(|| {
+            // Decode without GIL — returns VideoArray (Send)
+            let video_array: PyResult<VideoArray> = py.detach(|| {
+                match self.inner.lock() {
+                    Ok(mut vr) => {
+                        let force_sequential = vr.needs_sequential_mode();
+                        let use_sequential = if is_single_frame {
+                            force_sequential
+                        } else if force_sequential {
+                            true
+                        } else {
+                            vr.should_use_sequential(&index)
+                        };
 
-            match self.inner.lock() {
-                Ok(mut vr) => {
-
-
-                    // For slices/lists, use the cost estimation logic
-                    let force_sequential = vr.needs_sequential_mode();
-                    let use_sequential = if is_single_frame {
-                        // Single frame: use seek-based unless seek is completely broken
-                        force_sequential
-                    } else if force_sequential {
-                        true
-                    } else {
-                        vr.should_use_sequential(&index)
-                    };
-
-                    // Try the selected method, with automatic fallback for seek-based -> sequential
-                    let res_array = if use_sequential {
-                        vr.get_batch_safe(index.clone())
-                    } else {
-                        // Try seek-based first
-                        match vr.get_batch(index.clone()) {
-                            Ok(arr) => Ok(arr),
-                            Err(_) => {
-                                // Fallback to sequential mode if seek-based fails
-                                debug!("__getitem__: get_batch failed, falling back to get_batch_safe");
-                                vr.get_batch_safe(index.clone())
+                        let res_array = if use_sequential {
+                            vr.get_batch_safe(index.clone())
+                        } else {
+                            match vr.get_batch(index.clone()) {
+                                Ok(arr) => Ok(arr),
+                                Err(_) => {
+                                    debug!("__getitem__: get_batch failed, falling back to get_batch_safe");
+                                    vr.get_batch_safe(index.clone())
+                                }
                             }
                         }
-                    }.map_err(|e| {
-                        // Convert Bug error to a more meaningful message
-                        let failed = vr.failed_indices();
-                        let msg = match e {
-                            ffmpeg::Error::Bug => {
-                                format!(
+                        .map_err(|e| {
+                            let failed = vr.failed_indices();
+                            let msg = match e {
+                                ffmpeg::Error::Bug => format!(
                                     "Failed to decode frame(s) at index {:?} (requested {:?}, frame_count={})",
                                     failed, index_clone, frame_cnt
-                                )
-                            },
-                            _ => format!("{e}"),
-                        };
-                        PyRuntimeError::new_err(format!("Error: {msg}"))
-                    })?;
+                                ),
+                                _ => format!("{e}"),
+                            };
+                            PyRuntimeError::new_err(format!("Error: {msg}"))
+                        })?;
 
-                    // remove first dim if key was a single int
-                    if is_single_frame {
-                        // Extract the first frame and convert to owned array
-                        use ndarray::Axis;
-                        let single_frame = res_array.index_axis(Axis(0), 0).to_owned();
-                        Ok(single_frame.into_dyn())
-                    } else {
-                        Ok(res_array.into_dyn())
+                        Ok(res_array)
                     }
-                },
-                Err(e) => Err(PyRuntimeError::new_err(format!("Lock error: {e}"))),
-            }
+                    Err(e) => Err(PyRuntimeError::new_err(format!("Lock error: {e}"))),
+                }
             });
 
-            match result {
-                Ok(array) => Ok(array.into_pyarray(py)),
-                Err(e) => Err(e),
-            }
+            // Create DLPack tensor with GIL held (SafeManagedTensorVersioned is !Send)
+            let arr = video_array?;
+            let tensor = if is_single_frame {
+                SafeManagedTensorVersioned::new(arr.first_frame()).unwrap()
+            } else {
+                SafeManagedTensorVersioned::new(arr).unwrap()
+            };
+            into_py_tensor(py, tensor)
         } else {
             Err(PyRuntimeError::new_err(
                 "Could not find frame count".to_string(),
@@ -388,63 +466,53 @@ impl PyVideoReader {
     /// * `end_frame` - optional last frame index (will stop decoding after this frame)
     /// * `compression_factor` - optional temporal compression, eg if set to 0.25, will
     /// decode 1 frame out of 4. If None, will default to 1.0, ie decoding all frames.
-    /// * returns a numpy array of shape (N, H, W, C), where N is the number of frames
-    fn decode<'a>(
-        &'a self,
-        py: Python<'a>,
+    /// * returns a DLPack tensor of shape (N, H, W, C)
+    fn decode<'py>(
+        &self,
+        py: Python<'py>,
         start_frame: Option<usize>,
         end_frame: Option<usize>,
         compression_factor: Option<f64>,
-    ) -> PyResult<Bound<'a, PyArray<u8, Dim<[usize; 4]>>>> {
-        let result = py.detach(|| match self.inner.lock() {
-            Ok(mut reader) => match reader.decode_video(start_frame, end_frame, compression_factor)
-            {
-                Ok(video) => Ok(video),
-                Err(e) => Err(PyRuntimeError::new_err(format!("Error: {e}"))),
-            },
+    ) -> PyResult<Bound<'py, pyo3::types::PyAny>> {
+        let video: PyResult<VideoArray> = py.detach(|| match self.inner.lock() {
+            Ok(mut reader) => reader
+                .decode_video(start_frame, end_frame, compression_factor)
+                .map_err(|e| PyRuntimeError::new_err(format!("Error: {e}"))),
             Err(e) => Err(PyRuntimeError::new_err(format!("Lock error: {e}"))),
         });
-        match result {
-            Ok(vid) => Ok(vid.into_pyarray(py)),
-            Err(e) => Err(e),
-        }
+        let t = SafeManagedTensorVersioned::new(video?).unwrap();
+        into_py_tensor(py, t)
     }
 
     #[pyo3(signature = (start_frame=None, end_frame=None, compression_factor=None))]
-    /// Decode the video using YUV420P format in the ffmpeg scaler followed by asynchronous
-    /// YUV to RGB conversion. Can be must faster than `decode()` for High Res videos.
+    /// Decode the video using async YUV-to-RGB conversion (faster for high-res videos).
     /// * `start_frame` - optional starting index (will start decoding from this frame)
     /// * `end_frame` - optional last frame index (will stop decoding after this frame)
     /// * `compression_factor` - optional temporal compression, eg if set to 0.25, will
     /// decode 1 frame out of 4. If None, will default to 1.0, ie decoding all frames.
-    /// * returns a list of numpy array, each ndarray being a frame.
-    fn decode_fast<'a>(
-        &'a self,
-        py: Python<'a>,
+    /// * returns a DLPack tensor of shape (N, H, W, C)
+    fn decode_fast<'py>(
+        &self,
+        py: Python<'py>,
         start_frame: Option<usize>,
         end_frame: Option<usize>,
         compression_factor: Option<f64>,
-    ) -> PyResult<Vec<Bound<'a, Frame>>> {
-        let result = py.detach(|| match self.inner.lock() {
+    ) -> PyResult<Bound<'py, pyo3::types::PyAny>> {
+        let frames: PyResult<VideoArray> = py.detach(|| match self.inner.lock() {
             Ok(mut reader) => {
-                let res_decode = RUNTIME
+                let raw = RUNTIME
                     .block_on(async {
                         reader
                             .decode_video_fast(start_frame, end_frame, compression_factor)
                             .await
                     })
                     .map_err(|e| PyRuntimeError::new_err(format!("Error: {e}")))?;
-                Ok(res_decode)
+                Ok(VideoArray::from_frames(raw))
             }
             Err(e) => Err(PyRuntimeError::new_err(format!("Lock error: {e}"))),
         });
-        match result {
-            Ok(vid) => Ok(vid
-                .into_iter()
-                .map(|x| x.into_pyarray(py))
-                .collect::<Vec<_>>()),
-            Err(e) => Err(e),
-        }
+        let t = SafeManagedTensorVersioned::new(frames?).unwrap();
+        into_py_tensor(py, t)
     }
 
     #[pyo3(signature = (start_frame=None, end_frame=None, compression_factor=None))]
@@ -453,30 +521,29 @@ impl PyVideoReader {
     /// * `end_frame` - optional last frame index (will stop decoding after this frame)
     /// * `compression_factor` - optional temporal compression, eg if set to 0.25, will
     /// decode 1 frame out of 4. If None, will default to 1.0, ie decoding all frames.
-    /// * returns a numpy array of shape (N, H, W), where N is the number of frames.
-    fn decode_gray<'a>(
-        &'a self,
-        py: Python<'a>,
+    /// * returns a DLPack tensor of shape (N, H, W)
+    fn decode_gray<'py>(
+        &self,
+        py: Python<'py>,
         start_frame: Option<usize>,
         end_frame: Option<usize>,
         compression_factor: Option<f64>,
-    ) -> PyResult<Bound<'a, PyArray<u8, Dim<[usize; 3]>>>> {
-        let result = py.detach(|| match self.inner.lock() {
-            Ok(mut reader) => match reader.decode_video(start_frame, end_frame, compression_factor)
-            {
-                Ok(video) => {
-                    let gray_video = rgb2gray(video)
-                        .map_err(|e| PyRuntimeError::new_err(format!("Error: {e}")))?;
-                    Ok(gray_video)
-                }
-                Err(e) => Err(PyRuntimeError::new_err(format!("Error: {e}"))),
-            },
+    ) -> PyResult<Bound<'py, pyo3::types::PyAny>> {
+        let gray: PyResult<DlPackTensor> = py.detach(|| match self.inner.lock() {
+            Ok(mut reader) => {
+                let video = reader
+                    .decode_video(start_frame, end_frame, compression_factor)
+                    .map_err(|e| PyRuntimeError::new_err(format!("Error: {e}")))?;
+                let gray = rgb2gray(video.into_ndarray4())
+                    .map_err(|e| PyRuntimeError::new_err(format!("Error: {e}")))?;
+                let shape = gray.shape().iter().map(|&s| s as i64).collect();
+                let data: Vec<u8> = gray.into_iter().collect();
+                Ok(DlPackTensor::new(data, shape))
+            }
             Err(e) => Err(PyRuntimeError::new_err(format!("Lock error: {e}"))),
         });
-        match result {
-            Ok(vid) => Ok(vid.into_pyarray(py)),
-            Err(e) => Err(e),
-        }
+        let t = SafeManagedTensorVersioned::new(gray?).unwrap();
+        into_py_tensor(py, t)
     }
 
     #[pyo3(signature = (indices, with_fallback=None))]
@@ -486,53 +553,42 @@ impl PyVideoReader {
     ///   - None: automatically choose the faster method based on cost estimation
     ///   - True: use sequential decoding (iterate through all frames)
     ///   - False: use seek-based decoding (seek to keyframes)
-    fn get_batch<'a>(
-        &'a self,
-        py: Python<'a>,
+    /// * returns a DLPack tensor of shape (N, H, W, C)
+    fn get_batch<'py>(
+        &self,
+        py: Python<'py>,
         indices: Vec<usize>,
         with_fallback: Option<bool>,
-    ) -> PyResult<Bound<'a, PyArray<u8, Dim<[usize; 4]>>>> {
-        let result = py.detach(|| {
-            match self.inner.lock() {
+    ) -> PyResult<Bound<'py, pyo3::types::PyAny>> {
+        let batch: PyResult<VideoArray> = py.detach(|| match self.inner.lock() {
             Ok(mut vr) => {
-                // For videos with negative PTS/DTS, verify if seek actually works
-                // Some negative DTS videos work fine (e.g., time_base 1/15360)
-                // while others fail (e.g., time_base 1/1000000 or negative PTS)
                 let force_sequential = vr.needs_sequential_mode();
-
-                // Determine which method to use
                 let use_sequential = match with_fallback {
                     Some(true) => true,
                     Some(false) => force_sequential,
                     None => force_sequential || vr.should_use_sequential(&indices),
                 };
-
-                let batch_res = if use_sequential { vr.get_batch_safe(indices.clone()) } else { vr.get_batch(indices.clone())};
-                match batch_res {
-                    Ok(batch) => Ok(batch),
-                    Err(e) => {
-                        // Convert Bug error to a more meaningful message
-                        let failed = vr.failed_indices();
-                        let msg = match e {
-                            ffmpeg::Error::Bug => {
-                                format!("Out of bounds: frame indices {:?} exceed video length or could not be decoded", failed)
-                            },
-                            _ => format!("{e}"),
-                        };
-                        Err(PyRuntimeError::new_err(format!("Error: {msg}")))
-                    }
-                }
-            },
-            Err(e) => Err(PyRuntimeError::new_err(format!("Lock error: {e}"))),
+                let res = if use_sequential {
+                    vr.get_batch_safe(indices.clone())
+                } else {
+                    vr.get_batch(indices.clone())
+                };
+                res.map_err(|e| {
+                    let failed = vr.failed_indices();
+                    let msg = match e {
+                        ffmpeg::Error::Bug => format!(
+                            "Out of bounds: frame indices {:?} exceed video length or could not be decoded",
+                            failed
+                        ),
+                        _ => format!("{e}"),
+                    };
+                    PyRuntimeError::new_err(format!("Error: {msg}"))
+                })
             }
-
-
-            });
-
-        match result {
-            Ok(batch) => Ok(batch.into_pyarray(py)),
-            Err(e) => Err(e),
-        }
+            Err(e) => Err(PyRuntimeError::new_err(format!("Lock error: {e}"))),
+        });
+        let t = SafeManagedTensorVersioned::new(batch?).unwrap();
+        into_py_tensor(py, t)
     }
 
     /// Estimate decode cost for both methods.
@@ -594,7 +650,7 @@ impl PyVideoReader {
 #[pymodule]
 fn video_reader<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()> {
     env_logger::init();
-    // Add the VideoReader class to the module
     m.add_class::<PyVideoReader>()?;
+    m.add_class::<PyDlPackTensor>()?;
     Ok(())
 }

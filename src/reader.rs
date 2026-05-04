@@ -19,8 +19,7 @@ use crate::hwaccel::{HardwareAccelerationContext, HardwareAccelerationDeviceType
 use crate::info::{
     collect_video_metadata, extract_video_params, get_frame_count, get_resized_dim, StreamInfo,
 };
-use crate::utils::{insert_frame, FrameArray, VideoArray, HWACCEL_PIXEL_FORMAT};
-use ndarray::{s, Array, Array4};
+use crate::utils::{FrameArray, VideoArray, HWACCEL_PIXEL_FORMAT};
 use tokio::task;
 
 /// Custom errno used to signal backwards jump detection (non-monotonic output).
@@ -398,8 +397,8 @@ impl VideoReader {
                     .receive_and_process_decoded_frames(&mut reducer)?
                 {
                     Some(rgb_frame) => {
-                        let mut slice_frame = reducer.slice_mut(reducer.get_idx_counter());
-                        insert_frame(&mut slice_frame, rgb_frame);
+                        let slice_frame = reducer.slice_mut(reducer.get_idx_counter());
+                        slice_frame.copy_from_slice(&rgb_frame.data);
                         reducer.incr_idx_counter(1);
                     }
                     None => debug!("No frame received!"),
@@ -416,10 +415,8 @@ impl VideoReader {
                 .receive_and_process_decoded_frames(&mut reducer)?
             {
                 Some(rgb_frame) => {
-                    let mut slice_frame = reducer.slice_mut(reducer.get_idx_counter());
-                    slice_frame.zip_mut_with(&rgb_frame, |a, b| {
-                        *a = *b;
-                    });
+                    let slice_frame = reducer.slice_mut(reducer.get_idx_counter());
+                    slice_frame.copy_from_slice(&rgb_frame.data);
                     reducer.incr_idx_counter(1);
                 }
                 None => {
@@ -612,10 +609,10 @@ impl VideoReader {
                 slot_to_frame = Some(vec![None; indices.len()]);
             }
             OutOfBoundsMode::Black => {
-                output_batch = Some(Array4::zeros((indices.len(), height, width, 3)));
+                output_batch = Some(VideoArray::zeros(indices.len(), height, width));
             }
             OutOfBoundsMode::Error => {
-                output_batch = Some(Array4::zeros((indices.len(), height, width, 3)));
+                output_batch = Some(VideoArray::zeros(indices.len(), height, width));
                 found_positions = Some(vec![false; indices.len()]);
             }
         }
@@ -665,7 +662,7 @@ impl VideoReader {
                             OutOfBoundsMode::Black | OutOfBoundsMode::Error => {
                                 if let Some(batch) = output_batch.as_mut() {
                                     for &pos in positions {
-                                        batch.slice_mut(s![pos, .., .., ..]).assign(&frame);
+                                        batch.get_frame_mut(pos).copy_from_slice(&frame.data);
                                         if let Some(found) = found_positions.as_mut() {
                                             found[pos] = true;
                                         }
@@ -730,7 +727,7 @@ impl VideoReader {
                             OutOfBoundsMode::Black | OutOfBoundsMode::Error => {
                                 if let Some(batch) = output_batch.as_mut() {
                                     for &pos in positions {
-                                        batch.slice_mut(s![pos, .., .., ..]).assign(&frame);
+                                        batch.get_frame_mut(pos).copy_from_slice(&frame.data);
                                         if let Some(found) = found_positions.as_mut() {
                                             found[pos] = true;
                                         }
@@ -757,15 +754,13 @@ impl VideoReader {
                 let found_count = slots.iter().filter(|s| s.is_some()).count();
 
                 if found_count == 0 {
-                    Array4::zeros((0, height, width, 3))
+                    VideoArray::zeros(0, height, width)
                 } else {
-                    let mut batch = Array4::zeros((found_count, height, width, 3));
+                    let mut batch = VideoArray::zeros(found_count, height, width);
                     let mut out_i = 0;
                     for (pos, slot) in slots.iter().enumerate() {
                         if let Some(frame_id) = slot {
-                            batch
-                                .slice_mut(s![out_i, .., .., ..])
-                                .assign(&frames_store[*frame_id]);
+                            batch.get_frame_mut(out_i).copy_from_slice(&frames_store[*frame_id].data);
                             out_i += 1;
                         } else {
                             debug!("Skipping frame {} (oob_mode=skip)", indices[pos]);
@@ -776,11 +771,11 @@ impl VideoReader {
             }
             OutOfBoundsMode::Black => output_batch
                 .take()
-                .unwrap_or_else(|| Array4::zeros((indices.len(), height, width, 3))),
+                .unwrap_or_else(|| VideoArray::zeros(indices.len(), height, width)),
             OutOfBoundsMode::Error => {
                 let batch = output_batch
                     .take()
-                    .unwrap_or_else(|| Array4::zeros((indices.len(), height, width, 3)));
+                    .unwrap_or_else(|| VideoArray::zeros(indices.len(), height, width));
                 let found = found_positions
                     .take()
                     .unwrap_or_else(|| vec![false; indices.len()]);
@@ -850,11 +845,11 @@ impl VideoReader {
         let width = self.decoder.width as usize;
 
         // For Skip mode, we need to collect successful frames and track their positions
-        let mut successful_frames: Vec<(usize, ndarray::Array3<u8>)> = Vec::new();
+        let mut successful_frames: Vec<(usize, FrameArray)> = Vec::new();
 
         // For Black/Error mode, allocate output buffer once (pre-filled with zeros)
         let mut video_frames: Option<VideoArray> = if self.oob_mode != OutOfBoundsMode::Skip {
-            Some(Array::zeros((indices.len(), height, width, 3)))
+            Some(VideoArray::zeros(indices.len(), height, width))
         } else {
             None
         };
@@ -892,7 +887,7 @@ impl VideoReader {
                                 // Write directly to pre-allocated buffer
                                 if let Some(ref mut vf) = video_frames {
                                     for pos in positions {
-                                        vf.slice_mut(s![*pos, .., .., ..]).assign(&rgb_frame);
+                                        vf.get_frame_mut(*pos).copy_from_slice(&rgb_frame.data);
                                     }
                                 }
                             }
@@ -966,13 +961,12 @@ impl VideoReader {
 
             let n_successful = successful_frames.len();
             if n_successful == 0 {
-                // Return empty array
-                return Ok(Array::zeros((0, height, width, 3)));
+                return Ok(VideoArray::zeros(0, height, width));
             }
 
-            let mut output = Array::zeros((n_successful, height, width, 3));
+            let mut output = VideoArray::zeros(n_successful, height, width);
             for (i, (_, frame)) in successful_frames.into_iter().enumerate() {
-                output.slice_mut(s![i, .., .., ..]).assign(&frame);
+                output.get_frame_mut(i).copy_from_slice(&frame.data);
             }
             Ok(output)
         } else {

@@ -5,7 +5,7 @@ use crate::utils::{FrameArray, VideoArray};
 use ffmpeg::filter;
 use ffmpeg::util::frame::video::Video;
 use ffmpeg_next as ffmpeg;
-use ndarray::{s, Array, Array4, ArrayViewMut3};
+use ndarray::Array;
 use std::collections::HashMap;
 use yuv::{YuvRange, YuvStandardMatrix};
 
@@ -68,10 +68,10 @@ impl VideoReducer {
     pub fn remove_idx(&mut self, idx: usize) {
         self.indices.remove(idx);
     }
-    pub fn slice_mut(&mut self, idx: usize) -> ArrayViewMut3<'_, u8> {
-        self.full_video.slice_mut(s![idx, .., .., ..])
+    pub fn slice_mut(&mut self, idx: usize) -> &'_ mut [u8] {
+        self.full_video.get_frame_mut(idx)
     }
-    pub fn get_full_video(self) -> Array4<u8> {
+    pub fn get_full_video(self) -> VideoArray {
         self.full_video
     }
     pub fn build(
@@ -99,7 +99,7 @@ impl VideoReducer {
             .map(|x| x.round() as usize)
             .collect::<Vec<_>>();
 
-        let full_video = Array::zeros((indices.len(), height as usize, width as usize, 3));
+        let full_video = VideoArray::zeros(indices.len(), height as usize, width as usize);
 
         (
             Some(VideoReducer::new(indices, 0, 0, full_video)),
