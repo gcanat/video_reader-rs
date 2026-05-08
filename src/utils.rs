@@ -1,6 +1,8 @@
 use dlpark::ffi;
 use dlpark::traits::{RowMajorCompactLayout, TensorLike};
 use ffmpeg_next::format::Pixel as AvPixel;
+use rayon::iter::{IndexedParallelIterator, ParallelIterator};
+use rayon::slice::ParallelSliceMut;
 use std::ffi::c_void;
 
 /// A single RGB frame with flat row-major layout, shape (H, W, 3).
@@ -72,10 +74,10 @@ impl VideoArray {
         let n = frames.len();
         let height = frames[0].height;
         let width = frames[0].width;
-        let mut data = Vec::with_capacity(n * height * width * 3);
-        for frame in frames {
-            data.extend_from_slice(&frame.data);
-        }
+        let mut data = vec![0u8; n * height * width * 3];
+        data.par_chunks_mut(height * width * 3)
+            .zip(frames)
+            .for_each(|(slice, frame)| slice.copy_from_slice(&frame.data));
         Self {
             data,
             n,
