@@ -18,17 +18,13 @@ jobs:
       matrix:
         platform:
           - runner: ubuntu-24.04
-            target: x86_64
+            target: x86_64-unknown-linux-gnu
+            arch: x86_64
+            manylinux: 2_34
           - runner: ubuntu-24.04-arm
-            target: aarch64
-          # - runner: ubuntu-latest
-          #   target: x86
-          # - runner: ubuntu-latest
-          #   target: armv7
-          # - runner: ubuntu-latest
-          #   target: s390x
-          # - runner: ubuntu-latest
-          #   target: ppc64le
+            target: aarch64-unknown-linux-gnu
+            arch: aarch64
+            manylinux: 2_34
     env:
       FFMPEG_DIR: ${{ github.workspace }}/ffmpeg
       FFMPEG_VERS: 8.1.1-2
@@ -47,7 +43,7 @@ jobs:
         id: download_url
         run: |
           DOWNLOAD_URL=$(
-            echo "${{ env.FFMPEG_BASE_URL }}/${{ env.FFMPEG_VERS }}/ffmpeg-manylinux-${{ matrix.platform.target }}.tar.gz";
+            echo "${{ env.FFMPEG_BASE_URL }}/${{ env.FFMPEG_VERS }}/ffmpeg-manylinux-${{ matrix.platform.arch }}.tar.gz";
           )
           echo "ffmpeg_url=$DOWNLOAD_URL" >> $GITHUB_OUTPUT
 
@@ -61,12 +57,12 @@ jobs:
             mkdir -p ${{ env.FFMPEG_DIR }}
             tar -zxf ffmpeg.tar.gz -C ${{ env.FFMPEG_DIR }}
           args: --release --out dist --interpreter '3.9 3.10 3.11 3.12 3.13 3.13t 3.14 3.14t pypy3.11'
-          manylinux: 2_34
+          manylinux: ${{ matrix.platform.manylinux }}
           docker-options: -e CI -e FFMPEG_DIR=${{ env.FFMPEG_DIR }}
       - name: Upload wheels
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: wheels-linux-${{ matrix.platform.target }}
+          name: wheels-linux-${{ matrix.platform.arch }}
           path: dist
 
   # musllinux:
