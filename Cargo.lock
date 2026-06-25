@@ -166,8 +166,9 @@ checksum = "d0a5c400df2834b80a4c3327b3aad3a4c4cd4de0629063962b03235697506a28"
 
 [[package]]
 name = "dlpark"
-version = "0.6.0"
-source = "git+https://github.com/SunDoge/dlpark/?rev=ef4e63fa19d6cdda34a3146ee7d1ccdfa40907b7#ef4e63fa19d6cdda34a3146ee7d1ccdfa40907b7"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1d17292f8d68ad38bf5bee195bf3cdfb41c0f35061a35023f82c2d0e1aeaca04"
 dependencies = [
  "bitflags",
  "snafu",
