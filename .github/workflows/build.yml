@@ -146,7 +146,7 @@ jobs:
           python-version: '3.11'
       - name: Install dependencies
         run: |
-          brew install ffmpeg &&
+          brew install ffmpeg@7 &&
           pip install delocate
       - name: Build wheels
         uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b  # v1.51.0
