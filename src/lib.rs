@@ -12,14 +12,13 @@ use ffmpeg::log as ffmpeg_log;
 use ffmpeg_next as ffmpeg;
 use hwaccel::HardwareAccelerationDeviceType;
 use log::debug;
-use ndarray::Array;
 use numpy::ndarray::{Dim, IxDyn};
 use numpy::{IntoPyArray, PyArray};
 use pyo3::{
     exceptions::PyRuntimeError,
     pyclass, pymethods, pymodule,
     types::{
-        IntoPyDict, PyAnyMethods, PyDict, PyFloat, PyList, PyModule, PyModuleMethods, PySlice,
+        IntoPyDict, PyDict, PyFloat, PyList, PyModule, PyModuleMethods, PySlice, PySliceMethods,
     },
     Bound, FromPyObject, PyRef, PyRefMut, PyResult, Python,
 };
@@ -47,7 +46,7 @@ enum IntOrSlice<'py> {
     IntList(Vec<i32>),
 }
 
-impl<'py> IntOrSlice<'py> {
+impl IntOrSlice<'_> {
     /// Helper function to handle indices and slices
     fn to_indices(&self, frame_count: usize) -> PyResult<Vec<usize>> {
         match self {
@@ -60,20 +59,10 @@ impl<'py> IntOrSlice<'py> {
                 Ok(vec![pos_index])
             }
             IntOrSlice::Slice(slice) => {
-                let start: i32 = slice.getattr("start")?.extract().unwrap_or(0_i32);
-                let stop: i32 = slice
-                    .getattr("stop")?
-                    .extract()
-                    .unwrap_or(frame_count as i32);
-                let step: i32 = slice.getattr("step")?.extract().unwrap_or(1_i32);
-                if ((step < 0) && (stop - start > 0)) || ((step > 0) && (stop - start < 0)) {
-                    return Err(PyRuntimeError::new_err(
-                        "Incompatible values in slice. step and (stop - start) must have the same sign.",
-                    ));
-                }
-                let indices = Array::range(start as f32, stop as f32, step as f32);
-                let indices = indices.mapv(|x| x as usize);
-                Ok(indices.to_vec())
+                let slice = slice.indices(frame_count as isize)?;
+                Ok((0..slice.slicelength)
+                    .map(|i| (slice.start + i as isize * slice.step) as usize)
+                    .collect())
             }
             IntOrSlice::IntList(indices) => Ok(indices
                 .iter()
