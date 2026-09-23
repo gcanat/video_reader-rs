@@ -28,7 +28,7 @@ At least on the intended ML uses cases where video resolution remains reasonable
 ```bash
 pip install video-reader-rs
 ```
-Should work with python >= 3.8 on recent linux x86_64 and macos.
+Requires Python >= 3.9.
 
 ### Manual installation
 You need to have ffmpeg installed on your system.
@@ -51,16 +51,19 @@ maturin develop --release --features ffmpeg_5
 
 ### Development and tests
 
-Install uv, Rust, a C compiler, libclang, pkg-config, and the FFmpeg development libraries.
+Install uv >= 0.6.7, Rust, a C compiler, libclang, pkg-config, and the FFmpeg development libraries.
 From the repository root, set up the test environment (see the FFmpeg version note above for build flags):
 
 ```bash
 uv venv --python 3.11  # Only needed if .venv does not already exist
-source .venv/bin/activate
+source .venv/bin/activate  # bash/zsh
 uv pip install --group dev
 maturin develop
 python -m pytest tests
 ```
+
+For fish, replace the activation command with `source .venv/bin/activate.fish`;
+for Windows PowerShell, use `.\.venv\Scripts\Activate.ps1`.
 
 ## 💻 Usage
 Decoding a video is as simple as:
