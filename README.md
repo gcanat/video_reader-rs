@@ -49,6 +49,20 @@ the `--release` flag ensures the Rust part of the code is compiled in release mo
 maturin develop --release --features ffmpeg_5
 ```
 
+### Development and tests
+
+With uv, Rust, and the FFmpeg development libraries installed, set up the test environment:
+
+```bash
+uv venv --python 3.11
+uv pip install --group dev
+uv run --no-project maturin develop
+uv run --no-project python -m pytest tests
+```
+
+For FFmpeg <= 5, add `--features ffmpeg_5` to the `maturin develop` command.
+The `dev` dependency group is shared by this setup and CI.
+
 ## 💻 Usage
 Decoding a video is as simple as:
 ```python

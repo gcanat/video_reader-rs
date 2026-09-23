@@ -19,6 +19,13 @@ license-files = [
     "license_notes.md",
 ]
 
+[dependency-groups]
+dev = [
+    "maturin>=1.3,<2.0",
+    "numpy",
+    "pytest>=8,<10",
+]
+
 [tool.maturin]
 features = ["pyo3/extension-module", "pyo3/abi3-py39"]
 
