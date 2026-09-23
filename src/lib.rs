@@ -15,14 +15,17 @@ use log::debug;
 use numpy::ndarray::{Dim, IxDyn};
 use numpy::{IntoPyArray, PyArray};
 use pyo3::{
-    exceptions::PyRuntimeError,
+    exceptions::{PyRuntimeError, PyTypeError},
+    pybacked::PyBackedBytes,
     pyclass, pymethods, pymodule,
     types::{
-        IntoPyDict, PyDict, PyFloat, PyList, PyModule, PyModuleMethods, PySlice, PySliceMethods,
+        IntoPyDict, PyAny, PyAnyMethods, PyDict, PyFloat, PyList, PyModule, PyModuleMethods,
+        PySlice, PySliceMethods,
     },
     Bound, FromPyObject, PyRef, PyRefMut, PyResult, Python,
 };
 use reader::VideoReader;
+use std::io::Cursor;
 use std::str::FromStr;
 use std::sync::Mutex;
 
@@ -88,7 +91,7 @@ impl PyVideoReader {
     #[new]
     #[pyo3(signature = (filename, threads=None, resize_shorter_side=None, resize_longer_side=None, target_width=None, target_height=None, resize_algo=None, device=None, filter=None, log_level=None, oob_mode=None))]
     /// create an instance of VideoReader
-    /// * `filename` - path to the video file
+    /// * `filename` - a path string, bytes, bytearray, or io.BytesIO containing a complete video
     /// * `threads` - number of threads to use. If None, let ffmpeg choose the optimal number.
     /// * `resize_shorter_side - Optional, resize shorted side of the video to this value. If
     /// resize_longer_side is set to None, will try to preserve original aspect ratio.
@@ -106,7 +109,7 @@ impl PyVideoReader {
     /// * returns a PyVideoReader instance.
     #[allow(clippy::too_many_arguments)]
     fn new(
-        filename: &str,
+        filename: &Bound<'_, PyAny>,
         threads: Option<usize>,
         resize_shorter_side: Option<f64>,
         resize_longer_side: Option<f64>,
@@ -185,7 +188,23 @@ impl PyVideoReader {
             hwaccel,
             filter,
         );
-        match VideoReader::new(filename.to_string(), decoder_config, out_of_bounds_mode) {
+        let result = if let Ok(path) = filename.extract::<String>() {
+            VideoReader::new(path, decoder_config, out_of_bounds_mode)
+        } else {
+            let bytes = if let Ok(bytes) = filename.extract::<PyBackedBytes>() {
+                bytes
+            } else if filename.is_instance(&filename.py().import("io")?.getattr("BytesIO")?)? {
+                filename
+                    .call_method0("getvalue")?
+                    .extract::<PyBackedBytes>()?
+            } else {
+                return Err(PyTypeError::new_err(
+                    "filename must be a str, bytes, bytearray, or io.BytesIO",
+                ));
+            };
+            VideoReader::from_stream(Cursor::new(bytes), decoder_config, out_of_bounds_mode)
+        };
+        match result {
             Ok(reader) => Ok(PyVideoReader {
                 inner: Mutex::new(reader),
             }),

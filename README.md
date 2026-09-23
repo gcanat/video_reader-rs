@@ -66,6 +66,20 @@ For fish, replace the activation command with `source .venv/bin/activate.fish`;
 for Windows PowerShell, use `.\.venv\Scripts\Activate.ps1`.
 
 ## 💻 Usage
+The reader accepts a path string or a complete video held in `bytes`, `bytearray`, or `io.BytesIO`:
+
+```python
+from io import BytesIO
+from video_reader import PyVideoReader
+
+vr = PyVideoReader(video_bytes)
+vr = PyVideoReader(BytesIO(video_bytes))
+```
+
+Immutable `bytes` are retained without copying the entire input into Rust. Mutable inputs are snapshotted,
+so you can change or close the original object after constructing the reader. `BytesIO` uses its full
+contents regardless of its current position, and leaves that position unchanged.
+
 Decoding a video is as simple as:
 ```python
 from video_reader import PyVideoReader
@@ -87,7 +101,7 @@ for frame in vr:
     # do something with a single frame
     print("top left red pixel value:", frame[0, 0, 0])
 ```
-* **filename**: path to the video file to decode
+* **filename**: a path string, `bytes`, `bytearray`, or `io.BytesIO` containing a complete video
 * **resize**: optional resizing for the video.
 * **compression_factor**: temporal sampling, eg if 0.25, take 25% of the frames, evenly spaced.
 * **threads**: number of CPU cores to use for ffmpeg decoding, 0 means auto (let ffmpeg pick the optimal number).

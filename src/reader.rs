@@ -7,6 +7,7 @@ use ffmpeg::util::rational::Rational;
 use ffmpeg_next as ffmpeg;
 use log::{debug, warn};
 use std::collections::HashMap;
+use std::io::{Read, Seek};
 use std::path::Path;
 use std::time::Instant;
 
@@ -116,7 +117,32 @@ impl VideoReader {
         decoder_config: DecoderConfig,
         oob_mode: OutOfBoundsMode,
     ) -> Result<VideoReader, ffmpeg::Error> {
-        let (mut ictx, stream_index) = get_init_context(&filename)?;
+        let (ictx, stream_index) = get_init_context(&filename)?;
+        Self::from_context(ictx, stream_index, decoder_config, oob_mode)
+    }
+
+    pub fn from_stream<T: Read + Seek + Send + 'static>(
+        stream: T,
+        decoder_config: DecoderConfig,
+        oob_mode: OutOfBoundsMode,
+    ) -> Result<VideoReader, ffmpeg::Error> {
+        ffmpeg::init()?;
+        let io = ffmpeg::format::context::StreamIo::from_read_seek(stream)?;
+        let ictx = ffmpeg::format::input_from_stream(io, None, None)?;
+        let stream_index = ictx
+            .streams()
+            .best(Type::Video)
+            .ok_or(ffmpeg::Error::StreamNotFound)?
+            .index();
+        Self::from_context(ictx, stream_index, decoder_config, oob_mode)
+    }
+
+    fn from_context(
+        mut ictx: ffmpeg::format::context::Input,
+        stream_index: usize,
+        decoder_config: DecoderConfig,
+        oob_mode: OutOfBoundsMode,
+    ) -> Result<VideoReader, ffmpeg::Error> {
         let stream_info = get_frame_count(&mut ictx, &stream_index)?;
         let decoder = Self::get_decoder(&ictx, decoder_config)?;
         debug!("frame_count: {}", stream_info.frame_count());
