@@ -21,7 +21,7 @@ license-files = [
 
 [dependency-groups]
 dev = [
-    "maturin>=1.3,<2.0",
+    "maturin>=1.8.4,<2.0",
     "numpy",
     "pytest>=8,<10",
 ]

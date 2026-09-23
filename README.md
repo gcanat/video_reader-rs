@@ -51,17 +51,16 @@ maturin develop --release --features ffmpeg_5
 
 ### Development and tests
 
-With uv, Rust, and the FFmpeg development libraries installed, set up the test environment:
+Install uv, Rust, a C compiler, libclang, pkg-config, and the FFmpeg development libraries.
+From the repository root, set up the test environment (see the FFmpeg version note above for build flags):
 
 ```bash
-uv venv --python 3.11
+uv venv --python 3.11  # Only needed if .venv does not already exist
+source .venv/bin/activate
 uv pip install --group dev
-uv run --no-project maturin develop
-uv run --no-project python -m pytest tests
+maturin develop
+python -m pytest tests
 ```
-
-For FFmpeg <= 5, add `--features ffmpeg_5` to the `maturin develop` command.
-The `dev` dependency group is shared by this setup and CI.
 
 ## 💻 Usage
 Decoding a video is as simple as:
