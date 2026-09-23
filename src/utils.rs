@@ -18,21 +18,34 @@ pub fn init_ffmpeg() -> Result<(), Error> {
 /// Preserve recoverable demuxer errors without mistaking an I/O failure for EOF.
 pub fn read_packet(input: &mut Input) -> Result<Option<Packet>, Error> {
     let mut packet = Packet::empty();
+    let mut last_error_position = None;
     loop {
         match packet.read(input) {
             Ok(()) => return Ok(Some(packet)),
             Err(Error::Eof) => return Ok(None),
             Err(
                 error @ (Error::InvalidData
+                | Error::PatchWelcome
                 | Error::Other {
                     errno: ffmpeg_next::error::EAGAIN,
                 }),
             ) => {
-                // Retry demuxer resynchronization, but not a persistent AVIO failure.
+                // Retry resynchronization only while consecutive failures advance the input.
                 // SAFETY: input owns this context; no read callback is running here.
-                let io = unsafe { (*input.as_ptr()).pb.as_ref() };
-                if io.is_some_and(|io| io.error != 0) {
-                    return Err(error);
+                unsafe {
+                    let io = (*input.as_mut_ptr()).pb;
+                    if io.is_null() {
+                        return Err(error);
+                    }
+                    if (*io).error != 0 {
+                        return Err(Error::from((*io).error));
+                    }
+                    // avio_tell is an inline C wrapper around this seek.
+                    let position = ffmpeg_next::ffi::avio_seek(io, 0, libc::SEEK_CUR);
+                    if position < 0 || last_error_position.is_some_and(|last| position <= last) {
+                        return Err(error);
+                    }
+                    last_error_position = Some(position);
                 }
             }
             Err(error) => return Err(error),
@@ -47,7 +60,7 @@ pub fn insert_frame(frame_array: &mut ArrayViewMut3<u8>, frame: FrameArray) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::io::{self, Cursor, Read, Seek, SeekFrom};
     use std::sync::{
@@ -56,9 +69,9 @@ mod tests {
     };
     use std::time::Duration;
 
-    struct FailingRead {
-        data: Cursor<Vec<u8>>,
-        error: Arc<AtomicI32>,
+    pub(crate) struct FailingRead {
+        pub data: Cursor<Vec<u8>>,
+        pub error: Arc<AtomicI32>,
     }
 
     impl Read for FailingRead {

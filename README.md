@@ -80,7 +80,8 @@ Plain immutable `bytes` are retained without copying the entire input into Rust.
 `bytes` subclasses are snapshotted, so you can change or close the original object after constructing
 the reader. `BytesIO` uses its full
 contents regardless of its current position, and leaves that position unchanged.
-Bytes always mean encoded video data; pass filesystem paths as strings, using `os.fsdecode()` if needed.
+Bytes always mean encoded video data; pass UTF-8 filesystem paths as strings. Non-UTF-8 paths are
+not supported. Memory inputs must be self-contained; external file and network references are disabled.
 
 Decoding a video is as simple as:
 ```python
@@ -147,6 +148,9 @@ frames = vr.get_batch([0, 1, 999999])  # Returns 3 frames, last one is all zeros
 | `"error"` (default) | Raise error on invalid frame |
 | `"skip"` | Skip invalid frames, array may be smaller than requested |
 | `"black"` | Return black frame for invalid indices |
+
+Skip and black modes also cover frames unavailable because of read or decoding errors.
+Iteration and `count_actual_frames()` raise `RuntimeError` on I/O failures.
 
 It is also possible to directly use slicing or indexing:
 ```python

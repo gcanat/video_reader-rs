@@ -50,6 +50,26 @@ enum VideoSource {
 }
 
 impl VideoSource {
+    fn open(self) -> PyResult<(ffmpeg::format::context::Input, usize)> {
+        let io = match self {
+            Self::Path(path) => {
+                return reader::get_init_context(&path)
+                    .map_err(|e| PyRuntimeError::new_err(format!("Error: {e}")));
+            }
+            Self::Bytes(bytes) => {
+                ffmpeg::format::context::StreamIo::from_read_seek(Cursor::new(bytes))
+            }
+            Self::OwnedBytes(bytes) => {
+                ffmpeg::format::context::StreamIo::from_read_seek(Cursor::new(bytes))
+            }
+        };
+        io.and_then(reader::get_stream_context).map_err(|e| {
+            PyRuntimeError::new_err(format!(
+                "Error: {e}. Bytes must contain video data; pass filesystem paths as str."
+            ))
+        })
+    }
+
     fn from_python(value: &Bound<'_, PyAny>) -> PyResult<Self> {
         if value.is_instance_of::<PyString>() {
             let path = value.extract::<String>()?;
@@ -162,7 +182,11 @@ impl PyVideoReader {
         oob_mode: Option<&str>,
     ) -> PyResult<Self> {
         let source = VideoSource::from_python(filename)?;
-        let is_memory = !matches!(&source, VideoSource::Path(_));
+        if filter.as_ref().is_some_and(|spec| spec.contains('\0')) {
+            return Err(PyValueError::new_err(
+                "filter contains an embedded null byte",
+            ));
+        }
         // Configure ffmpeg log level (global). Default to Error to suppress noisy warnings.
         let ffmpeg_level = match log_level {
             None => ffmpeg_log::Level::Error,
@@ -230,24 +254,14 @@ impl PyVideoReader {
             hwaccel,
             filter,
         );
-        let result = filename.py().detach(move || match source {
-            VideoSource::Path(path) => VideoReader::new(path, decoder_config, out_of_bounds_mode),
-            VideoSource::Bytes(bytes) => {
-                VideoReader::from_stream(Cursor::new(bytes), decoder_config, out_of_bounds_mode)
-            }
-            VideoSource::OwnedBytes(bytes) => {
-                VideoReader::from_stream(Cursor::new(bytes), decoder_config, out_of_bounds_mode)
-            }
-        });
-        match result {
-            Ok(reader) => Ok(PyVideoReader {
-                inner: Mutex::new(reader),
-            }),
-            Err(e) if is_memory => Err(PyRuntimeError::new_err(format!(
-                "Error: {e}. Bytes must contain video data; pass filesystem paths as str."
-            ))),
-            Err(e) => Err(PyRuntimeError::new_err(format!("Error: {e}"))),
-        }
+        let reader = filename.py().detach(move || {
+            let (input, stream_index) = source.open()?;
+            VideoReader::from_context(input, stream_index, decoder_config, out_of_bounds_mode)
+                .map_err(|e| PyRuntimeError::new_err(format!("Error: {e}")))
+        })?;
+        Ok(PyVideoReader {
+            inner: Mutex::new(reader),
+        })
     }
 
     fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
@@ -627,13 +641,13 @@ impl PyVideoReader {
     /// Count actual decodable frames by decoding without color conversion.
     /// This is slower than reading metadata but gives accurate results for B-frame videos.
     /// Equivalent to ffprobe's `nb_read_frames` with `-count_frames` option.
-    fn count_actual_frames(&self) -> PyResult<usize> {
-        match self.inner.lock() {
+    fn count_actual_frames(&self, py: Python<'_>) -> PyResult<usize> {
+        py.detach(|| match self.inner.lock() {
             Ok(mut vr) => vr
                 .count_actual_frames()
                 .map_err(|e| PyRuntimeError::new_err(format!("Error: {e}"))),
             Err(e) => Err(PyRuntimeError::new_err(format!("Lock error: {e}"))),
-        }
+        })
     }
 }
 
