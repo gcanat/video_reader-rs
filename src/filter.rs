@@ -481,7 +481,7 @@ mod tests {
     fn init_ffmpeg() {
         static INIT: Once = Once::new();
         INIT.call_once(|| {
-            ffmpeg::init().expect("ffmpeg init failed");
+            crate::utils::init_ffmpeg().expect("ffmpeg init failed");
         });
     }
 

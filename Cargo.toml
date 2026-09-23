@@ -2,6 +2,7 @@
 name = "video_reader-rs"
 version = "0.4.4"
 edition = "2021"
+rust-version = "1.88"
 
 [lib]
 name = "video_reader"

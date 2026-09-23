@@ -31,7 +31,7 @@ pip install video-reader-rs
 Requires Python >= 3.9.
 
 ### Manual installation
-You need to have ffmpeg installed on your system.
+You need Rust 1.88 or newer and FFmpeg development libraries installed on your system.
 Install maturin:
 ```bash
 pip install maturin
@@ -76,9 +76,11 @@ vr = PyVideoReader(video_bytes)
 vr = PyVideoReader(BytesIO(video_bytes))
 ```
 
-Immutable `bytes` are retained without copying the entire input into Rust. Mutable inputs are snapshotted,
-so you can change or close the original object after constructing the reader. `BytesIO` uses its full
+Plain immutable `bytes` are retained without copying the entire input into Rust. Mutable inputs and
+`bytes` subclasses are snapshotted, so you can change or close the original object after constructing
+the reader. `BytesIO` uses its full
 contents regardless of its current position, and leaves that position unchanged.
+Bytes always mean encoded video data; pass filesystem paths as strings, using `os.fsdecode()` if needed.
 
 Decoding a video is as simple as:
 ```python

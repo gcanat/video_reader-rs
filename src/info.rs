@@ -1,3 +1,4 @@
+use crate::utils::read_packet;
 use ffmpeg::codec::packet::side_data::Type as SideDataType;
 use ffmpeg::ffi::av_display_rotation_get;
 
@@ -588,8 +589,8 @@ pub fn get_frame_count(
     let mut key_frames = Vec::new();
     let mut frame_times = BTreeMap::new();
 
-    for (stream, packet) in ictx.packets() {
-        if &stream.index() == stream_index {
+    while let Some(packet) = read_packet(ictx)? {
+        if &packet.stream() == stream_index {
             let pts_opt = packet.pts();
             let dts_opt = packet.dts();
             let pts = pts_opt.unwrap_or(0);

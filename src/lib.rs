@@ -15,12 +15,13 @@ use log::debug;
 use numpy::ndarray::{Dim, IxDyn};
 use numpy::{IntoPyArray, PyArray};
 use pyo3::{
-    exceptions::{PyRuntimeError, PyTypeError},
+    exceptions::{PyRuntimeError, PyTypeError, PyValueError},
     pybacked::PyBackedBytes,
     pyclass, pymethods, pymodule,
     types::{
-        IntoPyDict, PyAny, PyAnyMethods, PyDict, PyFloat, PyList, PyModule, PyModuleMethods,
-        PySlice, PySliceMethods,
+        IntoPyDict, PyAny, PyAnyMethods, PyByteArray, PyByteArrayMethods, PyBytes, PyBytesMethods,
+        PyDict, PyFloat, PyList, PyModule, PyModuleMethods, PySlice, PySliceMethods, PyString,
+        PyTypeMethods,
     },
     Bound, FromPyObject, PyRef, PyRefMut, PyResult, Python,
 };
@@ -41,6 +42,45 @@ static RUNTIME: Lazy<Runtime> = Lazy::new(|| {
 
 type Frame = PyArray<u8, Dim<[usize; 3]>>;
 type FrameOrVid = PyArray<u8, IxDyn>;
+
+enum VideoSource {
+    Path(String),
+    Bytes(PyBackedBytes),
+    OwnedBytes(Vec<u8>),
+}
+
+impl VideoSource {
+    fn from_python(value: &Bound<'_, PyAny>) -> PyResult<Self> {
+        if value.is_instance_of::<PyString>() {
+            let path = value.extract::<String>()?;
+            if path.contains('\0') {
+                return Err(PyValueError::new_err("embedded null byte"));
+            }
+            return Ok(Self::Path(path));
+        }
+        if let Ok(bytes) = value.cast::<PyByteArray>() {
+            return Ok(Self::OwnedBytes(bytes.to_vec()));
+        }
+        let bytes = if value.is_instance_of::<PyBytes>() {
+            value.clone()
+        } else if value.is_instance(&value.py().import("io")?.getattr("BytesIO")?)? {
+            value.call_method0("getvalue")?
+        } else {
+            return Err(PyTypeError::new_err(format!(
+                "filename must be a str, bytes, bytearray, or io.BytesIO, got {}",
+                value.get_type().name()?
+            )));
+        };
+        if bytes.is_exact_instance_of::<PyBytes>() {
+            Ok(Self::Bytes(bytes.extract()?))
+        } else {
+            // A bytes subclass can hold a reference back to this reader through its attributes.
+            Ok(Self::OwnedBytes(
+                bytes.cast::<PyBytes>()?.as_bytes().to_vec(),
+            ))
+        }
+    }
+}
 
 #[derive(FromPyObject)]
 enum IntOrSlice<'py> {
@@ -121,6 +161,8 @@ impl PyVideoReader {
         log_level: Option<&str>,
         oob_mode: Option<&str>,
     ) -> PyResult<Self> {
+        let source = VideoSource::from_python(filename)?;
+        let is_memory = !matches!(&source, VideoSource::Path(_));
         // Configure ffmpeg log level (global). Default to Error to suppress noisy warnings.
         let ffmpeg_level = match log_level {
             None => ffmpeg_log::Level::Error,
@@ -188,26 +230,22 @@ impl PyVideoReader {
             hwaccel,
             filter,
         );
-        let result = if let Ok(path) = filename.extract::<String>() {
-            VideoReader::new(path, decoder_config, out_of_bounds_mode)
-        } else {
-            let bytes = if let Ok(bytes) = filename.extract::<PyBackedBytes>() {
-                bytes
-            } else if filename.is_instance(&filename.py().import("io")?.getattr("BytesIO")?)? {
-                filename
-                    .call_method0("getvalue")?
-                    .extract::<PyBackedBytes>()?
-            } else {
-                return Err(PyTypeError::new_err(
-                    "filename must be a str, bytes, bytearray, or io.BytesIO",
-                ));
-            };
-            VideoReader::from_stream(Cursor::new(bytes), decoder_config, out_of_bounds_mode)
-        };
+        let result = filename.py().detach(move || match source {
+            VideoSource::Path(path) => VideoReader::new(path, decoder_config, out_of_bounds_mode),
+            VideoSource::Bytes(bytes) => {
+                VideoReader::from_stream(Cursor::new(bytes), decoder_config, out_of_bounds_mode)
+            }
+            VideoSource::OwnedBytes(bytes) => {
+                VideoReader::from_stream(Cursor::new(bytes), decoder_config, out_of_bounds_mode)
+            }
+        });
         match result {
             Ok(reader) => Ok(PyVideoReader {
                 inner: Mutex::new(reader),
             }),
+            Err(e) if is_memory => Err(PyRuntimeError::new_err(format!(
+                "Error: {e}. Bytes must contain video data; pass filesystem paths as str."
+            ))),
             Err(e) => Err(PyRuntimeError::new_err(format!("Error: {e}"))),
         }
     }
@@ -215,16 +253,14 @@ impl PyVideoReader {
     fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
         slf
     }
-    fn __next__<'a>(
-        slf: PyRefMut<'_, Self>,
-        py: Python<'a>,
-    ) -> Option<Bound<'a, PyArray<u8, Dim<[usize; 3]>>>> {
+    fn __next__<'a>(slf: PyRefMut<'_, Self>, py: Python<'a>) -> PyResult<Option<Bound<'a, Frame>>> {
         match slf.inner.lock() {
-            Ok(mut vr) => vr.next().map(|rgb_frame| rgb_frame.into_pyarray(py)),
-            Err(e) => {
-                debug!("Lock error in __next__: {e}");
-                None
-            }
+            Ok(mut vr) => match vr.decode_next() {
+                Ok(frame) => Ok(Some(frame.into_pyarray(py))),
+                Err(ffmpeg::Error::Eof) => Ok(None),
+                Err(e) => Err(PyRuntimeError::new_err(format!("Error: {e}"))),
+            },
+            Err(e) => Err(PyRuntimeError::new_err(format!("Lock error: {e}"))),
         }
     }
 
@@ -593,7 +629,9 @@ impl PyVideoReader {
     /// Equivalent to ffprobe's `nb_read_frames` with `-count_frames` option.
     fn count_actual_frames(&self) -> PyResult<usize> {
         match self.inner.lock() {
-            Ok(mut vr) => Ok(vr.count_actual_frames()),
+            Ok(mut vr) => vr
+                .count_actual_frames()
+                .map_err(|e| PyRuntimeError::new_err(format!("Error: {e}"))),
             Err(e) => Err(PyRuntimeError::new_err(format!("Lock error: {e}"))),
         }
     }

@@ -20,7 +20,9 @@ use crate::hwaccel::{HardwareAccelerationContext, HardwareAccelerationDeviceType
 use crate::info::{
     collect_video_metadata, extract_video_params, get_frame_count, get_resized_dim, StreamInfo,
 };
-use crate::utils::{insert_frame, FrameArray, VideoArray, HWACCEL_PIXEL_FORMAT};
+use crate::utils::{
+    init_ffmpeg, insert_frame, read_packet, FrameArray, VideoArray, HWACCEL_PIXEL_FORMAT,
+};
 use ndarray::{s, Array, Array4};
 use tokio::task;
 
@@ -34,16 +36,19 @@ pub fn get_init_context(
     let input_file = Path::new(filename);
 
     // Initialize the FFmpeg library
-    ffmpeg::init()?;
+    init_ffmpeg()?;
 
     // Open the input file
     let ictx = input(&input_file)?;
-    let stream_index = ictx
-        .streams()
-        .best(Type::Video)
-        .ok_or(ffmpeg::Error::StreamNotFound)?
-        .index();
+    let stream_index = best_video_stream(&ictx)?;
     Ok((ictx, stream_index))
+}
+
+fn best_video_stream(ictx: &ffmpeg::format::context::Input) -> Result<usize, ffmpeg::Error> {
+    ictx.streams()
+        .best(Type::Video)
+        .map(|stream| stream.index())
+        .ok_or(ffmpeg::Error::StreamNotFound)
 }
 
 fn setup_decoder_context(
@@ -126,14 +131,13 @@ impl VideoReader {
         decoder_config: DecoderConfig,
         oob_mode: OutOfBoundsMode,
     ) -> Result<VideoReader, ffmpeg::Error> {
-        ffmpeg::init()?;
+        init_ffmpeg()?;
         let io = ffmpeg::format::context::StreamIo::from_read_seek(stream)?;
-        let ictx = ffmpeg::format::input_from_stream(io, None, None)?;
-        let stream_index = ictx
-            .streams()
-            .best(Type::Video)
-            .ok_or(ffmpeg::Error::StreamNotFound)?
-            .index();
+        // Match file input's nested-protocol policy; custom AVIO has no default whitelist.
+        let mut options = ffmpeg::Dictionary::new();
+        options.set("protocol_whitelist", "file,crypto,data");
+        let ictx = ffmpeg::format::input_from_stream(io, None, Some(options))?;
+        let stream_index = best_video_stream(&ictx)?;
         Self::from_context(ictx, stream_index, decoder_config, oob_mode)
     }
 
@@ -144,7 +148,7 @@ impl VideoReader {
         oob_mode: OutOfBoundsMode,
     ) -> Result<VideoReader, ffmpeg::Error> {
         let stream_info = get_frame_count(&mut ictx, &stream_index)?;
-        let decoder = Self::get_decoder(&ictx, decoder_config)?;
+        let decoder = Self::get_decoder(&ictx, stream_index, decoder_config)?;
         debug!("frame_count: {}", stream_info.frame_count());
         debug!("key frames: {:?}", stream_info.key_frames());
         Ok(VideoReader {
@@ -166,11 +170,11 @@ impl VideoReader {
 
     pub fn get_decoder(
         ictx: &ffmpeg::format::context::Input,
+        stream_index: usize,
         config: DecoderConfig,
     ) -> Result<VideoDecoder, ffmpeg::Error> {
         let input = ictx
-            .streams()
-            .best(Type::Video)
+            .stream(stream_index)
             .ok_or(ffmpeg::Error::StreamNotFound)?;
 
         let fps = f64::from(input.avg_frame_rate());
@@ -377,8 +381,8 @@ impl VideoReader {
         }
 
         // Need more packets - read and send until we get a frame
-        for (stream, packet) in self.ictx.packets() {
-            if stream.index() == self.stream_index {
+        while let Some(packet) = read_packet(&mut self.ictx)? {
+            if packet.stream() == self.stream_index {
                 self.decoder.video.send_packet(&packet)?;
                 if let Some(rgb_frame) = self.decoder.decode_frames()? {
                     return Ok(rgb_frame);
@@ -413,11 +417,11 @@ impl VideoReader {
     ) -> Result<VideoArray, ffmpeg::Error> {
         let (mut reducer, max_idx) =
             self.decoder_start(start_frame, end_frame, compression_factor)?;
-        for (stream, packet) in self.ictx.packets() {
+        while let Some(packet) = read_packet(&mut self.ictx)? {
             if reducer.get_frame_index() > max_idx {
                 break;
             }
-            if stream.index() == self.stream_index {
+            if packet.stream() == self.stream_index {
                 self.decoder.video.send_packet(&packet)?;
                 match self
                     .decoder
@@ -537,11 +541,11 @@ impl VideoReader {
             Ok(curr_frame)
         };
 
-        for (stream, packet) in self.ictx.packets() {
+        while let Some(packet) = read_packet(&mut self.ictx)? {
             if &self.curr_frame > reducer.get_indices().iter().max().unwrap_or(&0) {
                 break;
             }
-            if stream.index() == self.stream_index {
+            if packet.stream() == self.stream_index {
                 self.decoder.video.send_packet(&packet)?;
                 let upd_curr_frame =
                     receive_and_process_decoded_frames(&mut self.decoder.video, self.curr_frame)?;
@@ -647,8 +651,8 @@ impl VideoReader {
         }
 
         // iterate all packets
-        'packets: for (stream, packet) in self.ictx.packets() {
-            if stream.index() != self.stream_index {
+        'packets: while let Some(packet) = read_packet(&mut self.ictx)? {
+            if packet.stream() != self.stream_index {
                 continue;
             }
             self.decoder.video.send_packet(&packet)?;
@@ -1117,9 +1121,9 @@ impl VideoReader {
 
         // Need more packets
         while failsafe > -1 {
-            match self.ictx.packets().next() {
-                Some((stream, packet)) => {
-                    if stream.index() == self.stream_index {
+            match read_packet(&mut self.ictx)? {
+                Some(packet) => {
+                    if packet.stream() == self.stream_index {
                         self.decoder.video.send_packet(&packet)?;
                         let (yuv_frame, counter) =
                             self.get_frame_raw_by_count(target_pres_idx, &mut prev_map_idx)?;
@@ -1643,18 +1647,16 @@ impl VideoReader {
     /// Count actual decodable frames by decoding without color conversion.
     /// This is slower than packet counting but gives accurate results for B-frame videos.
     /// Equivalent to ffprobe's `nb_read_frames` with `-count_frames` option.
-    pub fn count_actual_frames(&mut self) -> usize {
+    pub fn count_actual_frames(&mut self) -> Result<usize, ffmpeg::Error> {
         // Seek to start
-        if self.seek_to_start().is_err() {
-            return 0;
-        }
+        self.seek_to_start()?;
 
         let mut count = 0;
         let mut decoded = Video::empty();
 
         // Iterate through all packets and decode (without RGB conversion)
-        for (stream, packet) in self.ictx.packets() {
-            if stream.index() == self.stream_index {
+        while let Some(packet) = read_packet(&mut self.ictx)? {
+            if packet.stream() == self.stream_index {
                 // Try to send packet; if decoder queue is full (EAGAIN), drain frames then retry
                 let mut sent = false;
                 while !sent {
@@ -1688,9 +1690,9 @@ impl VideoReader {
 
         // Reset decoder state
         self.decoder.video.flush();
-        let _ = self.seek_to_start();
+        self.seek_to_start()?;
 
-        count
+        Ok(count)
     }
 
     // AVSEEK_FLAG_BACKWARD 1 <- seek backward
@@ -1799,13 +1801,6 @@ impl VideoReader {
     }
 }
 
-impl Iterator for VideoReader {
-    type Item = FrameArray;
-    fn next(&mut self) -> Option<Self::Item> {
-        self.decode_next().ok()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1850,7 +1845,7 @@ mod tests {
     #[test]
     fn test_setup_decoder_context_no_hwaccel() {
         let path = Path::new(TEST_VIDEO);
-        ffmpeg::init().expect("ffmpeg init failed");
+        init_ffmpeg().expect("ffmpeg init failed");
         let ictx = input(&path).expect("open input failed");
         let stream = ictx
             .streams()
