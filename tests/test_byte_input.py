@@ -194,6 +194,14 @@ def test_iteration_can_restart_after_random_access_drains_decoder(data, frames, 
     np.testing.assert_array_equal(list(reader), frames, strict=True)
 
 
+def test_iteration_restarts_after_partial_pass_and_count(frames):
+    reader = PyVideoReader(VIDEO, threads=1)
+    for _ in range(len(frames) - 1):
+        next(reader)
+    assert reader.count_actual_frames() == len(frames)
+    np.testing.assert_array_equal(list(reader), frames, strict=True)
+
+
 def test_invalid_input_type_raises(data):
     with open(VIDEO, "rb") as file:
         for source in (None, 123, object(), [1, 2, 3], Path(VIDEO), memoryview(data), file):
@@ -241,11 +249,11 @@ def test_damaged_transport_stream_recovers_after_demuxer_errors(tmp_path, frames
     data[middle:middle + 131072] = bytes(131072)
     path.write_bytes(data)
     result = subprocess.run(
-        ["ffmpeg", "-v", "error", "-i", str(path), "-map", "0:v:0", "-c", "copy", "-f", "null", "-",
-         "-progress", "pipe:1", "-nostats"],
+        ["ffmpeg", "-v", "error", "-i", str(path), "-map", "0:v:0", "-c", "copy", "-f", "framecrc", "-"],
         check=True, capture_output=True, text=True, timeout=30,
     )
-    expected = int([line.split("=")[1] for line in result.stdout.splitlines() if line.startswith("frame=")][-1])
+    # One line per packet. FFmpeg 6.1 and 7.0 omit frame= from -progress for stream copy.
+    expected = sum(not line.startswith("#") for line in result.stdout.splitlines())
     assert expected > len(frames) * 8, "FFmpeg must recover packets beyond the damaged region"
     for source in (str(path), bytes(data)):
         reader = PyVideoReader(source, threads=1)

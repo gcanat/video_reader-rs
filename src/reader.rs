@@ -98,7 +98,10 @@ pub struct VideoReader {
     curr_pres_idx: usize,
     n_fails: usize,
     decoder: VideoDecoder,
-    draining: bool,
+    /// Iteration returned a frame since the last rewind
+    pass_decoded: bool,
+    /// Iteration skipped a corrupt packet since the last rewind
+    pass_skipped: bool,
     /// Cached result of seek verification (None = not tested yet)
     seek_verified: Option<bool>,
     /// True if we've sent EOF and need to re-seek before processing more frames
@@ -140,7 +143,8 @@ impl VideoReader {
             curr_pres_idx: 0,
             n_fails: 0,
             decoder,
-            draining: false,
+            pass_decoded: false,
+            pass_skipped: false,
             seek_verified: None, // Will be tested on first get_batch
             eof_sent: false,
             sequential_started: false,
@@ -357,42 +361,53 @@ impl VideoReader {
 
     pub fn decode_next(&mut self) -> Result<FrameArray, ffmpeg::Error> {
         self.sequential_started = false;
-        // First, try to get a frame from decoder buffer (from previously sent packets)
-        if let Some(rgb_frame) = self.decoder.decode_frames()? {
-            return Ok(rgb_frame);
+        self.rewind_after_read_error()?;
+        let result = self.next_frame();
+        if result.is_ok() {
+            self.pass_decoded = true;
+            return result;
         }
-
-        // Need more packets - read and send until we get a frame
-        while let Some(packet) = read_packet(&mut self.ictx)? {
-            if packet.stream() == self.stream_index {
-                match self.decoder.video.send_packet(&packet) {
-                    Ok(()) => (),
-                    Err(ffmpeg::Error::InvalidData) => continue,
-                    Err(error) => return Err(error),
-                }
-                if let Some(rgb_frame) = self.decoder.decode_frames()? {
-                    return Ok(rgb_frame);
-                }
-                // No frame yet, continue to next packet
-            }
+        // An error ends the pass like EOF does, so the next pass starts over. A pass that
+        // only skipped corrupt packets has nothing to show for it.
+        let only_skipped = self.pass_skipped && !self.pass_decoded;
+        self.seek_to_start()?;
+        match result {
+            Err(ffmpeg::Error::Eof) if only_skipped => Err(ffmpeg::Error::InvalidData),
+            result => result,
         }
+    }
 
-        // No more packets, drain the decoder
-        if !self.draining {
-            match self.decoder.video.send_eof() {
-                Ok(()) | Err(ffmpeg::Error::Eof) => self.draining = true,
+    fn next_frame(&mut self) -> Result<FrameArray, ffmpeg::Error> {
+        loop {
+            match self.decoder.decode_frames() {
+                Ok(Some(rgb_frame)) => return Ok(rgb_frame),
+                Ok(None) => {}
+                // With frame threading, a corrupt packet is reported when its frame is due.
+                Err(ffmpeg::Error::InvalidData) => {
+                    self.pass_skipped = true;
+                    continue;
+                }
                 Err(error) => return Err(error),
             }
-        }
-
-        // Try to get remaining frames from decoder buffer
-        match self.decoder.decode_frames()? {
-            Some(rgb_frame) => Ok(rgb_frame),
-            None => {
-                self.draining = false;
-                self.decoder.video.flush();
-                self.seek_to_start()?;
-                Err(ffmpeg::Error::Eof)
+            let sent = match read_packet(&mut self.ictx)? {
+                Some(packet) if packet.stream() == self.stream_index => {
+                    self.decoder.video.send_packet(&packet)
+                }
+                Some(_) => continue,
+                None if self.eof_sent => return Err(ffmpeg::Error::Eof),
+                None => {
+                    self.eof_sent = true;
+                    match self.decoder.video.send_eof() {
+                        // Random access may already have drained the decoder.
+                        Err(ffmpeg::Error::Eof) => Ok(()),
+                        result => result,
+                    }
+                }
+            };
+            // Skip corrupt packets like ffmpeg does.
+            match sent {
+                Err(ffmpeg::Error::InvalidData) => self.pass_skipped = true,
+                result => result?,
             }
         }
     }
@@ -411,16 +426,14 @@ impl VideoReader {
             }
             if packet.stream() == self.stream_index {
                 self.decoder.video.send_packet(&packet)?;
-                match self
+                // Drain every ready frame so the next send cannot hit EAGAIN.
+                while let Some(rgb_frame) = self
                     .decoder
                     .receive_and_process_decoded_frames(&mut reducer)?
                 {
-                    Some(rgb_frame) => {
-                        let mut slice_frame = reducer.slice_mut(reducer.get_idx_counter());
-                        insert_frame(&mut slice_frame, rgb_frame);
-                        reducer.incr_idx_counter(1);
-                    }
-                    None => debug!("No frame received!"),
+                    let mut slice_frame = reducer.slice_mut(reducer.get_idx_counter());
+                    insert_frame(&mut slice_frame, rgb_frame);
+                    reducer.incr_idx_counter(1);
                 }
             } else {
                 debug!("Packet for another stream");
@@ -637,24 +650,27 @@ impl VideoReader {
             }
         }
 
-        // iterate all packets
+        // Receive before reading: skip-forward can resume with frames still queued, and
+        // sending into a full decoder fails with EAGAIN.
+        let mut resync = false;
+        let mut failed = false;
         'packets: loop {
-            let packet = match read_packet(&mut self.ictx) {
-                Ok(Some(packet)) => packet,
-                Ok(None) => break,
-                Err(error) if self.oob_mode == OutOfBoundsMode::Error => return Err(error),
-                Err(_) => break, // Drain buffered frames, then apply skip/black to missing ones.
-            };
-            if packet.stream() != self.stream_index {
-                continue;
-            }
-            if let Err(error) = self.decoder.video.send_packet(&packet) {
-                if self.oob_mode == OutOfBoundsMode::Error {
-                    return Err(error);
+            loop {
+                match self.decoder.video.receive_frame(&mut decoded) {
+                    Ok(()) => {}
+                    // With frame threading, a corrupt packet is reported when its frame is due.
+                    Err(ffmpeg::Error::InvalidData) => {
+                        resync = true;
+                        continue;
+                    }
+                    Err(_) => break,
                 }
-                break; // A failed read can also produce a partial, undecodable packet.
-            }
-            while self.decoder.video.receive_frame(&mut decoded).is_ok() {
+                // Skipped packets make frame counting drift; realign from the PTS.
+                if resync {
+                    if let Some(idx) = self.presentation_index(&decoded) {
+                        curr_idx = idx;
+                    }
+                }
                 if let Some(positions) = positions_map.get(&curr_idx) {
                     // push frame through filter graph, offload color conversion to async task
                     self.decoder
@@ -709,69 +725,36 @@ impl VideoReader {
                     break 'packets;
                 }
             }
-        }
-
-        // Track whether we exhausted the packet iterator or exited early
-        // If we exited early (all needed frames collected), decoder state is still valid
-        // If exhausted, we need to flush remaining frames from decoder buffer
-        let exhausted_packets = collected < needed_total;
-
-        if exhausted_packets {
-            // Flush remaining frames from decoder buffer
-            self.decoder.video.send_eof()?;
-            self.eof_sent = true; // Mark that we sent EOF, next call must seek
-            while self.decoder.video.receive_frame(&mut decoded).is_ok() {
-                if let Some(positions) = positions_map.get(&curr_idx) {
-                    self.decoder
-                        .graph
-                        .get("in")
-                        .ok_or(ffmpeg::Error::Bug)?
-                        .source()
-                        .add(&decoded)?;
-                    let mut rgb_frame = Video::empty();
-                    if self
-                        .decoder
-                        .graph
-                        .get("out")
-                        .ok_or(ffmpeg::Error::Bug)?
-                        .sink()
-                        .frame(&mut rgb_frame)
-                        .is_ok()
-                    {
-                        let cspace = self.decoder.color_space;
-                        let crange = self.decoder.color_range;
-                        let frame = if self.decoder.is_hwaccel {
-                            convert_nv12_to_ndarray_rgb24(rgb_frame, cspace, crange)?
-                        } else {
-                            convert_yuv_to_ndarray_rgb24(rgb_frame, cspace, crange)?
-                        };
-                        match self.oob_mode {
-                            OutOfBoundsMode::Skip => {
-                                let frame_id = frames_store.len();
-                                frames_store.push(frame);
-                                if let Some(slots) = slot_to_frame.as_mut() {
-                                    for &pos in positions {
-                                        slots[pos] = Some(frame_id);
-                                    }
-                                }
-                            }
-                            OutOfBoundsMode::Black | OutOfBoundsMode::Error => {
-                                if let Some(batch) = output_batch.as_mut() {
-                                    for &pos in positions {
-                                        batch.slice_mut(s![pos, .., .., ..]).assign(&frame);
-                                        if let Some(found) = found_positions.as_mut() {
-                                            found[pos] = true;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        collected += 1;
-                    }
+            if self.eof_sent {
+                break;
+            }
+            let packet = match read_packet(&mut self.ictx) {
+                Ok(packet) => packet,
+                Err(error) if self.oob_mode == OutOfBoundsMode::Error => return Err(error),
+                Err(_) => {
+                    failed = true;
+                    None
                 }
-                curr_idx += 1;
-                if collected >= needed_total || curr_idx > max_needed {
-                    break;
+            };
+            let sent = match packet {
+                Some(packet) if packet.stream() != self.stream_index => continue,
+                Some(packet) => self.decoder.video.send_packet(&packet),
+                None => Err(ffmpeg::Error::Eof),
+            };
+            match sent {
+                Ok(()) => {}
+                // Skip corrupt packets like ffmpeg does.
+                Err(ffmpeg::Error::InvalidData) => resync = true,
+                Err(error)
+                    if error != ffmpeg::Error::Eof && self.oob_mode == OutOfBoundsMode::Error =>
+                {
+                    return Err(error)
+                }
+                Err(error) => {
+                    // Out of packets, or skip/black after a failure: drain the decoder.
+                    failed |= error != ffmpeg::Error::Eof;
+                    self.decoder.video.send_eof()?;
+                    self.eof_sent = true; // The next call must seek
                 }
             }
         }
@@ -828,12 +811,33 @@ impl VideoReader {
             }
         };
 
-        // Update position for skip-forward on subsequent calls
-        // Don't flush decoder - keep reference frames for B-frame videos
-        // Don't seek to start - allow continuing from current position
-        self.curr_pres_idx = curr_idx;
-        self.sequential_started = true;
+        if failed {
+            // The decoder was drained mid-stream, so start the next call from the beginning.
+            self.seek_to_start()?;
+        } else {
+            // Update position for skip-forward on subsequent calls
+            // Don't flush decoder - keep reference frames for B-frame videos
+            // Don't seek to start - allow continuing from current position
+            self.curr_pres_idx = curr_idx;
+            self.sequential_started = true;
+        }
         Ok(frame_batch)
+    }
+
+    /// A failed call can leave a latched read error behind; rewind so the next read retries.
+    fn rewind_after_read_error(&mut self) -> Result<(), ffmpeg::Error> {
+        // SAFETY: this reader exclusively owns the context and no callback is running.
+        let io = unsafe { (*self.ictx.as_mut_ptr()).pb.as_ref() };
+        if io.is_some_and(|io| io.error != 0) {
+            self.seek_to_start()?;
+        }
+        Ok(())
+    }
+
+    /// Presentation index of a decoded frame, from its PTS.
+    fn presentation_index(&self, frame: &Video) -> Option<usize> {
+        let pts = frame.pts()? - self.stream_info.min_pts_offset();
+        self.stream_info.presentation_for_pts_norm(pts)
     }
 
     /// Get the batch of frames from the video by seeking to the closest keyframe and skipping
@@ -848,6 +852,7 @@ impl VideoReader {
     /// - `Black`: Return black (all-zero) frames for failed fetches
     pub fn get_batch(&mut self, indices: Vec<usize>) -> Result<VideoArray, ffmpeg::Error> {
         self.sequential_started = false;
+        self.rewind_after_read_error()?;
         // Clear any stale failure state from previous calls
         self.failed_indices.clear();
 
@@ -889,6 +894,7 @@ impl VideoReader {
             None
         };
 
+        let mut all_found = true;
         // Process frames in sorted order (minimizes seeks)
         for frame_index in unique_frames {
             self.n_fails = 0;
@@ -930,6 +936,7 @@ impl VideoReader {
                     }
                 }
                 Ok(None) => {
+                    all_found = false;
                     debug!("No frame found for frame index {}", frame_index);
                     match self.oob_mode {
                         OutOfBoundsMode::Error => {
@@ -959,6 +966,7 @@ impl VideoReader {
                         }
                     }
 
+                    all_found = false;
                     debug!("seek_accurate_raw failed at {}: {:?}", frame_index, e);
                     match self.oob_mode {
                         OutOfBoundsMode::Error => {
@@ -980,6 +988,9 @@ impl VideoReader {
                 }
             }
         }
+
+        // The seek path keeps curr_pres_idx in sync, so a sequential batch can resume from it.
+        self.sequential_started = all_found;
 
         // Check if any failures occurred in Error mode
         if self.oob_mode == OutOfBoundsMode::Error && !self.failed_indices.is_empty() {
@@ -1637,10 +1648,13 @@ impl VideoReader {
     /// Seek back to the begining of the stream
     fn seek_to_start(&mut self) -> Result<(), ffmpeg::Error> {
         self.sequential_started = false;
-        // A seek does not clear AVIO's latched read error. Allow a new pass to retry I/O.
+        self.pass_decoded = false;
+        self.pass_skipped = false;
+        // A seek does not clear AVIO's latched read error or EOF. Allow a new pass to retry I/O.
         // SAFETY: this reader exclusively owns the context and no callback is running.
         if let Some(io) = unsafe { (*self.ictx.as_mut_ptr()).pb.as_mut() } {
             io.error = 0;
+            io.eof_reached = 0;
         }
         self.ictx.seek(0, ..100)?;
         self.avflushbuf()?;
@@ -1659,6 +1673,17 @@ impl VideoReader {
 
         let mut count = 0;
         let mut decoded = Video::empty();
+        // With frame threading, a corrupt packet is reported in place of its frame.
+        let mut drain = |video: &mut ffmpeg::decoder::Video| {
+            let mut frames = 0;
+            loop {
+                match video.receive_frame(&mut decoded) {
+                    Ok(()) => frames += 1,
+                    Err(ffmpeg::Error::InvalidData) => {}
+                    Err(_) => return frames,
+                }
+            }
+        };
 
         // Iterate through all packets and decode (without RGB conversion)
         while let Some(packet) = read_packet(&mut self.ictx)? {
@@ -1671,9 +1696,7 @@ impl VideoReader {
                             sent = true;
                         }
                         Err(ffmpeg::Error::Other { errno }) if errno == ffmpeg::error::EAGAIN => {
-                            while self.decoder.video.receive_frame(&mut decoded).is_ok() {
-                                count += 1;
-                            }
+                            count += drain(&mut self.decoder.video);
                             continue; // Drain then retry send_packet
                         }
                         Err(_) => break, // Ignore other errors (e.g., corrupted packet)
@@ -1681,17 +1704,16 @@ impl VideoReader {
                 }
 
                 // Count all frames that come out of the decoder
-                while self.decoder.video.receive_frame(&mut decoded).is_ok() {
-                    count += 1;
-                }
+                count += drain(&mut self.decoder.video);
             }
         }
 
         // Drain remaining buffered frames (important for B-frame videos)
-        if self.decoder.video.send_eof().is_ok() {
-            while self.decoder.video.receive_frame(&mut decoded).is_ok() {
-                count += 1;
-            }
+        if matches!(
+            self.decoder.video.send_eof(),
+            Ok(()) | Err(ffmpeg::Error::InvalidData)
+        ) {
+            count += drain(&mut self.decoder.video);
         }
 
         // Reset decoder state
@@ -1786,7 +1808,6 @@ impl VideoReader {
         unsafe { avcodec_flush_buffers(self.decoder.video.as_mut_ptr()) };
         // Reset EOF state - after flushing, we can decode again
         self.eof_sent = false;
-        self.draining = false;
         // Also drain any remaining frames from the decoder
         let mut decoded = Video::empty();
         while self.decoder.video.receive_frame(&mut decoded).is_ok() {
@@ -1843,25 +1864,24 @@ mod tests {
 
     #[test]
     fn read_failures_are_reported_and_recover_after_rewind() {
+        let frames = |reader: &mut VideoReader| reader.decode_video(None, None, None).unwrap();
         for operation in ["decode", "count", "iteration", "batch"] {
-            let (mut reader, error) = reader_with_failing_io(OutOfBoundsMode::Error);
-            let expected = reader.decode_video(None, None, None).unwrap();
-            reader.get_batch_safe((0..10).collect()).unwrap();
-            error.store(ffmpeg::error::EIO, Ordering::SeqCst);
-            let result = match operation {
-                "decode" => reader.decode_video(None, None, None).map(|_| ()),
-                "count" => reader.count_actual_frames().map(|_| ()),
-                "batch" => reader.get_batch_safe((10..100).collect()).map(|_| ()),
-                _ => loop {
-                    if let Err(error) = reader.decode_next() {
-                        break Err(error);
-                    }
-                },
-            };
-            // A partial packet can be rejected by the batch decoder before the next read.
-            if operation == "batch" {
-                assert!(result.is_err());
-            } else {
+            // Whichever call comes next must recover without an explicit rewind.
+            for recovery in ["decode", "range", "count", "iteration", "batch"] {
+                let (mut reader, error) = reader_with_failing_io(OutOfBoundsMode::Error);
+                let expected = frames(&mut reader);
+                reader.get_batch_safe((0..10).collect()).unwrap();
+                error.store(ffmpeg::error::EIO, Ordering::SeqCst);
+                let result = match operation {
+                    "decode" => reader.decode_video(None, None, None).map(|_| ()),
+                    "count" => reader.count_actual_frames().map(|_| ()),
+                    "batch" => reader.get_batch_safe((10..100).collect()).map(|_| ()),
+                    _ => loop {
+                        if let Err(error) = reader.decode_next() {
+                            break Err(error);
+                        }
+                    },
+                };
                 assert_eq!(
                     result,
                     Err(ffmpeg::Error::Other {
@@ -1869,30 +1889,38 @@ mod tests {
                     }),
                     "{operation}"
                 );
-            }
-            error.store(0, Ordering::SeqCst);
-            // A failed call must invalidate the sequential cursor as well as permit fresh I/O.
-            assert_eq!(
-                reader.get_batch_safe((10..20).collect()).unwrap(),
-                expected.slice(s![10..20, .., .., ..])
-            );
-            assert_eq!(reader.decode_video(None, None, None).unwrap(), expected);
-            assert_eq!(
-                reader.count_actual_frames().unwrap(),
-                expected.len_of(ndarray::Axis(0))
-            );
-            let mut count = 0;
-            loop {
-                match reader.decode_next() {
-                    Ok(frame) => {
-                        assert_eq!(frame, expected.slice(s![count, .., .., ..]));
-                        count += 1;
+                error.store(0, Ordering::SeqCst);
+                match recovery {
+                    "decode" => assert_eq!(frames(&mut reader), expected),
+                    "range" => assert_eq!(
+                        reader.decode_video(Some(40), Some(50), None).unwrap(),
+                        expected.slice(s![40..50, .., .., ..])
+                    ),
+                    "count" => assert_eq!(
+                        reader.count_actual_frames().unwrap(),
+                        expected.len_of(ndarray::Axis(0))
+                    ),
+                    // A failed call must invalidate the sequential cursor as well as permit fresh I/O.
+                    "batch" => assert_eq!(
+                        reader.get_batch_safe((10..20).collect()).unwrap(),
+                        expected.slice(s![10..20, .., .., ..])
+                    ),
+                    _ => {
+                        let mut count = 0;
+                        loop {
+                            match reader.decode_next() {
+                                Ok(frame) => {
+                                    assert_eq!(frame, expected.slice(s![count, .., .., ..]));
+                                    count += 1;
+                                }
+                                Err(ffmpeg::Error::Eof) => break,
+                                Err(error) => panic!("iteration after {operation} failed: {error}"),
+                            }
+                        }
+                        assert_eq!(count, expected.len_of(ndarray::Axis(0)), "{operation}");
                     }
-                    Err(ffmpeg::Error::Eof) => break,
-                    Err(error) => panic!("iteration after {operation} failed: {error}"),
                 }
             }
-            assert_eq!(count, expected.len_of(ndarray::Axis(0)));
         }
     }
 

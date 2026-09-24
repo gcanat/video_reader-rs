@@ -15,10 +15,14 @@ pub fn init_ffmpeg() -> Result<(), Error> {
     *INIT.get_or_init(ffmpeg_next::init)
 }
 
+/// Recoverable read failures allowed without top-level progress. Nested demuxers
+/// (hls, concat) advance their own AVIO while the playlist's position stays put.
+const MAX_STALLED_READS: u32 = 1000;
+
 /// Preserve recoverable demuxer errors without mistaking an I/O failure for EOF.
 pub fn read_packet(input: &mut Input) -> Result<Option<Packet>, Error> {
     let mut packet = Packet::empty();
-    let mut last_error_position = None;
+    let (mut last_position, mut stalls) = (-1, 0);
     loop {
         match packet.read(input) {
             Ok(()) => return Ok(Some(packet)),
@@ -30,7 +34,6 @@ pub fn read_packet(input: &mut Input) -> Result<Option<Packet>, Error> {
                     errno: ffmpeg_next::error::EAGAIN,
                 }),
             ) => {
-                // Retry resynchronization only while consecutive failures advance the input.
                 // SAFETY: input owns this context; no read callback is running here.
                 unsafe {
                     let io = (*input.as_mut_ptr()).pb;
@@ -42,10 +45,13 @@ pub fn read_packet(input: &mut Input) -> Result<Option<Packet>, Error> {
                     }
                     // avio_tell is an inline C wrapper around this seek.
                     let position = ffmpeg_next::ffi::avio_seek(io, 0, libc::SEEK_CUR);
-                    if position < 0 || last_error_position.is_some_and(|last| position <= last) {
+                    if position > last_position {
+                        (last_position, stalls) = (position, 0);
+                    } else if stalls == MAX_STALLED_READS {
                         return Err(error);
+                    } else {
+                        stalls += 1;
                     }
-                    last_error_position = Some(position);
                 }
             }
             Err(error) => return Err(error),

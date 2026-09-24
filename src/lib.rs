@@ -15,7 +15,7 @@ use log::debug;
 use numpy::ndarray::{Dim, IxDyn};
 use numpy::{IntoPyArray, PyArray};
 use pyo3::{
-    exceptions::{PyRuntimeError, PyTypeError, PyValueError},
+    exceptions::{PyIndexError, PyRuntimeError, PyTypeError, PyValueError},
     pybacked::PyBackedBytes,
     pyclass, pymethods, pymodule,
     types::{
@@ -23,7 +23,7 @@ use pyo3::{
         PyDict, PyFloat, PyList, PyModule, PyModuleMethods, PySlice, PySliceMethods, PyString,
         PyTypeMethods,
     },
-    Bound, FromPyObject, PyRef, PyRefMut, PyResult, Python,
+    Bound, FromPyObject, PyRef, PyResult, Python,
 };
 use reader::VideoReader;
 use std::io::Cursor;
@@ -267,7 +267,7 @@ impl PyVideoReader {
     fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
         slf
     }
-    fn __next__<'a>(slf: PyRefMut<'_, Self>, py: Python<'a>) -> PyResult<Option<Bound<'a, Frame>>> {
+    fn __next__<'a>(slf: PyRef<'_, Self>, py: Python<'a>) -> PyResult<Option<Bound<'a, Frame>>> {
         match slf.inner.lock() {
             Ok(mut vr) => match vr.decode_next() {
                 Ok(frame) => Ok(Some(frame.into_pyarray(py))),
@@ -340,6 +340,13 @@ impl PyVideoReader {
                     if is_single_frame {
                         // Extract the first frame and convert to owned array
                         use ndarray::Axis;
+                        if res_array.len_of(Axis(0)) == 0 {
+                            // Skip mode leaves nothing to return for a single index.
+                            return Err(PyIndexError::new_err(format!(
+                                "frame {} is unavailable",
+                                index_clone[0]
+                            )));
+                        }
                         let single_frame = res_array.index_axis(Axis(0), 0).to_owned();
                         Ok(single_frame.into_dyn())
                     } else {

@@ -76,10 +76,9 @@ vr = PyVideoReader(video_bytes)
 vr = PyVideoReader(BytesIO(video_bytes))
 ```
 
-Plain immutable `bytes` are retained without copying the entire input into Rust. Mutable inputs and
-`bytes` subclasses are snapshotted, so you can change or close the original object after constructing
-the reader. `BytesIO` uses its full
-contents regardless of its current position, and leaves that position unchanged.
+Plain `bytes` are used without copying. A `bytearray`, a `bytes` subclass or a `BytesIO` is snapshotted,
+so the original object can be changed or closed after the reader is created. `BytesIO` input uses the
+full buffer regardless of the current position, and leaves that position unchanged.
 Bytes always mean encoded video data; pass UTF-8 filesystem paths as strings. Non-UTF-8 paths are
 not supported. Memory inputs must be self-contained; external file and network references are disabled.
 
@@ -149,8 +148,10 @@ frames = vr.get_batch([0, 1, 999999])  # Returns 3 frames, last one is all zeros
 | `"skip"` | Skip invalid frames, array may be smaller than requested |
 | `"black"` | Return black frame for invalid indices |
 
-Skip and black modes also cover frames unavailable because of read or decoding errors.
-Iteration and `count_actual_frames()` raise `RuntimeError` on I/O failures.
+In `get_batch` and slicing, skip and black modes also cover frames lost to read or decoding errors.
+`vr[i]` raises `IndexError` when skip mode has no frame to return. Iteration skips corrupt packets.
+Iteration, `count_actual_frames()` and the decode methods raise `RuntimeError` on I/O failures;
+the decode methods may also raise on corrupt packets.
 
 It is also possible to directly use slicing or indexing:
 ```python
