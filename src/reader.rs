@@ -102,6 +102,8 @@ pub struct VideoReader {
     pass_decoded: bool,
     /// Iteration skipped a corrupt packet since the last rewind
     pass_skipped: bool,
+    /// A batch skipped a corrupt packet since the last rewind, so frame counting realigns from PTS
+    resync: bool,
     /// Cached result of seek verification (None = not tested yet)
     seek_verified: Option<bool>,
     /// True if we've sent EOF and need to re-seek before processing more frames
@@ -145,6 +147,7 @@ impl VideoReader {
             decoder,
             pass_decoded: false,
             pass_skipped: false,
+            resync: false,
             seek_verified: None, // Will be tested on first get_batch
             eof_sent: false,
             sequential_started: false,
@@ -652,7 +655,6 @@ impl VideoReader {
 
         // Receive before reading: skip-forward can resume with frames still queued, and
         // sending into a full decoder fails with EAGAIN.
-        let mut resync = false;
         let mut failed = false;
         'packets: loop {
             loop {
@@ -660,13 +662,13 @@ impl VideoReader {
                     Ok(()) => {}
                     // With frame threading, a corrupt packet is reported when its frame is due.
                     Err(ffmpeg::Error::InvalidData) => {
-                        resync = true;
+                        self.resync = true;
                         continue;
                     }
                     Err(_) => break,
                 }
                 // Skipped packets make frame counting drift; realign from the PTS.
-                if resync {
+                if self.resync {
                     if let Some(idx) = self.presentation_index(&decoded) {
                         curr_idx = idx;
                     }
@@ -744,7 +746,7 @@ impl VideoReader {
             match sent {
                 Ok(()) => {}
                 // Skip corrupt packets like ffmpeg does.
-                Err(ffmpeg::Error::InvalidData) => resync = true,
+                Err(ffmpeg::Error::InvalidData) => self.resync = true,
                 Err(error)
                     if error != ffmpeg::Error::Eof && self.oob_mode == OutOfBoundsMode::Error =>
                 {
@@ -990,7 +992,8 @@ impl VideoReader {
         }
 
         // The seek path keeps curr_pres_idx in sync, so a sequential batch can resume from it.
-        self.sequential_started = all_found;
+        // An empty batch never positioned the cursor.
+        self.sequential_started = all_found && !indices.is_empty();
 
         // Check if any failures occurred in Error mode
         if self.oob_mode == OutOfBoundsMode::Error && !self.failed_indices.is_empty() {
@@ -1650,6 +1653,7 @@ impl VideoReader {
         self.sequential_started = false;
         self.pass_decoded = false;
         self.pass_skipped = false;
+        self.resync = false;
         // A seek does not clear AVIO's latched read error or EOF. Allow a new pass to retry I/O.
         // SAFETY: this reader exclusively owns the context and no callback is running.
         if let Some(io) = unsafe { (*self.ictx.as_mut_ptr()).pb.as_mut() } {

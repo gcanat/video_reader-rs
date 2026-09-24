@@ -121,6 +121,10 @@ def test_batches_skip_only_the_corrupt_packet(tmp_path, mode):
     # B-frames reorder output, so only PTS puts the gap where the corrupt packet was.
     assert np.flatnonzero(lost).tolist() == (corrupted if mode == "black" else [])
     np.testing.assert_array_equal(batch[~lost], decodable, strict=True)
+    # Chunks resume with frames queued past the corrupt packet.
+    reader = PyVideoReader(str(path), threads=1, oob_mode=mode)
+    chunks = [reader.get_batch(list(range(start, start + 10)), with_fallback=True) for start in range(0, 100, 10)]
+    np.testing.assert_array_equal(np.concatenate(chunks), batch, strict=True)
 
 
 def test_iteration_raises_when_no_packet_decodes(tmp_path):

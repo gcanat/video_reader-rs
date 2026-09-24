@@ -194,6 +194,16 @@ def test_iteration_can_restart_after_random_access_drains_decoder(data, frames, 
     np.testing.assert_array_equal(list(reader), frames, strict=True)
 
 
+def test_empty_batch_keeps_a_stale_cursor_invalid(frames):
+    reader = PyVideoReader(VIDEO, threads=1)
+    for _ in range(5):
+        next(reader)
+    assert len(reader.get_batch([], with_fallback=False)) == 0
+    np.testing.assert_array_equal(
+        reader.get_batch(list(range(10, 20)), with_fallback=True), frames[10:20], strict=True
+    )
+
+
 def test_iteration_restarts_after_partial_pass_and_count(frames):
     reader = PyVideoReader(VIDEO, threads=1)
     for _ in range(len(frames) - 1):
