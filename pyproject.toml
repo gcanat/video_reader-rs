@@ -5,6 +5,7 @@ build-backend = "maturin"
 [project]
 name = "video_reader-rs"
 requires-python = ">=3.9"
+readme = "README.md"
 classifiers = [
     "Programming Language :: Rust",
     "Programming Language :: Python :: Implementation :: CPython",
