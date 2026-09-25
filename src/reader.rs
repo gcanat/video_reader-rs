@@ -1655,11 +1655,7 @@ impl VideoReader {
         self.pass_skipped = false;
         self.resync = false;
         // A seek does not clear AVIO's latched read error or EOF. Allow a new pass to retry I/O.
-        // SAFETY: this reader exclusively owns the context and no callback is running.
-        if let Some(io) = unsafe { (*self.ictx.as_mut_ptr()).pb.as_mut() } {
-            io.error = 0;
-            io.eof_reached = 0;
-        }
+        self.ictx.clear_eof();
         self.ictx.seek(0, ..100)?;
         self.avflushbuf()?;
         self.curr_frame = 0;
