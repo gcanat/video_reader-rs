@@ -1,3 +1,5 @@
+import subprocess
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -62,3 +64,15 @@ def test_invalid_slices_raise_python_errors(key, error, method):
     reader = PyVideoReader(VIDEO)
     with pytest.raises(error):
         getattr(reader, method)(key)
+
+
+def test_skipped_single_frame_raises_index_error():
+    # Isolated because this used to abort the interpreter.
+    script = f"""
+import pytest
+from video_reader import PyVideoReader
+with pytest.raises(IndexError, match="unavailable"):
+    PyVideoReader({VIDEO!r}, oob_mode="skip")[1000]
+"""
+    result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr

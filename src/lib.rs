@@ -15,14 +15,18 @@ use log::debug;
 use numpy::ndarray::{Dim, IxDyn};
 use numpy::{IntoPyArray, PyArray};
 use pyo3::{
-    exceptions::PyRuntimeError,
+    exceptions::{PyIndexError, PyRuntimeError, PyTypeError, PyValueError},
+    pybacked::PyBackedBytes,
     pyclass, pymethods, pymodule,
     types::{
-        IntoPyDict, PyDict, PyFloat, PyList, PyModule, PyModuleMethods, PySlice, PySliceMethods,
+        IntoPyDict, PyAny, PyAnyMethods, PyByteArray, PyByteArrayMethods, PyBytes, PyBytesMethods,
+        PyDict, PyFloat, PyList, PyModule, PyModuleMethods, PySlice, PySliceMethods, PyString,
+        PyTypeMethods,
     },
-    Bound, FromPyObject, PyRef, PyRefMut, PyResult, Python,
+    Bound, FromPyObject, PyRef, PyResult, Python,
 };
 use reader::VideoReader;
+use std::io::Cursor;
 use std::str::FromStr;
 use std::sync::Mutex;
 
@@ -38,6 +42,65 @@ static RUNTIME: Lazy<Runtime> = Lazy::new(|| {
 
 type Frame = PyArray<u8, Dim<[usize; 3]>>;
 type FrameOrVid = PyArray<u8, IxDyn>;
+
+enum VideoSource {
+    Path(String),
+    Bytes(PyBackedBytes),
+    OwnedBytes(Vec<u8>),
+}
+
+impl VideoSource {
+    fn open(self) -> PyResult<(ffmpeg::format::context::Input, usize)> {
+        let io = match self {
+            Self::Path(path) => {
+                return reader::get_init_context(&path)
+                    .map_err(|e| PyRuntimeError::new_err(format!("Error: {e}")));
+            }
+            Self::Bytes(bytes) => {
+                ffmpeg::format::context::StreamIo::from_read_seek(Cursor::new(bytes))
+            }
+            Self::OwnedBytes(bytes) => {
+                ffmpeg::format::context::StreamIo::from_read_seek(Cursor::new(bytes))
+            }
+        };
+        io.and_then(reader::get_stream_context).map_err(|e| {
+            PyRuntimeError::new_err(format!(
+                "Error: {e}. Bytes must contain video data; pass filesystem paths as str."
+            ))
+        })
+    }
+
+    fn from_python(value: &Bound<'_, PyAny>) -> PyResult<Self> {
+        if value.is_instance_of::<PyString>() {
+            let path = value.extract::<String>()?;
+            if path.contains('\0') {
+                return Err(PyValueError::new_err("embedded null byte"));
+            }
+            return Ok(Self::Path(path));
+        }
+        if let Ok(bytes) = value.cast::<PyByteArray>() {
+            return Ok(Self::OwnedBytes(bytes.to_vec()));
+        }
+        let bytes = if value.is_instance_of::<PyBytes>() {
+            value.clone()
+        } else if value.is_instance(&value.py().import("io")?.getattr("BytesIO")?)? {
+            value.call_method0("getvalue")?
+        } else {
+            return Err(PyTypeError::new_err(format!(
+                "filename must be a str, bytes, bytearray, or io.BytesIO, got {}",
+                value.get_type().name()?
+            )));
+        };
+        if bytes.is_exact_instance_of::<PyBytes>() {
+            Ok(Self::Bytes(bytes.extract()?))
+        } else {
+            // A bytes subclass can hold a reference back to this reader through its attributes.
+            Ok(Self::OwnedBytes(
+                bytes.cast::<PyBytes>()?.as_bytes().to_vec(),
+            ))
+        }
+    }
+}
 
 #[derive(FromPyObject)]
 enum IntOrSlice<'py> {
@@ -88,7 +151,7 @@ impl PyVideoReader {
     #[new]
     #[pyo3(signature = (filename, threads=None, resize_shorter_side=None, resize_longer_side=None, target_width=None, target_height=None, resize_algo=None, device=None, filter=None, log_level=None, oob_mode=None))]
     /// create an instance of VideoReader
-    /// * `filename` - path to the video file
+    /// * `filename` - a path string, bytes, bytearray, or io.BytesIO containing a complete video
     /// * `threads` - number of threads to use. If None, let ffmpeg choose the optimal number.
     /// * `resize_shorter_side - Optional, resize shorted side of the video to this value. If
     /// resize_longer_side is set to None, will try to preserve original aspect ratio.
@@ -106,7 +169,7 @@ impl PyVideoReader {
     /// * returns a PyVideoReader instance.
     #[allow(clippy::too_many_arguments)]
     fn new(
-        filename: &str,
+        filename: &Bound<'_, PyAny>,
         threads: Option<usize>,
         resize_shorter_side: Option<f64>,
         resize_longer_side: Option<f64>,
@@ -118,6 +181,12 @@ impl PyVideoReader {
         log_level: Option<&str>,
         oob_mode: Option<&str>,
     ) -> PyResult<Self> {
+        let source = VideoSource::from_python(filename)?;
+        if filter.as_ref().is_some_and(|spec| spec.contains('\0')) {
+            return Err(PyValueError::new_err(
+                "filter contains an embedded null byte",
+            ));
+        }
         // Configure ffmpeg log level (global). Default to Error to suppress noisy warnings.
         let ffmpeg_level = match log_level {
             None => ffmpeg_log::Level::Error,
@@ -185,27 +254,27 @@ impl PyVideoReader {
             hwaccel,
             filter,
         );
-        match VideoReader::new(filename.to_string(), decoder_config, out_of_bounds_mode) {
-            Ok(reader) => Ok(PyVideoReader {
-                inner: Mutex::new(reader),
-            }),
-            Err(e) => Err(PyRuntimeError::new_err(format!("Error: {e}"))),
-        }
+        let reader = filename.py().detach(move || {
+            let (input, stream_index) = source.open()?;
+            VideoReader::from_context(input, stream_index, decoder_config, out_of_bounds_mode)
+                .map_err(|e| PyRuntimeError::new_err(format!("Error: {e}")))
+        })?;
+        Ok(PyVideoReader {
+            inner: Mutex::new(reader),
+        })
     }
 
     fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
         slf
     }
-    fn __next__<'a>(
-        slf: PyRefMut<'_, Self>,
-        py: Python<'a>,
-    ) -> Option<Bound<'a, PyArray<u8, Dim<[usize; 3]>>>> {
+    fn __next__<'a>(slf: PyRef<'_, Self>, py: Python<'a>) -> PyResult<Option<Bound<'a, Frame>>> {
         match slf.inner.lock() {
-            Ok(mut vr) => vr.next().map(|rgb_frame| rgb_frame.into_pyarray(py)),
-            Err(e) => {
-                debug!("Lock error in __next__: {e}");
-                None
-            }
+            Ok(mut vr) => match vr.decode_next() {
+                Ok(frame) => Ok(Some(frame.into_pyarray(py))),
+                Err(ffmpeg::Error::Eof) => Ok(None),
+                Err(e) => Err(PyRuntimeError::new_err(format!("Error: {e}"))),
+            },
+            Err(e) => Err(PyRuntimeError::new_err(format!("Lock error: {e}"))),
         }
     }
 
@@ -271,6 +340,13 @@ impl PyVideoReader {
                     if is_single_frame {
                         // Extract the first frame and convert to owned array
                         use ndarray::Axis;
+                        if res_array.len_of(Axis(0)) == 0 {
+                            // Skip mode leaves nothing to return for a single index.
+                            return Err(PyIndexError::new_err(format!(
+                                "frame {} is unavailable",
+                                index_clone[0]
+                            )));
+                        }
                         let single_frame = res_array.index_axis(Axis(0), 0).to_owned();
                         Ok(single_frame.into_dyn())
                     } else {
@@ -572,11 +648,13 @@ impl PyVideoReader {
     /// Count actual decodable frames by decoding without color conversion.
     /// This is slower than reading metadata but gives accurate results for B-frame videos.
     /// Equivalent to ffprobe's `nb_read_frames` with `-count_frames` option.
-    fn count_actual_frames(&self) -> PyResult<usize> {
-        match self.inner.lock() {
-            Ok(mut vr) => Ok(vr.count_actual_frames()),
+    fn count_actual_frames(&self, py: Python<'_>) -> PyResult<usize> {
+        py.detach(|| match self.inner.lock() {
+            Ok(mut vr) => vr
+                .count_actual_frames()
+                .map_err(|e| PyRuntimeError::new_err(format!("Error: {e}"))),
             Err(e) => Err(PyRuntimeError::new_err(format!("Lock error: {e}"))),
-        }
+        })
     }
 }
 

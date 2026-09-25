@@ -31,7 +31,7 @@ pip install video-reader-rs
 Requires Python >= 3.9.
 
 ### Manual installation
-You need to have ffmpeg installed on your system.
+You need Rust 1.88 or newer and FFmpeg development libraries installed on your system.
 Install maturin:
 ```bash
 pip install maturin
@@ -66,6 +66,22 @@ For fish, replace the activation command with `source .venv/bin/activate.fish`;
 for Windows PowerShell, use `.\.venv\Scripts\Activate.ps1`.
 
 ## 💻 Usage
+The reader accepts a path string or a complete video held in `bytes`, `bytearray`, or `io.BytesIO`:
+
+```python
+from io import BytesIO
+from video_reader import PyVideoReader
+
+vr = PyVideoReader(video_bytes)
+vr = PyVideoReader(BytesIO(video_bytes))
+```
+
+Plain `bytes` are used without copying. A `bytearray`, a `bytes` subclass or a `BytesIO` is snapshotted,
+so the original object can be changed or closed after the reader is created. `BytesIO` input uses the
+full buffer regardless of the current position, and leaves that position unchanged.
+Bytes always mean encoded video data; pass UTF-8 filesystem paths as strings. Non-UTF-8 paths are
+not supported. Memory inputs must be self-contained; external file and network references are disabled.
+
 Decoding a video is as simple as:
 ```python
 from video_reader import PyVideoReader
@@ -87,7 +103,7 @@ for frame in vr:
     # do something with a single frame
     print("top left red pixel value:", frame[0, 0, 0])
 ```
-* **filename**: path to the video file to decode
+* **filename**: a path string, `bytes`, `bytearray`, or `io.BytesIO` containing a complete video
 * **resize**: optional resizing for the video.
 * **compression_factor**: temporal sampling, eg if 0.25, take 25% of the frames, evenly spaced.
 * **threads**: number of CPU cores to use for ffmpeg decoding, 0 means auto (let ffmpeg pick the optimal number).
@@ -131,6 +147,11 @@ frames = vr.get_batch([0, 1, 999999])  # Returns 3 frames, last one is all zeros
 | `"error"` (default) | Raise error on invalid frame |
 | `"skip"` | Skip invalid frames, array may be smaller than requested |
 | `"black"` | Return black frame for invalid indices |
+
+In `get_batch` and slicing, skip and black modes also cover frames lost to read or decoding errors.
+`vr[i]` raises `IndexError` when skip mode has no frame to return. Iteration skips corrupt packets.
+Iteration, `count_actual_frames()` and the decode methods raise `RuntimeError` on I/O failures;
+the decode methods may also raise on corrupt packets.
 
 It is also possible to directly use slicing or indexing:
 ```python

@@ -269,11 +269,17 @@ impl VideoDecoder {
 
     pub fn decode_frames(&mut self) -> Result<Option<FrameArray>, ffmpeg::Error> {
         let mut decoded = Video::empty();
-        if self.video.receive_frame(&mut decoded).is_ok() {
-            let rgb_frame = self.process_frame(&decoded)?;
-            return Ok(rgb_frame);
+        loop {
+            match self.video.receive_frame(&mut decoded) {
+                Ok(()) => {
+                    if let Some(rgb_frame) = self.process_frame(&decoded)? {
+                        return Ok(Some(rgb_frame));
+                    }
+                }
+                Err(error @ ffmpeg::Error::InvalidData) => return Err(error),
+                Err(_) => return Ok(None),
+            }
         }
-        Ok(None)
     }
 
     pub fn process_frame(&mut self, decoded: &Video) -> Result<Option<FrameArray>, ffmpeg::Error> {
