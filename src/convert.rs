@@ -19,6 +19,7 @@ pub fn convert_yuv_to_ndarray_rgb24(
     color_space: YuvStandardMatrix,
     color_range: YuvRange,
 ) -> Result<Array3<u8>, ffmpeg::Error> {
+    let color_range = frame_colorrange(&frame, color_range);
     let (buf_vec, frame_width, frame_height, bytes_copied) =
         copy_image(frame, AVPixelFormat::AV_PIX_FMT_YUV420P);
 
@@ -70,6 +71,7 @@ pub fn convert_nv12_to_ndarray_rgb24(
     color_space: YuvStandardMatrix,
     color_range: YuvRange,
 ) -> Result<Array3<u8>, ffmpeg::Error> {
+    let color_range = frame_colorrange(&frame, color_range);
     let (buf_vec, frame_width, frame_height, bytes_copied) =
         copy_image(frame, AVPixelFormat::AV_PIX_FMT_NV12);
 
@@ -109,6 +111,14 @@ pub fn convert_nv12_to_ndarray_rgb24(
     }
 }
 
+fn frame_colorrange(frame: &Video, default: YuvRange) -> YuvRange {
+    match frame.color_range() {
+        ffmpeg::util::color::Range::JPEG => YuvRange::Full,
+        ffmpeg::util::color::Range::MPEG => YuvRange::Limited,
+        ffmpeg::util::color::Range::Unspecified => default,
+    }
+}
+
 fn copy_image(mut frame: Video, pix_fmt: AVPixelFormat) -> (Vec<u8>, i32, i32, i32) {
     unsafe {
         let frame_ptr = frame.as_mut_ptr();
@@ -136,9 +146,9 @@ fn copy_image(mut frame: Video, pix_fmt: AVPixelFormat) -> (Vec<u8>, i32, i32, i
 
 pub fn get_colorspace(height: i32, color_space: &str) -> YuvStandardMatrix {
     match color_space {
-        "BT709" => YuvStandardMatrix::Bt709,   // HD, 720P/1080P
-        "BT601" => YuvStandardMatrix::Bt601,   // SD, 480P/576P
-        "BT2020" => YuvStandardMatrix::Bt2020, // UHD, 4K/8K
+        "BT709" => YuvStandardMatrix::Bt709, // HD, 720P/1080P
+        "BT601" => YuvStandardMatrix::Bt601, // SD, 480P/576P
+        "BT2020" | "BT2020NCL" => YuvStandardMatrix::Bt2020, // UHD, 4K/8K
         "SMPTE240" => YuvStandardMatrix::Smpte240,
         "BT470_6" => YuvStandardMatrix::Bt470_6,
         _ => {
@@ -214,6 +224,8 @@ mod tests {
 
     #[test]
     fn test_get_colorspace() {
+        assert_eq!(get_colorspace(480, "BT2020NCL"), YuvStandardMatrix::Bt2020);
+        assert_eq!(get_colorspace(1080, "BT2020NCL"), YuvStandardMatrix::Bt2020);
         assert_eq!(get_colorspace(480, "BT601"), YuvStandardMatrix::Bt601);
         assert_eq!(get_colorspace(480, ""), YuvStandardMatrix::Bt601);
         assert_eq!(get_colorspace(480, "BT709"), YuvStandardMatrix::Bt709);
@@ -238,5 +250,35 @@ mod tests {
         assert_eq!(get_colorrange(""), YuvRange::Limited);
         assert_eq!(get_colorrange("LIMITED"), YuvRange::Limited);
         assert_eq!(get_colorrange("unknown"), YuvRange::Limited);
+    }
+
+    #[test]
+    fn test_rgb_converters_use_frame_range() {
+        use ffmpeg::format::Pixel;
+        use ffmpeg::util::color::Range;
+
+        for format in [Pixel::YUV420P, Pixel::NV12] {
+            for (range, default, expected) in [
+                (Range::JPEG, YuvRange::Limited, 16),
+                (Range::MPEG, YuvRange::Full, 0),
+                (Range::Unspecified, YuvRange::Full, 16),
+                (Range::Unspecified, YuvRange::Limited, 0),
+            ] {
+                let mut frame = Video::new(format, 32, 2);
+                frame.set_color_range(range);
+                frame.data_mut(0).fill(16);
+                for plane in 1..frame.planes() {
+                    frame.data_mut(plane).fill(128);
+                }
+                let rgb = match format {
+                    Pixel::NV12 => {
+                        convert_nv12_to_ndarray_rgb24(frame, YuvStandardMatrix::Bt709, default)
+                    }
+                    _ => convert_yuv_to_ndarray_rgb24(frame, YuvStandardMatrix::Bt709, default),
+                }
+                .unwrap();
+                assert!(rgb.iter().all(|&value| value == expected));
+            }
+        }
     }
 }
