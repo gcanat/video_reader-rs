@@ -8,7 +8,12 @@ mod reader;
 mod utils;
 use convert::rgb2gray;
 use decoder::{DecoderConfig, OutOfBoundsMode, ResizeAlgo};
-use dlpark::prelude::*;
+use dlpark::{
+    ffi::{DLDataType, DLDevice, DLManagedTensor, DLManagedTensorVersioned},
+    metadata::Dynamic,
+    python::{export_dlpack, DlpackExporter, ExportRequest},
+    DlpackFlags, Managed, ManagedTensorBase,
+};
 use ffmpeg::log as ffmpeg_log;
 use ffmpeg_next as ffmpeg;
 use hwaccel::HardwareAccelerationDeviceType;
@@ -21,14 +26,13 @@ use pyo3::{
     types::{
         IntoPyDict, PyAnyMethods, PyDict, PyFloat, PyList, PyModule, PyModuleMethods, PySlice,
     },
-    Bound, FromPyObject, PyRef, PyRefMut, PyResult, Python,
+    Bound, FromPyObject, Py, PyAny, PyRef, PyRefMut, PyResult, Python,
 };
 use reader::VideoReader;
 use std::str::FromStr;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 use tokio::runtime::{self, Runtime};
-use utils::{DlPackTensor, VideoArray};
+use utils::{DlPackTensor, IntoTensorParts, VideoArray};
 
 static RUNTIME: Lazy<Runtime> = Lazy::new(|| {
     runtime::Builder::new_multi_thread()
@@ -42,84 +46,90 @@ static RUNTIME: Lazy<Runtime> = Lazy::new(|| {
 /// Exposes `__dlpack__()` and `__dlpack_device__()` so frameworks can consume it via
 /// `np.from_dlpack(t)`, `torch.from_dlpack(t)`, etc.
 ///
-/// The raw pointer is stored as `usize` so the struct is `Send` (required by `#[pyclass]`).
-/// Ownership is transferred on the first `__dlpack__()` call; subsequent calls raise an error.
+/// The buffer is handed over to the consumer on the first successful `__dlpack__()` call;
+/// subsequent calls raise an error.
 #[pyclass(name = "DlPackTensor")]
 struct PyDlPackTensor {
-    ptr: AtomicUsize,
+    /// `(data, shape)`, taken on export.
+    inner: Mutex<Option<(Vec<u8>, Vec<i64>)>>,
 }
 
-impl Drop for PyDlPackTensor {
-    fn drop(&mut self) {
-        let raw = self.ptr.swap(0, Ordering::SeqCst);
-        if raw != 0 {
-            unsafe { drop(SafeManagedTensorVersioned::from_raw(raw as *mut _)) };
-        }
+impl PyDlPackTensor {
+    /// Move the buffer out and wrap it in a fresh managed tensor.
+    fn export<M: ManagedTensorBase>(&self) -> PyResult<Managed<M>> {
+        let (data, shape) = self
+            .inner
+            .lock()
+            .map_err(|e| PyRuntimeError::new_err(format!("Lock error: {e}")))?
+            .take()
+            .ok_or_else(|| PyRuntimeError::new_err("DLPack tensor already consumed"))?;
+        // The Vec's heap buffer does not move when the Vec is moved into the Box.
+        let data_ptr = data.as_ptr().cast_mut().cast();
+        let mut initialized = Dynamic::compact(shape)
+            .initialize_as::<M>(Box::new(data))
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        initialized.set_data(data_ptr);
+        initialized.set_dtype(DLDataType::of::<u8>());
+        initialized.set_device(DLDevice::CPU);
+        // SAFETY: data/shape are owned by the context, device and dtype match the buffer,
+        // no flags are set (writable, not shared) and strides are explicit and compact.
+        Ok(unsafe { initialized.finish() })
+    }
+}
+
+impl DlpackExporter for PyDlPackTensor {
+    fn device(&self) -> DLDevice {
+        DLDevice::CPU
+    }
+
+    fn flags(&self) -> DlpackFlags {
+        DlpackFlags::empty()
+    }
+
+    fn prepare_export(&self, _py: Python<'_>, _request: &ExportRequest<'_>) -> PyResult<()> {
+        Ok(()) // CPU only, nothing to synchronize
+    }
+
+    fn export_legacy(&self, _py: Python<'_>) -> PyResult<Managed<DLManagedTensor>> {
+        self.export()
+    }
+
+    fn export_versioned(&self, _py: Python<'_>) -> PyResult<Managed<DLManagedTensorVersioned>> {
+        self.export()
     }
 }
 
 #[pymethods]
 impl PyDlPackTensor {
-    #[pyo3(signature = (stream=None))]
+    #[pyo3(signature = (*, stream=None, max_version=None, dl_device=None, copy=None))]
     fn __dlpack__<'py>(
         &self,
         py: Python<'py>,
-        stream: Option<pyo3::Py<pyo3::types::PyAny>>,
-    ) -> PyResult<Bound<'py, pyo3::types::PyAny>> {
-        let _ = stream;
-        let raw = self.ptr.swap(0, Ordering::SeqCst);
-        if raw == 0 {
-            return Err(PyRuntimeError::new_err("DLPack tensor already consumed"));
-        }
-        let tensor = unsafe { SafeManagedTensorVersioned::from_raw(raw as *mut _) };
-        to_dlpack_capsule(py, tensor)
+        stream: Option<Bound<'py, PyAny>>,
+        max_version: Option<(u32, u32)>,
+        dl_device: Option<(u32, i32)>,
+        copy: Option<bool>,
+    ) -> PyResult<Py<PyAny>> {
+        let request = ExportRequest::parse(stream.as_ref(), max_version, dl_device, copy)?;
+        export_dlpack(self, py, request)
     }
 
-    fn __dlpack_device__(&self) -> (u32, u32) {
+    fn __dlpack_device__(&self) -> (u32, i32) {
         (1, 0) // kDLCPU = 1, device_id = 0
     }
 }
 
-/// Build a PyCapsule named "dltensor_versioned" from an owned `SafeManagedTensorVersioned`.
-/// Used internally by `PyDlPackTensor.__dlpack__`.
-fn to_dlpack_capsule<'py>(
-    py: Python<'py>,
-    tensor: SafeManagedTensorVersioned,
-) -> PyResult<Bound<'py, pyo3::types::PyAny>> {
-    unsafe extern "C" fn capsule_deleter(capsule: *mut pyo3::ffi::PyObject) {
-        unsafe {
-            if pyo3::ffi::PyCapsule_IsValid(capsule, c"used_dltensor_versioned".as_ptr()) == 1 {
-                return;
-            }
-            let ptr = pyo3::ffi::PyCapsule_GetPointer(capsule, c"dltensor_versioned".as_ptr());
-            if ptr.is_null() {
-                pyo3::ffi::PyErr_WriteUnraisable(capsule);
-                return;
-            }
-            drop(SafeManagedTensorVersioned::from_raw(ptr as *mut _));
-        }
-    }
-    unsafe {
-        let raw = tensor.into_raw() as *mut std::ffi::c_void;
-        let capsule =
-            pyo3::ffi::PyCapsule_New(raw, c"dltensor_versioned".as_ptr(), Some(capsule_deleter));
-        Bound::from_owned_ptr_or_err(py, capsule)
-    }
-}
-
-/// Wrap a `SafeManagedTensorVersioned` into a `PyDlPackTensor` Python object.
+/// Wrap any tensor-like value into a `PyDlPackTensor` Python object.
 fn into_py_tensor<'py>(
     py: Python<'py>,
-    tensor: SafeManagedTensorVersioned,
-) -> PyResult<Bound<'py, pyo3::types::PyAny>> {
-    let raw = unsafe { tensor.into_raw() } as usize;
-    Ok(pyo3::Py::new(
+    tensor: impl IntoTensorParts,
+) -> PyResult<Bound<'py, PyAny>> {
+    Ok(Bound::new(
         py,
         PyDlPackTensor {
-            ptr: AtomicUsize::new(raw),
+            inner: Mutex::new(Some(tensor.into_parts())),
         },
     )?
-    .into_bound(py)
     .into_any())
 }
 
@@ -296,10 +306,7 @@ impl PyVideoReader {
     ) -> PyResult<Option<Bound<'py, pyo3::types::PyAny>>> {
         match slf.inner.lock() {
             Ok(mut vr) => match vr.next() {
-                Some(frame) => {
-                    let t = SafeManagedTensorVersioned::new(frame).unwrap();
-                    Ok(Some(into_py_tensor(py, t)?))
-                }
+                Some(frame) => Ok(Some(into_py_tensor(py, frame)?)),
                 None => Ok(None),
             },
             Err(e) => {
@@ -367,14 +374,12 @@ impl PyVideoReader {
                 }
             });
 
-            // Create DLPack tensor with GIL held (SafeManagedTensorVersioned is !Send)
             let arr = video_array?;
-            let tensor = if is_single_frame {
-                SafeManagedTensorVersioned::new(arr.first_frame()).unwrap()
+            if is_single_frame {
+                into_py_tensor(py, arr.first_frame())
             } else {
-                SafeManagedTensorVersioned::new(arr).unwrap()
-            };
-            into_py_tensor(py, tensor)
+                into_py_tensor(py, arr)
+            }
         } else {
             Err(PyRuntimeError::new_err(
                 "Could not find frame count".to_string(),
@@ -481,8 +486,7 @@ impl PyVideoReader {
                 .map_err(|e| PyRuntimeError::new_err(format!("Error: {e}"))),
             Err(e) => Err(PyRuntimeError::new_err(format!("Lock error: {e}"))),
         });
-        let t = SafeManagedTensorVersioned::new(video?).unwrap();
-        into_py_tensor(py, t)
+        into_py_tensor(py, video?)
     }
 
     #[pyo3(signature = (start_frame=None, end_frame=None, compression_factor=None))]
@@ -512,8 +516,7 @@ impl PyVideoReader {
             }
             Err(e) => Err(PyRuntimeError::new_err(format!("Lock error: {e}"))),
         });
-        let t = SafeManagedTensorVersioned::new(frames?).unwrap();
-        into_py_tensor(py, t)
+        into_py_tensor(py, frames?)
     }
 
     #[pyo3(signature = (start_frame=None, end_frame=None, compression_factor=None))]
@@ -543,8 +546,7 @@ impl PyVideoReader {
             }
             Err(e) => Err(PyRuntimeError::new_err(format!("Lock error: {e}"))),
         });
-        let t = SafeManagedTensorVersioned::new(gray?).unwrap();
-        into_py_tensor(py, t)
+        into_py_tensor(py, gray?)
     }
 
     #[pyo3(signature = (indices, with_fallback=None))]
@@ -588,8 +590,7 @@ impl PyVideoReader {
             }
             Err(e) => Err(PyRuntimeError::new_err(format!("Lock error: {e}"))),
         });
-        let t = SafeManagedTensorVersioned::new(batch?).unwrap();
-        into_py_tensor(py, t)
+        into_py_tensor(py, batch?)
     }
 
     /// Estimate decode cost for both methods.

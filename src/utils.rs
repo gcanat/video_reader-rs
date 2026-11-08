@@ -1,9 +1,6 @@
-use dlpark::ffi;
-use dlpark::traits::{RowMajorCompactLayout, TensorLike};
 use ffmpeg_next::format::Pixel as AvPixel;
 use rayon::iter::{IndexedParallelIterator, ParallelIterator};
 use rayon::slice::ParallelSliceMut;
-use std::ffi::c_void;
 
 /// A single RGB frame with flat row-major layout, shape (H, W, 3).
 #[derive(Clone)]
@@ -20,30 +17,6 @@ impl FrameTensor {
             height,
             width,
         }
-    }
-}
-
-impl TensorLike<RowMajorCompactLayout> for FrameTensor {
-    type Error = dlpark::Error;
-
-    fn data_ptr(&self) -> *mut c_void {
-        self.data.as_ptr() as *mut c_void
-    }
-
-    fn memory_layout(&self) -> RowMajorCompactLayout {
-        RowMajorCompactLayout::new(vec![self.height as i64, self.width as i64, 3])
-    }
-
-    fn device(&self) -> Result<ffi::Device, Self::Error> {
-        Ok(ffi::Device::CPU)
-    }
-
-    fn data_type(&self) -> Result<ffi::DataType, Self::Error> {
-        Ok(ffi::DataType::U8)
-    }
-
-    fn byte_offset(&self) -> u64 {
-        0
     }
 }
 
@@ -114,35 +87,6 @@ impl VideoArray {
     }
 }
 
-impl TensorLike<RowMajorCompactLayout> for VideoArray {
-    type Error = dlpark::Error;
-
-    fn data_ptr(&self) -> *mut c_void {
-        self.data.as_ptr() as *mut c_void
-    }
-
-    fn memory_layout(&self) -> RowMajorCompactLayout {
-        RowMajorCompactLayout::new(vec![
-            self.n as i64,
-            self.height as i64,
-            self.width as i64,
-            3,
-        ])
-    }
-
-    fn device(&self) -> Result<ffi::Device, Self::Error> {
-        Ok(ffi::Device::CPU)
-    }
-
-    fn data_type(&self) -> Result<ffi::DataType, Self::Error> {
-        Ok(ffi::DataType::U8)
-    }
-
-    fn byte_offset(&self) -> u64 {
-        0
-    }
-}
-
 /// Generic DLPack tensor with arbitrary shape (e.g. grayscale [N, H, W]).
 pub struct DlPackTensor {
     pub data: Vec<u8>,
@@ -155,27 +99,30 @@ impl DlPackTensor {
     }
 }
 
-impl TensorLike<RowMajorCompactLayout> for DlPackTensor {
-    type Error = dlpark::Error;
+/// Types that can be turned into a flat u8 buffer plus its row-major shape,
+/// ready to be exported as a DLPack tensor.
+pub trait IntoTensorParts {
+    fn into_parts(self) -> (Vec<u8>, Vec<i64>);
+}
 
-    fn data_ptr(&self) -> *mut c_void {
-        self.data.as_ptr() as *mut c_void
+impl IntoTensorParts for FrameTensor {
+    fn into_parts(self) -> (Vec<u8>, Vec<i64>) {
+        (self.data, vec![self.height as i64, self.width as i64, 3])
     }
+}
 
-    fn memory_layout(&self) -> RowMajorCompactLayout {
-        RowMajorCompactLayout::new(self.shape.clone())
+impl IntoTensorParts for VideoArray {
+    fn into_parts(self) -> (Vec<u8>, Vec<i64>) {
+        (
+            self.data,
+            vec![self.n as i64, self.height as i64, self.width as i64, 3],
+        )
     }
+}
 
-    fn device(&self) -> Result<ffi::Device, Self::Error> {
-        Ok(ffi::Device::CPU)
-    }
-
-    fn data_type(&self) -> Result<ffi::DataType, Self::Error> {
-        Ok(ffi::DataType::U8)
-    }
-
-    fn byte_offset(&self) -> u64 {
-        0
+impl IntoTensorParts for DlPackTensor {
+    fn into_parts(self) -> (Vec<u8>, Vec<i64>) {
+        (self.data, self.shape)
     }
 }
 
